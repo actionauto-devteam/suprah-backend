@@ -15,10 +15,31 @@ jest.mock('../src/services/email.service', () => ({
     sendAppointmentReminder: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Every new account must meet the password rules (validations/auth.validation.ts).
+const PASSWORD = 'Onboarding-Passw0rd!';
+
+// Brought up to date 2026-11-11: strong passwords, driver invitations through
+// the staff path are refused (drivers apply through the driver sign-up and the
+// Suprah AI team's review), and a staff invitation can only be accepted by the
+// account it was sent to, never by a driver account.
 describe('Streamlined Onboarding E2E', () => {
     jest.setTimeout(20000);
     let testOrg: any;
     let dealerAdmin: any;
+
+    const accessTokenFor = async (user: any) => {
+        const tokenService = (await import('../src/services/token.service')).default;
+        return tokenService.generateAccessToken(user as any);
+    };
+
+    const inviteFor = (email: string, role: string, tag: string) =>
+        Invitation.create({
+            email,
+            role,
+            organizationId: testOrg._id,
+            token: `test-token-${tag}-${Date.now()}`,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        });
 
     beforeAll(async () => {
         // Create a test organization
@@ -51,45 +72,17 @@ describe('Streamlined Onboarding E2E', () => {
     });
 
     describe('Email/Password Registration', () => {
-        it('should allow a driver to sign up via invite, skip approval and bind to org', async () => {
+        it('refuses signing up with a leftover driver invitation (drivers apply through the driver sign-up)', async () => {
             const email = 'driver.invited@test-onboarding.com';
+            const invite = await inviteFor(email, 'driver', 'email');
 
-            // 1. Create invitation
-            const invite = await Invitation.create({
-                email: email,
-                role: 'driver',
-                organizationId: testOrg._id,
-                token: 'test-token-email-' + Date.now(),
-                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-            });
-
-            // 2. Register with token
             const response = await request(app)
                 .post('/api/auth/register')
-                .send({
-                    name: 'Invited Driver Email',
-                    email: email,
-                    password: 'password12345',
-                    inviteToken: invite.token
-                });
+                .send({ name: 'Invited Driver Email', email, password: PASSWORD, inviteToken: invite.token });
 
-            expect(response.status).toBe(201);
-
-            // 3. Verify user state in DB
-            const user = await User.findOne({ email });
-            expect(user).toBeDefined();
-            expect(user?.role).toBe('driver');
-            expect(user?.isApproved).toBe(true);
-            expect(user?.organizationId?.toString()).toBe(testOrg._id.toString());
-            expect(user?.onboardingCompleted).toBe(true);
-
-            // 4. Verify no DriverRequest was created
-            const requestDoc = await DriverRequest.findOne({ driverUserId: user?._id });
-            expect(requestDoc).toBeNull();
-
-            // 5. Verify invite is accepted
-            const updatedInvite = await Invitation.findById(invite._id);
-            expect(updatedInvite?.status).toBe('accepted');
+            expect(response.status).toBe(410);
+            expect(await User.findOne({ email })).toBeNull();
+            expect((await Invitation.findById(invite._id))?.status).toBe('pending');
         });
 
         it('should require approval for drivers who sign up without an invite', async () => {
@@ -101,7 +94,7 @@ describe('Streamlined Onboarding E2E', () => {
                 .send({
                     name: 'Direct Driver Email',
                     email: email,
-                    password: 'password12345',
+                    password: PASSWORD,
                     role: 'driver'
                 });
 
@@ -120,10 +113,8 @@ describe('Streamlined Onboarding E2E', () => {
     });
 
     describe('Role Promotion (Existing Users)', () => {
-        it('should promote an existing customer to a driver when accepting an invite', async () => {
+        it('refuses accepting a leftover driver invitation and leaves the customer unchanged', async () => {
             const email = 'customer.to.driver@test-onboarding.com';
-
-            // 1. Create a customer
             const customer = await User.create({
                 email,
                 name: 'Existing Customer',
@@ -131,68 +122,75 @@ describe('Streamlined Onboarding E2E', () => {
                 onboardingCompleted: true,
                 emailVerified: true
             });
+            const invite = await inviteFor(email, 'driver', 'promote');
 
-            // 2. Create driver invite
-            const invite = await Invitation.create({
-                email,
-                role: 'driver',
-                organizationId: testOrg._id,
-                token: 'test-token-promote-' + Date.now(),
-                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-            });
-
-            // 3. Generate access token for the customer
-            const tokenService = (await import('../src/services/token.service')).default;
-            const accessToken = tokenService.generateAccessToken(customer as any);
-
-            // 4. Accept invite via API
             const response = await request(app)
                 .post('/api/invitations/accept')
-                .set('Authorization', `Bearer ${accessToken}`)
+                .set('Authorization', `Bearer ${await accessTokenFor(customer)}`)
                 .send({ token: invite.token });
 
-            expect(response.status).toBe(200);
+            expect(response.status).toBe(410);
+            const unchanged = await User.findById(customer._id);
+            expect(unchanged?.role).toBe('customer');
+            expect(unchanged?.organizationId).toBeFalsy();
+        });
 
-            // 5. Verify promotion
-            const updatedUser = await User.findById(customer._id);
-            expect(updatedUser?.role).toBe('driver');
-            expect(updatedUser?.isApproved).toBe(true);
-            expect(updatedUser?.organizationId?.toString()).toBe(testOrg._id.toString());
+        it('only the account the invitation was sent to can accept it', async () => {
+            const someoneElse = await User.create({
+                email: 'someone.else@test-onboarding.com',
+                name: 'Someone Else',
+                role: 'customer',
+                onboardingCompleted: true,
+                emailVerified: true
+            });
+            const invite = await inviteFor('invited.staff@test-onboarding.com', 'member', 'other-account');
 
-            // 6. Verify status endpoint (FIX VERIFICATION)
-            const statusResponse = await request(app)
-                .get('/api/driver-requests/my-status')
-                .set('Authorization', `Bearer ${accessToken}`);
+            const response = await request(app)
+                .post('/api/invitations/accept')
+                .set('Authorization', `Bearer ${await accessTokenFor(someoneElse)}`)
+                .send({ token: invite.token });
 
-            expect(statusResponse.status).toBe(200);
-            expect(statusResponse.body.data.status).toBe('approved');
+            expect(response.status).toBe(403);
+            expect(response.body.message).toContain('invited.staff@test-onboarding.com');
+            const unchanged = await User.findById(someoneElse._id);
+            expect(unchanged?.role).toBe('customer');
+            expect((await Invitation.findById(invite._id))?.status).toBe('pending');
+        });
+
+        it('a driver account with the invited email cannot become dealership staff', async () => {
+            const email = 'driver.to.staff@test-onboarding.com';
+            const driver = await User.create({
+                email,
+                name: 'Existing Driver',
+                role: 'driver',
+                onboardingCompleted: true,
+                emailVerified: true,
+                isApproved: false
+            });
+            const invite = await inviteFor(email, 'member', 'driver-account');
+
+            const response = await request(app)
+                .post('/api/invitations/accept')
+                .set('Authorization', `Bearer ${await accessTokenFor(driver)}`)
+                .send({ token: invite.token });
+
+            expect(response.status).toBe(409);
+            const unchanged = await User.findById(driver._id);
+            expect(unchanged?.role).toBe('driver');
+            expect(unchanged?.organizationId).toBeFalsy();
         });
 
         it('should NOT affect dealership admin invitations (No Regression)', async () => {
             const email = 'new.admin@test-onboarding.com';
+            const invite = await inviteFor(email, 'admin', 'admin');
 
-            // 1. Create admin invite
-            const invite = await Invitation.create({
-                email,
-                role: 'admin',
-                organizationId: testOrg._id,
-                token: 'test-token-admin-' + Date.now(),
-                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-            });
-
-            // 2. Register
             const response = await request(app)
                 .post('/api/auth/register')
-                .send({
-                    name: 'New Admin',
-                    email,
-                    password: 'password12345',
-                    inviteToken: invite.token
-                });
+                .send({ name: 'New Admin', email, password: PASSWORD, inviteToken: invite.token });
 
             expect(response.status).toBe(201);
 
-            // 3. Verify role is admin (not driver/employee)
+            // Verify role is admin (not driver/employee)
             const user = await User.findOne({ email });
             expect(user?.role).toBe('admin');
             expect(user?.organizationRole).toBe('admin');
@@ -200,34 +198,19 @@ describe('Streamlined Onboarding E2E', () => {
 
         it('should promote customer to employee for member invites (No Regression)', async () => {
             const email = 'customer.to.emp@test-onboarding.com';
-
-            // 1. Create customer
             const customer = await User.create({
                 email,
                 role: 'customer',
                 name: 'CtoE User'
             });
+            const invite = await inviteFor(email, 'member', 'member');
 
-            // 2. Create member invite
-            const invite = await Invitation.create({
-                email,
-                role: 'member',
-                organizationId: testOrg._id,
-                token: 'test-token-member-' + Date.now(),
-                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-            });
-
-            // 3. Generate token
-            const tokenService = (await import('../src/services/token.service')).default;
-            const accessToken = tokenService.generateAccessToken(customer as any);
-
-            // 4. Accept
-            await request(app)
+            const response = await request(app)
                 .post('/api/invitations/accept')
-                .set('Authorization', `Bearer ${accessToken}`)
+                .set('Authorization', `Bearer ${await accessTokenFor(customer)}`)
                 .send({ token: invite.token });
 
-            // 5. Verify
+            expect(response.status).toBe(200);
             const updatedUser = await User.findById(customer._id);
             expect(updatedUser?.role).toBe('employee'); // member invite promotes customer to employee
             expect(updatedUser?.organizationRole).toBe('member');
@@ -235,29 +218,13 @@ describe('Streamlined Onboarding E2E', () => {
 
         it('should allow a new user to sign up as a member via bulk invite', async () => {
             const email = 'new.member@test-onboarding.com';
+            const invite = await inviteFor(email, 'member', 'bulk-mem');
 
-            // 1. Create member invite
-            const invite = await Invitation.create({
-                email,
-                role: 'member',
-                organizationId: testOrg._id,
-                token: 'test-token-bulk-mem-' + Date.now(),
-                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-            });
-
-            // 2. Register
             const response = await request(app)
                 .post('/api/auth/register')
-                .send({
-                    name: 'New Member',
-                    email,
-                    password: 'password12345',
-                    inviteToken: invite.token
-                });
+                .send({ name: 'New Member', email, password: PASSWORD, inviteToken: invite.token });
 
             expect(response.status).toBe(201);
-
-            // 3. Verify
             const user = await User.findOne({ email });
             expect(user?.role).toBe('employee');
             expect(user?.organizationRole).toBe('member');
@@ -266,29 +233,13 @@ describe('Streamlined Onboarding E2E', () => {
 
         it('should allow a new user to sign up as an admin via bulk invite', async () => {
             const email = 'new.bulk.admin@test-onboarding.com';
+            const invite = await inviteFor(email, 'admin', 'bulk-adm');
 
-            // 1. Create admin invite
-            const invite = await Invitation.create({
-                email,
-                role: 'admin',
-                organizationId: testOrg._id,
-                token: 'test-token-bulk-adm-' + Date.now(),
-                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-            });
-
-            // 2. Register
             const response = await request(app)
                 .post('/api/auth/register')
-                .send({
-                    name: 'New Bulk Admin',
-                    email,
-                    password: 'password12345',
-                    inviteToken: invite.token
-                });
+                .send({ name: 'New Bulk Admin', email, password: PASSWORD, inviteToken: invite.token });
 
             expect(response.status).toBe(201);
-
-            // 3. Verify
             const user = await User.findOne({ email });
             expect(user?.role).toBe('admin');
             expect(user?.organizationRole).toBe('admin');

@@ -12,6 +12,7 @@ import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { invalidateUserCache } from '../utils/cache.util';
+import { INVITATION_MESSAGES, invitationAcceptanceProblem } from '../utils/invitationAcceptance';
 
 export const createInvitation = asyncHandler(async (req: Request, res: Response) => {
     const { email, role } = req.body;
@@ -139,7 +140,7 @@ export const validateInvitation = asyncHandler(async (req: Request, res: Respons
 
     if (!invite) {
         console.log('[InvitationController] Token not found in DB');
-        throw new ApiError(404, 'Invitation not found');
+        throw new ApiError(404, INVITATION_MESSAGES.notFound);
     }
 
     console.log('[InvitationController] Invite found. Status:', invite.status);
@@ -150,7 +151,7 @@ export const validateInvitation = asyncHandler(async (req: Request, res: Respons
             invite.status = 'expired';
             await invite.save();
         }
-        throw new ApiError(400, 'Invitation has expired');
+        throw new ApiError(400, INVITATION_MESSAGES.expired);
     }
 
     // 3. Check Status
@@ -172,7 +173,7 @@ export const validateInvitation = asyncHandler(async (req: Request, res: Respons
     }
 
     if (invite.status !== 'pending') {
-        throw new ApiError(400, `Invitation is ${invite.status}`);
+        throw new ApiError(400, invite.status === 'expired' ? INVITATION_MESSAGES.expired : INVITATION_MESSAGES.cancelled);
     }
 
     // Format response for frontend
@@ -214,13 +215,13 @@ export const acceptInvitation = asyncHandler(async (req: Request, res: Response)
                 }
             });
         }
-        throw new ApiError(404, 'Invitation not found or already used');
+        throw new ApiError(404, INVITATION_MESSAGES.used);
     }
 
     if (invite.expiresAt < new Date()) {
         invite.status = 'expired';
         await invite.save();
-        throw new ApiError(400, 'Invitation has expired');
+        throw new ApiError(400, INVITATION_MESSAGES.expired);
     }
 
     // Driver invitations through this path are no longer supported (a stray
@@ -231,13 +232,11 @@ export const acceptInvitation = asyncHandler(async (req: Request, res: Response)
         throw new ApiError(410, 'Driver invitations are no longer supported. Please use the driver application form instead.');
     }
 
-    // Verify email matches (optional security measure, but good practice)
-    // If the logged in user's email doesn't match the invite string, strictly speaking we should block or warn.
-    // But often people invite personal emails and accept on work emails. 
-    // For now, we will allow it but maybe log it.
-    if (user.email.toLowerCase() !== invite.email.toLowerCase()) {
-        console.warn(`Warning: User ${user.email} accepted invite for ${invite.email}`);
-    }
+    // Only the account the invitation was sent to may accept it, and never a
+    // driver account (2026-11-11). Before, a different email was allowed and
+    // only logged, so any signed-in account holding the link could join.
+    const problem = invitationAcceptanceProblem({ inviteEmail: invite.email, userEmail: user.email, userRole: user.role });
+    if (problem) throw new ApiError(problem.status, problem.message);
 
     // Update user
     user.organizationId = invite.organizationId as any;
