@@ -10,6 +10,7 @@ import { generateADF, ADFLeadData } from '../utils/adfGenerator';
 import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
 import { LEAD_SOURCE } from '../constants/leadSource';
 import { emitToOrg } from '../utils/socketEmitter';
+import type { FinanceApplicationExtras } from '../utils/financeApplicationDetails';
 import { triggerAiReplyForNewInquiry } from './communication.service';
 import logger from '../utils/logger';
 import { ApiError } from '../utils/ApiError';
@@ -32,7 +33,10 @@ export interface InquiryDTO {
 
 export interface FinanceAppDTO {
   organizationId: string;
-  customerId: string;
+  /** Empty when staff filled it in for someone without a customer account. */
+  customerId?: string;
+  /** The staff member who filled it in, if any. */
+  submittedBy?: string;
   vehicleId: string;
   personalInfo: {
     firstName: string;
@@ -55,6 +59,10 @@ export interface FinanceAppDTO {
     incomeFrequency: 'Yearly' | 'Monthly' | 'Weekly';
     yearsAtJob: string;
   };
+  // The form's other answers, already cleaned (utils/financeApplicationDetails).
+  residence?: FinanceApplicationExtras['residence'];
+  reference?: FinanceApplicationExtras['reference'];
+  tradeIn?: FinanceApplicationExtras['tradeIn'];
 }
 
 class LeadService {
@@ -285,9 +293,13 @@ class LeadService {
       const app = new FinanceApplication({
         organizationId: dto.organizationId,
         customerId: dto.customerId,
+        submittedBy: dto.submittedBy,
         vehicleId: dto.vehicleId,
         personalInfo: dto.personalInfo,
         employmentInfo: dto.employmentInfo,
+        residence: dto.residence,
+        reference: dto.reference,
+        tradeIn: dto.tradeIn,
         status: 'New',
         appliedAt: new Date(),
       });
