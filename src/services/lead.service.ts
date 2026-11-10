@@ -320,7 +320,11 @@ class LeadService {
     } catch (error) {
       // Rollback on any failure
       await session.abortTransaction();
-      logger.error({ error, dto }, 'Finance application transaction failed and rolled back');
+      // Never log the application itself: it holds the SSN, date of birth and income (2026-11-09).
+      logger.error(
+        { error, organizationId: dto.organizationId, vehicleId: dto.vehicleId, customerId: dto.customerId },
+        'Finance application transaction failed and rolled back',
+      );
       throw error;
     } finally {
       session.endSession();
