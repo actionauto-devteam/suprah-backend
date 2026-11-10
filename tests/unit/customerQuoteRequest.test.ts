@@ -247,6 +247,24 @@ describe('POST /api/quote-requests', () => {
     expect(mockQuoteCreate.mock.calls[0][0].phone).toBe('(385) 555-0199');
   });
 
+  it('uses the phone typed on the form, so a customer can give a different number', async () => {
+    const result = await send({ ...formBody, phone: '(385) 555-0199' });
+    expect(result.status).toBe(201);
+    expect(mockQuoteCreate.mock.calls[0][0].phone).toBe('(385) 555-0199');
+    // The CRM lead is still matched on the account's own details.
+    expect(mockFindQuoteLeadLink).toHaveBeenCalledWith(
+      'dealership-that-owns-the-car',
+      { email: 'maria@example.com', phone: '801-555-0100' },
+      expect.anything(),
+    );
+  });
+
+  it("uses the account's phone when the form's is empty", async () => {
+    const result = await send({ ...formBody, phone: '' });
+    expect(result.status).toBe(201);
+    expect(mockQuoteCreate.mock.calls[0][0].phone).toBe('801-555-0100');
+  });
+
   it('refuses typed text that is too long for a quote card, saying which field', async () => {
     const cases: Array<[Record<string, unknown>, string]> = [
       [{ lastName: 'x'.repeat(81) }, 'Keep the last name under 80 characters, then send your request again.'],
