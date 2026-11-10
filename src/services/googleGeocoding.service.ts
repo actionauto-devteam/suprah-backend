@@ -167,61 +167,8 @@ export async function lookupAreaName(lat: number, lng: number): Promise<string |
   });
 }
 
-export type StreetAddress = {
-  address: string;
-  city: string;
-  state: string;
-  zip: string;
-  country: string;
-  placeId: string | null;
-};
-
-/** The street address of the most specific result (a building or street address when there is one). */
-export function streetAddressFromResults(results: any[]): StreetAddress | null {
-  const best =
-    results.find((result) => (result?.types ?? []).some((type: string) => ["street_address", "premise", "subpremise"].includes(type))) ??
-    results.find((result) => component(result, "route")) ??
-    results[0];
-  if (!best) return null;
-  const street = [component(best, "street_number"), component(best, "route", "short_name")].filter(Boolean).join(" ");
-  const city =
-    component(best, "locality") ||
-    component(best, "postal_town") ||
-    component(best, "sublocality") ||
-    component(best, "administrative_area_level_3") ||
-    component(best, "neighborhood");
-  return {
-    address: street || String(best.formatted_address ?? "").split(",")[0]?.trim() || "",
-    city,
-    state: component(best, "administrative_area_level_1", "short_name"),
-    zip: component(best, "postal_code"),
-    country: component(best, "country", "short_name"),
-    placeId: typeof best.place_id === "string" ? best.place_id : null,
-  };
-}
-
-const streetAddresses = new ExpiringCache<StreetAddress | null>();
-
-/**
- * The street address at an exact spot, for the map picker on Create Load.
- * Not rounded like the area name: the street number needs the exact spot.
- */
-export async function lookupAddressAt(lat: number, lng: number): Promise<StreetAddress | null> {
-  if (!validLatLng(lat, lng) || !isGoogleGeocodingConfigured()) return null;
-  const cacheKey = `${lat.toFixed(5)},${lng.toFixed(5)}`;
-  const cached = streetAddresses.get(cacheKey);
-  if (cached) {
-    health.cacheHits += 1;
-    return cached.value;
-  }
-  return once(`street:${cacheKey}`, async () => {
-    const results = await geocode({ latlng: cacheKey });
-    if (!results) return null;
-    const address = streetAddressFromResults(results);
-    streetAddresses.set(cacheKey, address);
-    return address;
-  });
-}
+// The street address at a picked spot (Create Load's map picker) comes from
+// Amazon Location since 2026-11-11: services/amazonPlaces.service.
 
 /** The position of a US place ("Dallas, TX", an address, a ZIP code). */
 export async function lookupPlace(query: string): Promise<LatLng | null> {
@@ -252,7 +199,7 @@ export function googleGeocodingHealthSnapshot() {
     configured: isGoogleGeocodingConfigured(),
     lookups: health.lookups,
     cacheHits: health.cacheHits,
-    cachedEntries: placeNames.size + places.size + streetAddresses.size,
+    cachedEntries: placeNames.size + places.size,
     lastSuccessAt: health.lastSuccessAt,
     lastFailure: health.lastFailure,
   };
@@ -261,7 +208,6 @@ export function googleGeocodingHealthSnapshot() {
 export function resetGoogleGeocodingForTests() {
   placeNames.clear();
   places.clear();
-  streetAddresses.clear();
   inFlight.clear();
   health.lookups = 0;
   health.cacheHits = 0;

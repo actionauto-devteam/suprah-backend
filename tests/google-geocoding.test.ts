@@ -22,7 +22,6 @@ import {
   googleGeocodingHealthSnapshot,
   lookupAreaName,
   resetGoogleGeocodingForTests,
-  streetAddressFromResults,
 } from '../src/services/googleGeocoding.service';
 
 const DOMAIN = '@geocoding-test.com';
@@ -126,23 +125,6 @@ beforeEach(() => {
   fakeGoogle.calls = [];
 });
 
-const streetResults = [
-  {
-    types: ['street_address'],
-    place_id: 'simulated-street-place',
-    formatted_address: '1600 Glenarm Pl, Denver, CO 80202, USA',
-    address_components: [
-      { long_name: '1600', short_name: '1600', types: ['street_number'] },
-      { long_name: 'Glenarm Place', short_name: 'Glenarm Pl', types: ['route'] },
-      { long_name: 'Denver', short_name: 'Denver', types: ['locality', 'political'] },
-      { long_name: 'Colorado', short_name: 'CO', types: ['administrative_area_level_1', 'political'] },
-      { long_name: '80202', short_name: '80202', types: ['postal_code'] },
-      { long_name: 'United States', short_name: 'US', types: ['country', 'political'] },
-    ],
-    geometry: { location: { lat: 39.7453, lng: -104.9892 } },
-  },
-];
-
 afterAll(async () => {
   delete process.env.GOOGLE_MAPS_SERVER_API_KEY;
   jest.restoreAllMocks();
@@ -154,22 +136,12 @@ afterAll(async () => {
 });
 
 describe('Google Geocoding for map labels (simulated Google)', () => {
-  it('reads a street address for the Create Load map picker', () => {
-    expect(streetAddressFromResults([{ types: ['locality'], address_components: [] }, ...streetResults])).toEqual({
-      address: '1600 Glenarm Pl', city: 'Denver', state: 'CO', zip: '80202', country: 'US', placeId: 'simulated-street-place',
-    });
-    expect(streetAddressFromResults([])).toBeNull();
-  });
-
-  it('looks up the address at a picked spot for staff only, at full precision', async () => {
-    fakeGoogle.results = streetResults;
+  it('no longer uses Google for the address at a picked spot (Amazon Location since 2026-11-11), staff only', async () => {
     const staff = tokenService.generateAccessToken(orgAdmin);
     const found = await request(app).get('/api/loads/address-at').query({ lat: 39.745312, lng: -104.989187 }).set(auth(staff)).expect(200);
-    expect(found.body.data).toEqual({
-      address: { address: '1600 Glenarm Pl', city: 'Denver', state: 'CO', zip: '80202', country: 'US', placeId: 'simulated-street-place' },
-      available: true,
-    });
-    expect(fakeGoogle.calls[0].searchParams.get('latlng')).toBe('39.74531,-104.98919');
+    // Amazon places are off unless AMAZON_LOCATION_PLACES_ENABLED=true.
+    expect(found.body.data).toEqual({ address: null, available: false });
+    expect(fakeGoogle.calls).toHaveLength(0);
 
     await request(app).get('/api/loads/address-at').query({ lat: 'north', lng: 0 }).set(auth(staff)).expect(400);
     await request(app).get('/api/loads/address-at').query({ lat: 39.7, lng: -104.9 }).set(auth(driverToken)).expect(403);

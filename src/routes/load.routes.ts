@@ -41,8 +41,11 @@ const staffOnly = authorize(["super_admin", "admin", "employee"]);
 router.get("/vin/:vin", staffOnly, loadController.lookupVin);
 router.get("/vehicles", staffOnly, loadController.getInventoryVehicles);
 router.post("/calculate-rate", staffOnly, loadController.calculateLoadRate);
-// Create Load's map picker: the street address at the picked spot (Google Geocoding, server key).
+// Create Load's map picker: the street address at the picked spot, the search
+// box and a searched place's details (Amazon Location, 2026-11-11).
 router.get("/address-at", staffOnly, mapPlaceLookupLimiter, mapPlacesController.getAddressAtPosition);
+router.get("/place-search", staffOnly, mapPlaceLookupLimiter, mapPlacesController.searchPlacesForLoad);
+router.get("/place-details", staffOnly, mapPlaceLookupLimiter, mapPlacesController.getPlaceForLoad);
 
 router.get("/stats", staffOnly, loadController.getLoadStats);
 // Pickup windows and delivery deadlines for the Suprah Calendar. Declared before /:id.
