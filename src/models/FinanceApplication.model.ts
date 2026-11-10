@@ -3,7 +3,10 @@ import { encrypt, decrypt } from '../utils/crypto';
 
 export interface IFinanceApplication extends Document {
   organizationId: mongoose.Types.ObjectId;
-  customerId: mongoose.Types.ObjectId;
+  /** The applicant's customer account; empty when staff filled it in for someone without one. */
+  customerId?: mongoose.Types.ObjectId;
+  /** The staff member who filled it in for the customer, if any. */
+  submittedBy?: mongoose.Types.ObjectId;
   vehicleId: mongoose.Types.ObjectId;
 
   personalInfo: {
@@ -19,6 +22,10 @@ export interface IFinanceApplication extends Document {
       state: string;
       zip: string;
     };
+    applicationType?: 'individual' | 'joint';
+    maritalStatus?: 'single' | 'married' | 'divorced' | 'widowed';
+    /** Encrypted like the SSN. */
+    driversLicenseNumber?: string;
   };
 
   employmentInfo: {
@@ -27,7 +34,18 @@ export interface IFinanceApplication extends Document {
     income: string;
     incomeFrequency: 'Yearly' | 'Monthly' | 'Weekly';
     yearsAtJob: string;
+    workPhone?: string;
+    payFrequency?: 'annually' | 'monthly' | 'bi-weekly' | 'weekly';
   };
+
+  residence?: {
+    housingStatus?: 'own' | 'rent' | 'other';
+    monthlyPayment?: number;
+    yearsAtAddress?: number;
+    monthsAtAddress?: number;
+  };
+  reference?: { name?: string; relationship?: string; phone?: string };
+  tradeIn?: { hasTradeIn: boolean; year?: string; make?: string; model?: string; mileage?: string };
 
   status: 'New' | 'Reviewing' | 'Approved' | 'Rejected' | 'Withdrawn';
   notes?: string;
@@ -36,6 +54,7 @@ export interface IFinanceApplication extends Document {
 
   getDecryptedSsn(): string;
   getDecryptedIncome(): string;
+  getDecryptedLicenseNumber(): string;
 }
 
 const FinanceApplicationSchema: Schema = new Schema(
@@ -46,11 +65,15 @@ const FinanceApplicationSchema: Schema = new Schema(
       required: true,
       index: true,
     },
+    // Staff can fill it in for a customer with no account yet (2026-11-10).
     customerId: {
       type: Schema.Types.ObjectId,
       ref: 'User',
-      required: true,
       index: true,
+    },
+    submittedBy: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
     },
     vehicleId: {
       type: Schema.Types.ObjectId,
@@ -71,6 +94,9 @@ const FinanceApplicationSchema: Schema = new Schema(
         state: String,
         zip: String,
       },
+      applicationType: { type: String, enum: ['individual', 'joint'] },
+      maritalStatus: { type: String, enum: ['single', 'married', 'divorced', 'widowed'] },
+      driversLicenseNumber: String,
     },
     employmentInfo: {
       employer: String,
@@ -82,6 +108,26 @@ const FinanceApplicationSchema: Schema = new Schema(
         default: 'Yearly',
       },
       yearsAtJob: String,
+      workPhone: String,
+      payFrequency: { type: String, enum: ['annually', 'monthly', 'bi-weekly', 'weekly'] },
+    },
+    residence: {
+      housingStatus: { type: String, enum: ['own', 'rent', 'other'] },
+      monthlyPayment: Number,
+      yearsAtAddress: Number,
+      monthsAtAddress: Number,
+    },
+    reference: {
+      name: String,
+      relationship: String,
+      phone: String,
+    },
+    tradeIn: {
+      hasTradeIn: Boolean,
+      year: String,
+      make: String,
+      model: String,
+      mileage: String,
     },
     status: {
       type: String,
@@ -114,6 +160,17 @@ FinanceApplicationSchema.pre('save', function (next) {
     }
   }
 
+  // The driver's license number is encrypted like the SSN (2026-11-10).
+  if (doc.personalInfo?.driversLicenseNumber && doc.isModified('personalInfo.driversLicenseNumber')) {
+    try {
+      if (!doc.personalInfo.driversLicenseNumber.includes(':')) {
+        doc.personalInfo.driversLicenseNumber = encrypt(doc.personalInfo.driversLicenseNumber);
+      }
+    } catch (err) {
+      return next(err as any);
+    }
+  }
+
   if (doc.isModified('employmentInfo.income')) {
     try {
       if (!doc.employmentInfo.income.includes(':')) {
@@ -133,6 +190,10 @@ FinanceApplicationSchema.methods.getDecryptedSsn = function () {
 
 FinanceApplicationSchema.methods.getDecryptedIncome = function () {
   return decrypt(this.employmentInfo.income);
+};
+
+FinanceApplicationSchema.methods.getDecryptedLicenseNumber = function () {
+  return this.personalInfo?.driversLicenseNumber ? decrypt(this.personalInfo.driversLicenseNumber) : '';
 };
 
 FinanceApplicationSchema.index({ organizationId: 1, appliedAt: -1 });
