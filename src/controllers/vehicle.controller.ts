@@ -160,7 +160,8 @@ const normalizePublicVehicle = (vehicle: any) => ({
   comments: vehicle.comments || "",
 });
 
-const normalizeCustomerVehicle = (
+// Also used by the Wishlist, so saved cars look the same as in Shop.
+export const normalizeCustomerVehicle = (
   vehicle: any,
   member?: { discountPercent: number; tierName: string; tierSlug: string },
 ) => {
