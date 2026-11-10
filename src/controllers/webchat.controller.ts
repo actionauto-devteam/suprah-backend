@@ -39,7 +39,7 @@ import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from '.
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
   canSendAiReply, assertAiReplyAllowed, claimAiGeneration, claimAiReplyDispatch } from '../services/aiHumanAttention.service';
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode } from '../services/aiOperatingMode.service';
-import { resolveDealerName as resolveTrustedDealerName } from '../services/communication.service';
+import { resolveDealerName as resolveTrustedDealerName, continueWebchatByText, WebchatTextResult } from '../services/communication.service';
 import { WEBCHAT_ACK_ACTOR_ID, buildWebchatUnavailableAck } from '../utils/webchatAck';
 import AiAgentLog from '../models/AiAgentLog.model';
 import {
@@ -469,11 +469,11 @@ export const getPublicConfig = asyncHandler(async (req: Request, res: Response) 
 
   if (!orgId) {
     return res.json(
-      new ApiResponse(200, { enabled: false, greeting: '', withinHours: true }, 'Chat is not available for this dealership'),
+      new ApiResponse(200, { enabled: false, greeting: '', withinHours: true, textMode: false }, 'Chat is not available for this dealership'),
     );
   }
 
-  const organization = await Organization.findById(orgId).select('metadata').lean();
+  const organization = await Organization.findById(orgId).select('name metadata').lean();
   const metadata = (organization?.metadata as any) || {};
 
   res.json(
@@ -483,11 +483,18 @@ export const getPublicConfig = asyncHandler(async (req: Request, res: Response) 
         enabled: isOrgWebchatEnabled(metadata),
         greeting: metadata.webchatGreeting || '',
         withinHours: isWithinSendingHours(),
+        textMode: metadata.webchatTextMode === true,
+        dealershipName: String((organization as any)?.name || '').trim(),
       },
       'Chat configuration',
     ),
   );
 });
+
+function maskPhone(phone: string): string {
+  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+  return digits.length === 10 ? `(***) ***-${digits.slice(-4)}` : 'your phone';
+}
 
 interface WebchatConversationInput {
   orgId: any;
@@ -745,6 +752,7 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
 
   const { vehicleId, orgKey, name, email, phone, message, pageUrl } = req.body || {};
   const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 80);
+  const wantsText = req.body?.continueByText === true;
 
   const visitorName = String(name || '').trim().slice(0, 80);
   const visitorEmail = String(email || '').trim().toLowerCase().slice(0, 120);
@@ -832,6 +840,9 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
               sessionId: String(existingSession._id),
               token: replayToken,
               messages: priorMessages.map(serializeForVisitor),
+              continuedByText: Boolean(existingSession.continuedBySmsAt),
+              textedTo: existingSession.continuedBySmsAt ? maskPhone(existingSession.visitorPhone || '') : null,
+              textNotice: null,
             },
             'Chat started',
           ),
@@ -871,7 +882,26 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
 
   logger.info({ leadId: lead._id, sessionId: session._id }, 'Website chat started');
 
-  triggerWebchatAiReply(session, check, firstMessage).catch(() => undefined);
+  const textMode = wantsText && Boolean(visitorPhone) && (organizationDoc?.metadata as any)?.webchatTextMode === true;
+  const byText = textMode
+    ? await continueWebchatByText({
+        orgId,
+        sessionId: session._id,
+        lead,
+        phone: visitorPhone,
+        firstName: visitorName.split(/\s+/)[0],
+        message: firstMessage,
+      }).catch((err): WebchatTextResult => {
+        logger.warn({ err, sessionId: session._id }, '[Webchat] Could not continue by text');
+        return { ok: false, reason: 'send_failed' };
+      })
+    : null;
+
+  if (byText?.ok) {
+    await finishAiAttentionCheck(check).catch(() => undefined);
+  } else {
+    triggerWebchatAiReply(session, check, firstMessage).catch(() => undefined);
+  }
 
   res.status(201).json(
     new ApiResponse(
@@ -880,6 +910,9 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
         sessionId: String(session._id),
         token,
         messages: [serializeForVisitor(chatMessage)],
+        continuedByText: Boolean(byText?.ok),
+        textedTo: byText?.ok ? maskPhone(byText.phone) : null,
+        textNotice: textMode && !byText?.ok ? "We couldn't text that number, so let's keep chatting here." : null,
       },
       'Chat started',
     ),
@@ -888,6 +921,9 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
 
 export const sendVisitorMessage = asyncHandler(async (req: Request, res: Response) => {
   const session = await loadSession(req);
+  if (session.continuedBySmsAt) {
+    throw new ApiError(409, `We're texting you at ${maskPhone(session.visitorPhone || '')}. Please reply to our text to keep chatting.`);
+  }
   const body = validateMessageBody(req.body?.message);
 
   const recentCount = await WebChatMessage.countDocuments({
@@ -930,7 +966,12 @@ export const syncVisitorMessages = asyncHandler(async (req: Request, res: Respon
   );
 
   res.json(
-    new ApiResponse(200, { messages: messages.map(serializeForVisitor), staffTyping }, 'Messages synced'),
+    new ApiResponse(200, {
+      messages: messages.map(serializeForVisitor),
+      staffTyping,
+      continuedByText: Boolean(session.continuedBySmsAt),
+      textedTo: session.continuedBySmsAt ? maskPhone(session.visitorPhone || '') : null,
+    }, 'Messages synced'),
   );
 });
 

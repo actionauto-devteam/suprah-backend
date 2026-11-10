@@ -1631,6 +1631,13 @@ export const updateLead = async (req: Request, res: Response) => {
 
     logger.info({ leadId: lead._id, status, userId, ...(isRemovingDoNotContact ? { fromStatus, doNotContactRemoved: true } : {}) }, 'Lead status updated');
 
+    if (status === 'Sold' && fromStatus !== 'Sold') {
+      const purchaseActor = { userId: String(userId), name: staffAuditActor(user).name || 'Team member' };
+      void import('../services/customerPurchase.service')
+        .then(({ recordPurchaseFromSoldLeadSafely }) => recordPurchaseFromSoldLeadSafely(String(orgId), lead._id, purchaseActor))
+        .catch(() => undefined);
+    }
+
     if (isClosing && isRemovingDoNotContact) {
       logger.info({ leadId: lead._id }, 'Closed-ticket email skipped: the lead was marked Do Not Contact');
     } else if (isClosing) {
