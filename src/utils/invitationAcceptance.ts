@@ -34,7 +34,7 @@ export function invitationAcceptanceProblem(input: {
     return {
       status: 409,
       message:
-        "This email already has a driver account, and driver accounts can't also be dealership staff. Ask the person who invited you to send the invitation to a different email.",
+        "This email is registered as a driver account, so it can't be used for a staff account. Ask the person who invited you to send the invitation to a different email.",
     }
   }
   return null
@@ -59,11 +59,32 @@ export function staffInviteTargetProblem(input: {
     return {
       kind: "driver",
       status: 409,
-      message: "This email belongs to a driver account. Driver accounts can't also be dealership staff, so use a different email for this staff member.",
+      message: "This email is registered as a driver account, so it can't be used for a staff account. Ask them for a different email for their staff account.",
     }
   }
   if (TEAM_ROLES.has(String(account.role)) && String(account.organizationId ?? "") === String(input.organizationId ?? "")) {
     return { kind: "team", status: 400, message: "This person is already on your team." }
   }
   return null
+}
+
+/**
+ * What kind of account the invited email already has, so the invitation can
+ * say what accepting will do before anyone presses a button (2026-11-11).
+ * Only the kind is shared, never names or details, and only with someone
+ * holding the invitation link (sent to that email) or the admin who sent it.
+ */
+export type InvitedAccountStatus = "none" | "customer" | "driver" | "team" | "other-dealership-staff"
+
+export function invitedAccountStatus(
+  account: { role?: unknown; organizationId?: unknown } | null | undefined,
+  organizationId: unknown,
+): InvitedAccountStatus {
+  if (!account) return "none"
+  if (account.role === "driver") return "driver"
+  if (account.role === "customer") return "customer"
+  if (TEAM_ROLES.has(String(account.role))) {
+    return String(account.organizationId ?? "") === String(organizationId ?? "") ? "team" : "other-dealership-staff"
+  }
+  return "none"
 }

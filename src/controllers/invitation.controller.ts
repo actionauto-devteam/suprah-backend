@@ -12,7 +12,7 @@ import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { invalidateUserCache } from '../utils/cache.util';
-import { INVITATION_MESSAGES, invitationAcceptanceProblem, staffInviteTargetProblem } from '../utils/invitationAcceptance';
+import { INVITATION_MESSAGES, invitationAcceptanceProblem, invitedAccountStatus, staffInviteTargetProblem } from '../utils/invitationAcceptance';
 
 export const createInvitation = asyncHandler(async (req: Request, res: Response) => {
     const { email, role } = req.body;
@@ -124,10 +124,16 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
         // But in production we might want to throw error or return a warning
     }
 
+    // Tells the admin when accepting will change an existing account (2026-11-11).
+    const existingAccount = invitedAccountStatus(existingUser, organizationId);
+
     res.status(201).json({
         success: true,
         message: 'Invitation sent',
-        data: { token } // Return token for debug/manual sharing
+        data: {
+            token, // Return token for debug/manual sharing
+            existingAccount: existingAccount === 'customer' || existingAccount === 'other-dealership-staff' ? existingAccount : null,
+        }
     });
 });
 
@@ -157,6 +163,11 @@ export const validateInvitation = asyncHandler(async (req: Request, res: Respons
         throw new ApiError(400, INVITATION_MESSAGES.expired);
     }
 
+    // What kind of account the invited email already has, so the page can say
+    // what accepting will do before anyone presses a button (2026-11-11).
+    const invitedAccount = await User.findOne({ email: String(invite.email).trim().toLowerCase() }).select('role organizationId').lean();
+    const accountStatus = invitedAccountStatus(invitedAccount, (invite.organizationId as any)?._id ?? invite.organizationId);
+
     // 3. Check Status
     if (invite.status === 'accepted') {
         // Return a successful validation even if accepted, but flag it
@@ -170,7 +181,8 @@ export const validateInvitation = asyncHandler(async (req: Request, res: Respons
                 role: invite.role,
                 _id: invite._id,
                 token: invite.token,
-                isAlreadyAccepted: true
+                isAlreadyAccepted: true,
+                accountStatus,
             },
         });
     }
@@ -186,7 +198,8 @@ export const validateInvitation = asyncHandler(async (req: Request, res: Respons
         email: invite.email,
         role: invite.role,
         _id: invite._id,
-        token: invite.token
+        token: invite.token,
+        accountStatus,
     };
 
     res.status(200).json({
