@@ -12,6 +12,11 @@ import DealershipInquiry from '../models/DealershipInquiry.model';
 import config from '../config';
 import { strongPasswordProblems } from '../validations/auth.validation';
 import { SUPPORT_EMAIL } from '../utils/userMessages';
+import { customerWelcomeEmail, driverApplicationEmail, EMAIL_ALREADY_HAS_ACCOUNT } from '../utils/inviteSignupEmails';
+
+/** The sign-in page, with the email filled in and where to go afterwards (2026-11-11). */
+const signInLink = (email: string, next: string) =>
+  `${config.frontendUrl}/sign-in?email=${encodeURIComponent(email)}&redirect_url=${encodeURIComponent(next)}`;
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const BULK_TEMP_PASSWORD = 'customersaccount';
@@ -270,7 +275,6 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   if (new Date() > token.expiresAt) throw new ApiError(410, 'This invite link has expired');
 
   const accountType = resolveAccountType(token.accountType);
-  const label = accountTypeLabel(accountType);
 
 
   const normalizedEmail = email.trim().toLowerCase();
@@ -306,7 +310,8 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   }
 
   const existing = await User.findOne({ email: normalizedEmail });
-  if (existing) throw new ApiError(400, 'An account with this email already exists');
+  // Says what to do next instead of a dead end (2026-11-11).
+  if (existing) throw new ApiError(409, EMAIL_ALREADY_HAS_ACCOUNT);
 
   if (accountType === 'driver') {
     // Drivers are a shared platform-wide pool — no org to assign, and the
@@ -332,19 +337,15 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     await authService.ensureDriverRequest(user as any);
 
     try {
+      // Says what's next: sign in and finish the application (2026-11-11).
       await emailService.sendEmail({
         to: normalizedEmail,
-        // Same Suprah AI wording as the invite email and the pending page (2026-11-09).
-        subject: 'Driver application submitted',
-        text: `Hello ${name.trim()},\n\nYour driver application has been sent to the Suprah AI team for review. We'll email you once it's approved.\n\nIf you have questions, contact Suprah AI support at ${SUPPORT_EMAIL}.\n\nEmail: ${normalizedEmail}`,
-        html: `
-          <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
-            <h2 style="color:#111">Driver application submitted</h2>
-            <p>Hello <strong>${name.trim()}</strong>,</p>
-            <p>Your driver application has been sent to the Suprah AI team for review. We'll email you once it's approved.</p>
-            <p style="color:#555;font-size:13px">If you have questions, contact Suprah AI support at ${SUPPORT_EMAIL}.</p>
-          </div>
-        `,
+        ...driverApplicationEmail({
+          name,
+          email: normalizedEmail,
+          signInUrl: signInLink(normalizedEmail, '/driver/pending'),
+          supportEmail: SUPPORT_EMAIL,
+        }),
       });
     } catch {
       // Email failure is non-fatal — account is already created
@@ -376,24 +377,11 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     await token.save();
   }
 
-  // Send confirmation email
+  // Send confirmation email. It never repeats the password (2026-11-11).
   try {
     await emailService.sendEmail({
       to: normalizedEmail,
-      subject: `Welcome to ${org.name} - account created`,
-      text: `Hello ${name.trim()},\n\nYour ${label} account at ${org.name} has been successfully created.\n\nEmail: ${normalizedEmail}\nPassword: ${password}\n\nYou can now log in at: ${config.frontendUrl}/sign-in`,
-      html: `
-        <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
-          <h2 style="color:#111">Welcome to ${org.name}!</h2>
-          <p>Hello <strong>${name.trim()}</strong>,</p>
-          <p>Your ${label} account has been successfully created.</p>
-          <table style="border-collapse:collapse;margin:16px 0">
-            <tr><td style="padding:4px 12px 4px 0;color:#555">Email</td><td style="padding:4px 0"><strong>${normalizedEmail}</strong></td></tr>
-            <tr><td style="padding:4px 12px 4px 0;color:#555">Password</td><td style="padding:4px 0"><strong>${password}</strong></td></tr>
-          </table>
-          <a href="${config.frontendUrl}/sign-in" style="display:inline-block;margin-top:8px;padding:10px 20px;background:#10b981;color:#fff;text-decoration:none;border-radius:6px">Log in now</a>
-        </div>
-      `,
+      ...customerWelcomeEmail({ name, email: normalizedEmail, orgName: org.name, signInUrl: signInLink(normalizedEmail, '/customer') }),
       organizationId: token.organizationId?.toString(),
     });
   } catch {
