@@ -86,6 +86,13 @@ class AuthService {
                     throw new ApiError(403, 'This invitation was sent to a different email address.');
                 }
 
+                // A leftover driver invitation would make an approved driver
+                // that skips the Suprah AI team's review; accepting one is
+                // already refused, so signing up with one is too (2026-11-11).
+                if (invite.role === 'driver') {
+                    throw new ApiError(410, 'Driver invitations are no longer supported. Please use the driver application form instead.');
+                }
+
                 roleToAssign = invite.role;
                 orgId = invite.organizationId;
                 orgRole = invite.role;
