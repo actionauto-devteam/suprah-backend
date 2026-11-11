@@ -249,6 +249,35 @@ class AuthService {
     }
 
     /**
+     * Emails a new account its first 6-digit code (2026-11-11): invite-link
+     * sign-ups confirm their email the same way as every other sign-up.
+     * Returns false when the email couldn't be sent; Resend Code on the code
+     * page sends it again.
+     */
+    async sendSignupCode(user: IUser, intro: string): Promise<boolean> {
+        const { otp, minutesLeft } = currentOrNewOtp(user);
+        await user.save();
+        try {
+            const dealerName = await this.resolveDealerName(user.organizationId);
+            await emailService.sendEmail({
+                to: user.email,
+                subject: `Verify Your ${dealerName} Account`,
+                ...codeEmail({
+                    brandName: dealerName,
+                    heading: 'Verify your email',
+                    intro,
+                    code: otp,
+                    minutesLeft,
+                }),
+            });
+            return true;
+        } catch (emailErr) {
+            console.error('[AuthService] Failed to send a sign-up code email:', emailErr);
+            return false;
+        }
+    }
+
+    /**
      * Register a new dealership (User + Organization). No longer reachable
      * publicly — self-serve dealership signup is closed. This method now
      * exists only as the shared implementation behind the superadmin-issued

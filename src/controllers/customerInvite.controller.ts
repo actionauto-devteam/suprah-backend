@@ -11,12 +11,7 @@ import authService from '../services/auth.service';
 import DealershipInquiry from '../models/DealershipInquiry.model';
 import config from '../config';
 import { strongPasswordProblems } from '../validations/auth.validation';
-import { SUPPORT_EMAIL } from '../utils/userMessages';
-import { customerWelcomeEmail, driverApplicationEmail, EMAIL_ALREADY_HAS_ACCOUNT } from '../utils/inviteSignupEmails';
-
-/** The sign-in page, with the email filled in and where to go afterwards (2026-11-11). */
-const signInLink = (email: string, next: string) =>
-  `${config.frontendUrl}/sign-in?email=${encodeURIComponent(email)}&redirect_url=${encodeURIComponent(next)}`;
+import { EMAIL_ALREADY_HAS_ACCOUNT, inviteSignupCodeIntro, inviteSignupDetailsProblem } from '../utils/inviteSignup';
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const BULK_TEMP_PASSWORD = 'customersaccount';
@@ -260,9 +255,15 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   const { shortCode } = req.params;
   const { name, email, password, dealershipName, dealershipSlug } = req.body;
 
-  if (!name?.trim() || !email?.trim() || !password) {
+  if (
+    typeof name !== 'string' || typeof email !== 'string' || typeof password !== 'string' ||
+    !name.trim() || !email.trim() || !password
+  ) {
     throw new ApiError(400, 'Enter your name, email address and a password, then try again.');
   }
+  // A real email address and a reasonable name (2026-11-11).
+  const detailsProblem = inviteSignupDetailsProblem({ name, email });
+  if (detailsProblem) throw new ApiError(400, detailsProblem);
   // Every new account uses the same password rules (sign-up, invite links, reset).
   const passwordProblems = strongPasswordProblems(String(password));
   if (passwordProblems.length > 0) {
@@ -316,13 +317,14 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   if (accountType === 'driver') {
     // Drivers are a shared platform-wide pool — no org to assign, and the
     // account stays pending until the SUPRAH.AI super_admin approves it,
-    // exactly like the normal /sign-up/driver flow.
+    // exactly like the normal /sign-up/driver flow. The email is confirmed
+    // with a code first, like every other sign-up (2026-11-11).
     const user = await User.create({
       name: name.trim(),
       email: normalizedEmail,
       password,
       role: 'driver',
-      emailVerified: true,
+      emailVerified: false,
       isApproved: false,
       onboardingCompleted: true,
     });
@@ -336,22 +338,14 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
 
     await authService.ensureDriverRequest(user as any);
 
-    try {
-      // Says what's next: sign in and finish the application (2026-11-11).
-      await emailService.sendEmail({
-        to: normalizedEmail,
-        ...driverApplicationEmail({
-          name,
-          email: normalizedEmail,
-          signInUrl: signInLink(normalizedEmail, '/driver/pending'),
-          supportEmail: SUPPORT_EMAIL,
-        }),
-      });
-    } catch {
-      // Email failure is non-fatal — account is already created
-    }
+    // The 6-digit code; the next page is where it's entered (2026-11-11).
+    const emailSent = await authService.sendSignupCode(user, inviteSignupCodeIntro('driver'));
 
-    res.status(201).json(new ApiResponse(201, { email: normalizedEmail, accountType, pending: true }, 'Driver application submitted'));
+    res.status(201).json(new ApiResponse(
+      201,
+      { email: normalizedEmail, accountType, pending: true, verifyEmail: true, emailSent },
+      'Driver account created. Enter the code we emailed you to confirm your email.',
+    ));
     return;
   }
 
@@ -364,7 +358,8 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     password,
     role: accountType,
     organizationId: token.organizationId,
-    emailVerified: true,
+    // Confirmed with a code first, like every other sign-up (2026-11-11).
+    emailVerified: false,
     isApproved: true,
     onboardingCompleted: true,
   });
@@ -377,18 +372,14 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     await token.save();
   }
 
-  // Send confirmation email. It never repeats the password (2026-11-11).
-  try {
-    await emailService.sendEmail({
-      to: normalizedEmail,
-      ...customerWelcomeEmail({ name, email: normalizedEmail, orgName: org.name, signInUrl: signInLink(normalizedEmail, '/customer') }),
-      organizationId: token.organizationId?.toString(),
-    });
-  } catch {
-    // Email failure is non-fatal — account is already created
-  }
+  // The 6-digit code; the next page is where it's entered (2026-11-11).
+  const emailSent = await authService.sendSignupCode(user, inviteSignupCodeIntro('customer', org.name));
 
-  res.status(201).json(new ApiResponse(201, { email: normalizedEmail, accountType }, 'Account created successfully'));
+  res.status(201).json(new ApiResponse(
+    201,
+    { email: normalizedEmail, accountType, verifyEmail: true, emailSent },
+    'Account created. Enter the code we emailed you to confirm your email.',
+  ));
 });
 
 /**
