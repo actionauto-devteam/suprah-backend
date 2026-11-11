@@ -2,7 +2,7 @@
  * Who may accept a staff invitation (2026-11-11): only the account it was
  * sent to, and never a driver account.
  */
-import { INVITATION_MESSAGES, invitationAcceptanceProblem } from '../../src/utils/invitationAcceptance';
+import { INVITATION_MESSAGES, invitationAcceptanceProblem, staffInviteTargetProblem } from '../../src/utils/invitationAcceptance';
 
 describe('accepting a staff invitation', () => {
   it('the invited account can accept it (any letter case or spaces in the email)', () => {
@@ -27,6 +27,32 @@ describe('accepting a staff invitation', () => {
   it('the invitation messages say what to do next', () => {
     for (const message of Object.values(INVITATION_MESSAGES)) {
       expect(message).toMatch(/ask the person who invited you|sign in/i);
+    }
+  });
+});
+
+describe('sending a staff invitation', () => {
+  const ORG = '64b0000000000000000000aa';
+
+  it("a new email or a customer (even this dealership's own) can be invited", () => {
+    expect(staffInviteTargetProblem({ existing: null, organizationId: ORG })).toBeNull();
+    expect(staffInviteTargetProblem({ existing: { role: 'customer', organizationId: ORG }, organizationId: ORG })).toBeNull();
+    expect(staffInviteTargetProblem({ existing: { role: 'employee', organizationId: 'another-dealership' }, organizationId: ORG })).toBeNull();
+  });
+
+  it('a driver account gets a plain reason instead of "already a member"', () => {
+    for (const organizationId of [ORG, undefined]) {
+      expect(staffInviteTargetProblem({ existing: { role: 'driver', organizationId }, organizationId: ORG })).toEqual({
+        kind: 'driver',
+        status: 409,
+        message: "This email belongs to a driver account. Driver accounts can't also be dealership staff, so use a different email for this staff member.",
+      });
+    }
+  });
+
+  it('someone already on this team is told so', () => {
+    for (const role of ['employee', 'admin']) {
+      expect(staffInviteTargetProblem({ existing: { role, organizationId: ORG }, organizationId: ORG })).toMatchObject({ kind: 'team', message: 'This person is already on your team.' });
     }
   });
 });

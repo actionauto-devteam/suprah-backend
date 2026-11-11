@@ -12,7 +12,7 @@ import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { invalidateUserCache } from '../utils/cache.util';
-import { INVITATION_MESSAGES, invitationAcceptanceProblem } from '../utils/invitationAcceptance';
+import { INVITATION_MESSAGES, invitationAcceptanceProblem, staffInviteTargetProblem } from '../utils/invitationAcceptance';
 
 export const createInvitation = asyncHandler(async (req: Request, res: Response) => {
     const { email, role } = req.body;
@@ -35,9 +35,12 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
         throw new ApiError(401, 'User context missing');
     }
 
-    const existingUser = await User.findOne({ email, organizationId });
-    if (existingUser) {
-        throw new ApiError(400, 'User is already a member of this organization');
+    // A driver account can't be staff, and a customer of this dealership can
+    // become staff; only someone already on the team is turned away (2026-11-11).
+    const existingUser = await User.findOne({ email: String(email ?? '').trim().toLowerCase() }).select('role organizationId').lean();
+    const targetProblem = staffInviteTargetProblem({ existing: existingUser, organizationId });
+    if (targetProblem) {
+        throw new ApiError(targetProblem.status, targetProblem.message);
     }
 
     const existingInvite = await Invitation.findOne({
@@ -355,6 +358,8 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
         sent: [] as string[],
         failed: [] as string[],
         alreadyMember: [] as string[],
+        // Emails of driver accounts, which can't be staff (2026-11-11).
+        driverAccounts: [] as string[],
     };
 
     const inviterName = req.user?.name || 'Someone';
@@ -366,9 +371,10 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
                 continue;
             }
 
-            const existingUser = await User.findOne({ email, organizationId });
-            if (existingUser) {
-                results.alreadyMember.push(email);
+            const existingUser = await User.findOne({ email: String(email).trim().toLowerCase() }).select('role organizationId').lean();
+            const targetProblem = staffInviteTargetProblem({ existing: existingUser, organizationId });
+            if (targetProblem) {
+                (targetProblem.kind === 'driver' ? results.driverAccounts : results.alreadyMember).push(email);
                 continue;
             }
 

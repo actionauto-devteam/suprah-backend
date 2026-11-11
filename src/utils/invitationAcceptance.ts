@@ -39,3 +39,31 @@ export function invitationAcceptanceProblem(input: {
   }
   return null
 }
+
+const TEAM_ROLES = new Set(["employee", "admin", "super_admin"])
+
+/**
+ * Whether this email can be invited as staff (2026-11-11). Before, any account
+ * linked to the dealership counted as "already a member", which wrongly
+ * stopped the dealership's own customers (they can become staff) and called a
+ * driver account a member. A driver can't be staff; someone already on this
+ * dealership's team doesn't need an invitation.
+ */
+export function staffInviteTargetProblem(input: {
+  existing: { role?: unknown; organizationId?: unknown } | null | undefined
+  organizationId: unknown
+}): (AcceptanceProblem & { kind: "driver" | "team" }) | null {
+  const account = input.existing
+  if (!account) return null
+  if (account.role === "driver") {
+    return {
+      kind: "driver",
+      status: 409,
+      message: "This email belongs to a driver account. Driver accounts can't also be dealership staff, so use a different email for this staff member.",
+    }
+  }
+  if (TEAM_ROLES.has(String(account.role)) && String(account.organizationId ?? "") === String(input.organizationId ?? "")) {
+    return { kind: "team", status: 400, message: "This person is already on your team." }
+  }
+  return null
+}
