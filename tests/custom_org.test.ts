@@ -95,11 +95,13 @@ describe('Custom Organization System', () => {
             .expect(201);
 
         expect(res.body.success).toBe(true);
-        expect(res.body.data.token).toBeDefined();
-        inviteToken = res.body.data.token;
+        // The invitation link only goes to the invited email, not back to the admin (2026-11-11).
+        expect(res.body.data.token).toBeUndefined();
 
         // Verify Invitation in DB
-        const invite = await Invitation.findOne({ token: inviteToken });
+        const invite = await Invitation.findOne({ email: userB_email, organizationId: createdOrgId, status: 'pending' });
+        inviteToken = invite?.token ?? '';
+        expect(inviteToken).not.toBe('');
         expect(invite?.email).toBe(userB_email);
         expect(invite?.organizationId.toString()).toBe(createdOrgId);
     });

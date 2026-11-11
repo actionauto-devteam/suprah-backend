@@ -12,10 +12,20 @@ import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { invalidateUserCache } from '../utils/cache.util';
-import { INVITATION_MESSAGES, invitationAcceptanceProblem, invitedAccountStatus, staffInviteTargetProblem } from '../utils/invitationAcceptance';
+import {
+    INVITATION_MESSAGES,
+    INVITE_INPUT_MESSAGES,
+    adminInviteNote,
+    invitationAcceptanceProblem,
+    invitedAccountStatus,
+    inviteEmailOrNull,
+    staffInviteRoleOrNull,
+    staffInviteTargetProblem,
+} from '../utils/invitationAcceptance';
+import { staffInviteEmail } from '../utils/staffInviteEmail';
 
 export const createInvitation = asyncHandler(async (req: Request, res: Response) => {
-    const { email, role } = req.body;
+    const { email: rawEmail, role } = req.body;
     const organizationId = req.orgId;
 
     if (!organizationId) {
@@ -29,6 +39,16 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
 
     if (role === 'driver') {
         throw new ApiError(400, 'Drivers cannot be invited through team invitations. Driver approval goes through the platform driver-request queue.');
+    }
+
+    // Only a real email address and the Member or Admin role (2026-11-11).
+    const inviteRole = staffInviteRoleOrNull(role);
+    if (!inviteRole) {
+        throw new ApiError(400, INVITE_INPUT_MESSAGES.role);
+    }
+    const email = inviteEmailOrNull(rawEmail);
+    if (!email) {
+        throw new ApiError(400, INVITE_INPUT_MESSAGES.email);
     }
 
     if (!req.user) {
@@ -60,7 +80,7 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
             email,
             organizationId,
             inviterId: req.user._id,
-            role: role || 'member',
+            role: inviteRole,
             token,
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
             status: 'pending',
@@ -71,11 +91,11 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
             organizationId: organizationId.toString(),
             type: 'other',
             title: 'Team Invitation Sent',
-            description: `Sent invitation to ${email} as ${role || 'member'}`,
-            metadata: { email, role }
+            description: `Sent invitation to ${email} as ${inviteRole}`,
+            metadata: { email, role: inviteRole }
         });
 
-        logger.info({ inviterId: req.user._id, invitedEmail: email }, 'Team invitation sent');
+        logger.info({ inviterId: req.user._id, organizationId }, 'Team invitation sent');
 
         // Notify the inviter that invitation was sent
         const org = await Organization.findById(organizationId);
@@ -92,7 +112,7 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
             message,
             metadata: {
                 invitedEmail: email,
-                role: role || 'member',
+                role: inviteRole,
                 organizationName: org?.name,
             },
         });
@@ -101,38 +121,30 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
     const org = await Organization.findById(organizationId);
     const inviteLink = `${config.frontendUrl}/accept-invite?token=${token}`;
 
-    console.log(inviteLink);
-
+    let emailSent = true;
     try {
+        // Names are escaped, and the link only goes to the invited email,
+        // never to the logs (2026-11-11).
         await emailService.sendEmail({
             to: email,
-            subject: `You've been invited to join ${org?.name} on Suprah.AI`,
-            text: `You have been invited to join the organization ${org?.name}. Click here to accept: ${inviteLink}`,
-            html: `
-                <div style="font-family: Arial, sans-serif; padding: 20px;">
-                    <h2>You've been invited!</h2>
-                    <p><strong>${req.user?.name}</strong> has invited you to join the organization <strong>${org?.name}</strong>.</p>
-                    <p>Click the button below to accept the invitation:</p>
-                    <a href="${inviteLink}" style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">Accept Invitation</a>
-                    <p style="margin-top: 20px; font-size: 12px; color: #666;">If you did not expect this invitation, you can ignore this email.</p>
-                </div>
-            `
+            ...staffInviteEmail({ inviterName: req.user?.name, organizationName: org?.name, inviteLink }),
         });
     } catch (error) {
-        console.error('Failed to send invitation email:', error);
-        // We ensure the invite is created even if email fails, so they can manually share the link if needed
-        // But in production we might want to throw error or return a warning
+        logger.warn({ err: error }, 'Failed to send a staff invitation email');
+        // The invitation is saved either way. The admin is told the email
+        // didn't go out, and inviting again resends the same invitation.
+        emailSent = false;
     }
-
-    // Tells the admin when accepting will change an existing account (2026-11-11).
-    const existingAccount = invitedAccountStatus(existingUser, organizationId);
 
     res.status(201).json({
         success: true,
         message: 'Invitation sent',
         data: {
-            token, // Return token for debug/manual sharing
-            existingAccount: existingAccount === 'customer' || existingAccount === 'other-dealership-staff' ? existingAccount : null,
+            // The invitation link only goes to the invited email, not back to
+            // the admin, and the admin only hears when the email is one of the
+            // dealership's own customers (2026-11-11).
+            existingAccount: adminInviteNote(existingUser, organizationId),
+            emailSent,
         }
     });
 });
@@ -140,19 +152,14 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
 export const validateInvitation = asyncHandler(async (req: Request, res: Response) => {
     const { token } = req.params;
 
-    console.log('[InvitationController] Validating token:', token);
-
     // 1. Find by token only (ignore status for now)
     const invite = await Invitation.findOne({ token })
         .populate('organizationId', 'name slug logoUrl')
         .populate('inviterId', 'name email avatar');
 
     if (!invite) {
-        console.log('[InvitationController] Token not found in DB');
         throw new ApiError(404, INVITATION_MESSAGES.notFound);
     }
-
-    console.log('[InvitationController] Invite found. Status:', invite.status);
 
     // 2. Check Expiration
     if (invite.expiresAt < new Date()) {
@@ -354,6 +361,12 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
         throw new ApiError(400, 'Drivers cannot be invited through team invitations. Driver approval goes through the platform driver-request queue.');
     }
 
+    // Only the Member or Admin role (2026-11-11).
+    const inviteRole = staffInviteRoleOrNull(role);
+    if (!inviteRole) {
+        throw new ApiError(400, INVITE_INPUT_MESSAGES.role);
+    }
+
     if (!emails || !Array.isArray(emails)) {
         throw new ApiError(400, 'An array of emails is required');
     }
@@ -377,10 +390,11 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
 
     const inviterName = req.user?.name || 'Someone';
 
-    for (const email of emails) {
+    for (const rawEmail of emails) {
+        const email = inviteEmailOrNull(rawEmail);
         try {
-            if (!email || !email.includes('@')) {
-                results.failed.push(email);
+            if (!email) {
+                results.failed.push(String(rawEmail ?? ''));
                 continue;
             }
 
@@ -402,7 +416,7 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
                     email,
                     organizationId,
                     inviterId: req.user?._id,
-                    role: role || 'member',
+                    role: inviteRole,
                     token,
                     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
                     status: 'pending',
@@ -413,22 +427,14 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
 
             await emailService.sendEmail({
                 to: email,
-                subject: `You've been invited to join ${org.name} on Suprah.AI`,
-                text: `You have been invited to join the organization ${org.name}. Accept here: ${inviteLink}`,
-                html: `
-                    <div style="font-family: Arial, sans-serif; padding: 20px;">
-                        <h2>You've been invited!</h2>
-                        <p><strong>${inviterName}</strong> has invited you to join the organization <strong>${org.name}</strong>.</p>
-                        <p>Click the button below to accept the invitation:</p>
-                        <a href="${inviteLink}" style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">Accept Invitation</a>
-                    </div>
-                `
+                ...staffInviteEmail({ inviterName, organizationName: org.name, inviteLink }),
             });
 
             results.sent.push(email);
         } catch (error) {
-            console.error(`Failed to process invitation for ${email}:`, error);
-            results.failed.push(email);
+            // No email address in the logs (2026-11-11).
+            logger.warn({ err: error }, 'Failed to send a bulk staff invitation');
+            results.failed.push(email ?? String(rawEmail ?? ''));
         }
     }
 

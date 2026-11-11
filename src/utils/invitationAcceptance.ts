@@ -72,7 +72,8 @@ export function staffInviteTargetProblem(input: {
  * What kind of account the invited email already has, so the invitation can
  * say what accepting will do before anyone presses a button (2026-11-11).
  * Only the kind is shared, never names or details, and only with someone
- * holding the invitation link (sent to that email) or the admin who sent it.
+ * holding the invitation link (sent to that email). The admin who sent it only
+ * hears about the dealership's own customers (see adminInviteNote).
  */
 export type InvitedAccountStatus = "none" | "customer" | "driver" | "team" | "other-dealership-staff"
 
@@ -87,4 +88,43 @@ export function invitedAccountStatus(
     return String(account.organizationId ?? "") === String(organizationId ?? "") ? "team" : "other-dealership-staff"
   }
   return "none"
+}
+
+/*
+ * What an admin may send (2026-11-11): a real email address and the Member or
+ * Admin role. Anything else gets a plain message instead of being saved as
+ * typed or failing later.
+ */
+export const INVITE_INPUT_MESSAGES = {
+  email: "Enter a valid email address, like name@example.com.",
+  role: "Choose Member or Admin for the invitation.",
+} as const
+
+const EMAIL_SHAPE = /^[^\s@<>()[\]",;:\\]+@[^\s@<>()[\]",;:\\]+\.[^\s@<>()[\]",;:\\]+$/
+
+/** The email in lowercase without spaces, or null when it isn't an email address. */
+export function inviteEmailOrNull(value: unknown): string | null {
+  if (typeof value !== "string") return null
+  const email = value.trim().toLowerCase()
+  return email.length <= 254 && EMAIL_SHAPE.test(email) ? email : null
+}
+
+/** Member when no role is sent, Member or Admin when chosen, otherwise null. */
+export function staffInviteRoleOrNull(value: unknown): "member" | "admin" | null {
+  if (value === undefined || value === null || value === "") return "member"
+  return value === "member" || value === "admin" ? value : null
+}
+
+/**
+ * What the admin is told after sending (2026-11-11): only that the email is
+ * one of the dealership's own customers, whose account becomes staff when they
+ * accept. Nothing about accounts at other dealerships, so sending invitations
+ * can't be used to find out who has an account somewhere else.
+ */
+export function adminInviteNote(
+  account: { role?: unknown; organizationId?: unknown } | null | undefined,
+  organizationId: unknown,
+): "customer" | null {
+  if (!account || account.role !== "customer") return null
+  return String(account.organizationId ?? "") === String(organizationId ?? "") ? "customer" : null
 }

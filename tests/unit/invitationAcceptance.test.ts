@@ -2,7 +2,16 @@
  * Who may accept a staff invitation (2026-11-11): only the account it was
  * sent to, and never a driver account.
  */
-import { INVITATION_MESSAGES, invitationAcceptanceProblem, invitedAccountStatus, staffInviteTargetProblem } from '../../src/utils/invitationAcceptance';
+import {
+  INVITATION_MESSAGES,
+  INVITE_INPUT_MESSAGES,
+  adminInviteNote,
+  invitationAcceptanceProblem,
+  invitedAccountStatus,
+  inviteEmailOrNull,
+  staffInviteRoleOrNull,
+  staffInviteTargetProblem,
+} from '../../src/utils/invitationAcceptance';
 
 describe('accepting a staff invitation', () => {
   it('the invited account can accept it (any letter case or spaces in the email)', () => {
@@ -65,5 +74,49 @@ describe("what kind of account the invited email already has", () => {
     expect(invitedAccountStatus({ role: "driver", organizationId: ORG }, ORG)).toBe("driver");
     expect(invitedAccountStatus({ role: "employee", organizationId: ORG }, ORG)).toBe("team");
     expect(invitedAccountStatus({ role: "admin", organizationId: "another-dealership" }, ORG)).toBe("other-dealership-staff");
+  });
+});
+
+describe('what an admin may send (2026-11-11)', () => {
+  it('a real email address, saved in lowercase without spaces', () => {
+    expect(inviteEmailOrNull(' Maria.Lopez@Dealer.com ')).toBe('maria.lopez@dealer.com');
+    expect(inviteEmailOrNull('sam+sales@dealer.co.uk')).toBe('sam+sales@dealer.co.uk');
+  });
+
+  it('anything that is not an email address is refused', () => {
+    for (const value of ['', 'maria', 'maria@dealer', '@dealer.com', 'maria@@dealer.com', 'maria lopez@dealer.com', '<b>x</b>@dealer.com', 'a@b.com, c@d.com', `${'a'.repeat(250)}@x.com`, null, undefined, 42, ['a@b.com'], { $ne: null }]) {
+      expect(inviteEmailOrNull(value)).toBeNull();
+    }
+  });
+
+  it('Member when no role is sent, Member or Admin when chosen, nothing else', () => {
+    expect(staffInviteRoleOrNull(undefined)).toBe('member');
+    expect(staffInviteRoleOrNull('')).toBe('member');
+    expect(staffInviteRoleOrNull('member')).toBe('member');
+    expect(staffInviteRoleOrNull('admin')).toBe('admin');
+    for (const value of ['customer', 'driver', 'super_admin', 'employee', 'Admin', ['admin'], { role: 'admin' }]) {
+      expect(staffInviteRoleOrNull(value)).toBeNull();
+    }
+  });
+
+  it('the messages say what to fix', () => {
+    expect(INVITE_INPUT_MESSAGES.email).toBe('Enter a valid email address, like name@example.com.');
+    expect(INVITE_INPUT_MESSAGES.role).toBe('Choose Member or Admin for the invitation.');
+  });
+});
+
+describe("what the admin hears after sending (2026-11-11)", () => {
+  const ORG = "64b0000000000000000000aa";
+
+  it("only that the email is one of the dealership's own customers", () => {
+    expect(adminInviteNote({ role: "customer", organizationId: ORG }, ORG)).toBe("customer");
+  });
+
+  it("nothing about accounts anywhere else, or a new email", () => {
+    expect(adminInviteNote(null, ORG)).toBeNull();
+    expect(adminInviteNote({ role: "customer", organizationId: "another-dealership" }, ORG)).toBeNull();
+    expect(adminInviteNote({ role: "customer" }, ORG)).toBeNull();
+    expect(adminInviteNote({ role: "employee", organizationId: "another-dealership" }, ORG)).toBeNull();
+    expect(adminInviteNote({ role: "admin", organizationId: "another-dealership" }, ORG)).toBeNull();
   });
 });
