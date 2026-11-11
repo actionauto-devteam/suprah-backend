@@ -39,6 +39,11 @@ import { BucketType, storageService } from "./storage.service";
  *
  * It's refused, with a plain reason, while a load or a shipment is in
  * progress, or while a driver still has a payout that isn't paid.
+ *
+ * Before deleting, the person must acknowledge that Suprah AI keeps some
+ * transaction records and personal information for compliance, accounting,
+ * tax laws and fraud prevention (2026-11-11). The server checks it too, so
+ * no app can skip the notice.
  */
 
 export type DeletableRole = "driver" | "customer";
@@ -50,6 +55,9 @@ export const UNPAID_PAYOUT_STATUSES = ["pending", "processing", "failed"] as con
 
 export const STAFF_DELETION_MESSAGE =
   "Staff accounts can't be deleted here. Ask your dealership admin to remove your account.";
+
+export const RETENTION_ACKNOWLEDGEMENT_REQUIRED =
+  "Before your account can be deleted, confirm that you understand Suprah AI keeps some transaction records and personal information for compliance, accounting, tax laws and fraud prevention.";
 
 export const FORMER_NAME: Record<DeletableRole, string> = {
   driver: "Former driver",
@@ -169,10 +177,15 @@ function storedFileKey(file: { fileKey?: unknown; fileUrl?: unknown }): string {
   return url ? storageService.getKeyFromUrl(url) || url : "";
 }
 
-/** Deletes the signed-in driver's or customer's own account. Throws a plain ApiError when it can't. */
-export async function deleteOwnAccount(user: AccountUser): Promise<void> {
+/**
+ * Deletes the signed-in driver's or customer's own account. Throws a plain
+ * ApiError when it can't. `acknowledgedRetention` must be exactly true: the
+ * person ticked "I understand what Suprah AI keeps".
+ */
+export async function deleteOwnAccount(user: AccountUser, options: { acknowledgedRetention?: unknown } = {}): Promise<void> {
   const role = deletableRole(user.role);
   if (!role) throw new ApiError(403, STAFF_DELETION_MESSAGE);
+  if (options.acknowledgedRetention !== true) throw new ApiError(400, RETENTION_ACKNOWLEDGEMENT_REQUIRED);
   const blocker = deletionBlockerMessage(await deletionFacts(user, role));
   if (blocker) throw new ApiError(409, blocker);
 
@@ -240,5 +253,5 @@ export async function deleteOwnAccount(user: AccountUser): Promise<void> {
     ...publicFiles.map((url) => storageService.delete(url)),
   ]);
 
-  logger.info({ userId, role }, "Account deleted by its owner");
+  logger.info({ userId, role, retentionNoticeAcknowledged: true }, "Account deleted by its owner");
 }

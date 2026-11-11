@@ -11,6 +11,7 @@ import {
   deletableRole,
   deleteOwnAccount,
   deletionBlockerMessage,
+  RETENTION_ACKNOWLEDGEMENT_REQUIRED,
   STAFF_DELETION_MESSAGE,
 } from '../../src/services/accountDeletion.service';
 
@@ -102,6 +103,30 @@ describe('what stops a deletion, in plain words', () => {
   it('refuses the deletion with that message', async () => {
     jest.spyOn(Load, 'find').mockReturnValue(query([{ loadNumber: 'LD-9' }]) as any);
     jest.spyOn(DriverPayout, 'countDocuments').mockResolvedValue(0 as never);
-    await expect(deleteOwnAccount({ _id: USER_ID, role: 'driver' })).rejects.toMatchObject({ statusCode: 409 });
+    await expect(deleteOwnAccount({ _id: USER_ID, role: 'driver' }, { acknowledgedRetention: true })).rejects.toMatchObject({ statusCode: 409 });
+  });
+});
+
+describe('acknowledging what Suprah AI keeps (2026-11-11)', () => {
+  it('is required before anything is checked or removed', async () => {
+    const find = jest.spyOn(Load, 'find');
+    for (const acknowledgedRetention of [undefined, false, 'true', 1, {}]) {
+      await expect(deleteOwnAccount({ _id: USER_ID, role: 'customer' }, { acknowledgedRetention })).rejects.toMatchObject({
+        statusCode: 400,
+        message: RETENTION_ACKNOWLEDGEMENT_REQUIRED,
+      });
+    }
+    await expect(deleteOwnAccount({ _id: USER_ID, role: 'driver' })).rejects.toMatchObject({ statusCode: 400 });
+    expect(find).not.toHaveBeenCalled();
+  });
+
+  it('names the four reasons in plain words', () => {
+    expect(RETENTION_ACKNOWLEDGEMENT_REQUIRED).toBe(
+      'Before your account can be deleted, confirm that you understand Suprah AI keeps some transaction records and personal information for compliance, accounting, tax laws and fraud prevention.',
+    );
+  });
+
+  it('staff are still told to ask their dealership first', async () => {
+    await expect(deleteOwnAccount({ _id: USER_ID, role: 'employee' }, { acknowledgedRetention: true })).rejects.toMatchObject({ statusCode: 403 });
   });
 });
