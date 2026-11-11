@@ -12,6 +12,7 @@ import { findOrCreatePendingDriverRequest } from './driverApplication.service';
 import DriverProfile from '../models/DriverProfile.model';
 import notificationService from './notification.service';
 import { codeEmail } from '../utils/codeEmail';
+import { INVITATION_MESSAGES } from '../utils/invitationAcceptance';
 
 const OTP_LIFETIME_MS = 15 * 60 * 1000;
 // A code with at least this long left is emailed again instead of replaced.
@@ -80,6 +81,12 @@ class AuthService {
 
                 if (!invite) {
                     throw new ApiError(410, 'This invitation link is no longer valid. Please ask for a new invite.');
+                }
+
+                // An expired invitation can't create an account either; the
+                // invitation page already says it has expired (2026-11-11).
+                if (invite.expiresAt && new Date(invite.expiresAt).getTime() < Date.now()) {
+                    throw new ApiError(410, INVITATION_MESSAGES.expired);
                 }
 
                 if (invite.email.toLowerCase().trim() !== email.toLowerCase().trim()) {

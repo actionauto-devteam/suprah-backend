@@ -6,6 +6,7 @@ import {
     validateInvitation,
     bulkCreateInvitations,
 } from '../controllers/invitation.controller';
+import { staffBulkInviteLimiter, staffInviteSendLimiter } from '../middleware/staffInviteRateLimit.middleware';
 
 const router = express.Router();
 
@@ -13,8 +14,8 @@ router.get('/validate/:token', validateInvitation);
 
 router.post('/accept', auth(), acceptInvitation);
 
-router.post('/', auth(), createInvitation);
+router.post('/', auth(), staffInviteSendLimiter, createInvitation);
 
-router.post('/bulk', auth(), bulkCreateInvitations);
+router.post('/bulk', auth(), staffBulkInviteLimiter, bulkCreateInvitations);
 
 export default router;

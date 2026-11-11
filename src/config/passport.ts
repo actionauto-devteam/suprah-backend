@@ -44,11 +44,15 @@ passport.use(
                 // was actually sent to the Google account that's signing in —
                 // otherwise anyone holding a still-pending invite link could get
                 // promoted into (or create an 3account inside) someone else's org.
+                let usedInvite: any = null;
                 if (inviteToken) {
                     const InvitationModel = mongoose.model('Invitation');
                     const invite: any = await InvitationModel.findOne({ token: inviteToken, status: 'pending' });
 
-                    if (invite && invite.email.toLowerCase().trim() === email.toLowerCase().trim()) {
+                    // An expired invitation, or a leftover driver one, doesn't
+                    // apply, the same as signing up with email (2026-11-11).
+                    const expired = Boolean(invite?.expiresAt) && new Date(invite.expiresAt).getTime() < Date.now();
+                    if (invite && !expired && invite.role !== 'driver' && invite.email.toLowerCase().trim() === email.toLowerCase().trim()) {
                         // Normalize roles
                         if (invite.role === 'admin' || invite.role === 'member') {
                             roleToAssign = invite.role === 'admin' ? 'admin' : 'employee';
@@ -61,9 +65,8 @@ passport.use(
                         onboardingCompleted = true;
                         isApproved = true;
 
-                        // Mark invite as accepted
-                        invite.status = 'accepted';
-                        await invite.save();
+                        // Marked as accepted once the account is saved below.
+                        usedInvite = invite;
                     }
                 }
 
@@ -73,6 +76,19 @@ passport.use(
                         { email: email.toLowerCase() }
                     ]
                 });
+
+                // A driver account can't become dealership staff (2026-11-11):
+                // the invitation stays unused and the driver signs in as usual.
+                if (user && user.role === 'driver' && usedInvite) {
+                    usedInvite = null;
+                    orgId = undefined;
+                }
+
+                const markInviteAccepted = async () => {
+                    if (!usedInvite) return;
+                    usedInvite.status = 'accepted';
+                    await usedInvite.save();
+                };
 
                 if (user) {
                     // Update Google ID if it was missing (account linking)
@@ -93,6 +109,7 @@ passport.use(
                     }
 
                     await user.save();
+                    await markInviteAccepted();
                     return done(null, user);
                 }
 
@@ -117,6 +134,7 @@ passport.use(
                     isApproved,
                     onboardingCompleted,
                 });
+                await markInviteAccepted();
 
                 done(null, user);
             } catch (error) {
