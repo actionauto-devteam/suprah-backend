@@ -232,7 +232,7 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
 
 export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied — admin or manager role required');
   }
 
@@ -387,7 +387,7 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
 
 export const getUserTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied');
   }
 
@@ -518,7 +518,7 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
 
 export const getFormerEmployees = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied');
   }
   const archives = await TimeproofArchive.find({ organizationId: requestor.organizationId })
@@ -529,7 +529,7 @@ export const getFormerEmployees = asyncHandler(async (req: Request, res: Respons
 
 export const deleteFormerEmployeeTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (requestor.role !== 'admin') {
+  if (requestor.role !== 'admin' || !hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Only admins can permanently delete Timeproof records');
   }
   const { userId } = req.params;
@@ -550,7 +550,7 @@ export const deleteFormerEmployeeTimeproof = asyncHandler(async (req: Request, r
 
 export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied — admin or manager role required');
   }
   const { userId } = req.params;
@@ -587,7 +587,7 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
 
 export const getUserActivityLog = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied — admin or manager role required');
   }
   const { userId } = req.params;
@@ -739,10 +739,10 @@ export const exportTimeproof = asyncHandler(async (req: Request, res: Response) 
   const requestor = req.crmUser!;
   const { userId, range = '30' } = req.query;
 
-  const targetId =
-    userId && ['admin', 'manager'].includes(requestor.role)
-      ? (userId as string)
-      : requestor._id.toString();
+  const targetId = userId ? (userId as string) : requestor._id.toString();
+  if (targetId !== requestor._id.toString() && !hasPayrollAccess(requestor)) {
+    throw new ApiError(403, 'Access denied');
+  }
 
   const startDate = new Date();
   startDate.setDate(startDate.getDate() - parseInt(range as string));
@@ -1229,7 +1229,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
 
 export const getAgentStatus = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied');
   }
 
@@ -1411,12 +1411,9 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(400, 'date query param required (YYYY-MM-DD)');
   }
 
-  const targetId =
-    userId && ['admin', 'manager'].includes(requestor.role)
-      ? (userId as string)
-      : requestor._id.toString();
+  const targetId = userId ? (userId as string) : requestor._id.toString();
 
-  if (targetId !== requestor._id.toString() && !['admin', 'manager'].includes(requestor.role)) {
+  if (targetId !== requestor._id.toString() && !hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied');
   }
 
@@ -1557,12 +1554,9 @@ export const getIdleRecordings = asyncHandler(async (req: Request, res: Response
     throw new ApiError(400, 'date query param required (YYYY-MM-DD)');
   }
 
-  const targetId =
-    userId && ['admin', 'manager'].includes(requestor.role)
-      ? (userId as string)
-      : requestor._id.toString();
+  const targetId = userId ? (userId as string) : requestor._id.toString();
 
-  if (targetId !== requestor._id.toString() && !['admin', 'manager'].includes(requestor.role)) {
+  if (targetId !== requestor._id.toString() && !hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied');
   }
 
@@ -1637,7 +1631,7 @@ export const getIdleRecordingDownloadUrl = asyncHandler(async (req: Request, res
   const targetUserId = key.split('/')[1];
   const isSelf = targetUserId === requestor._id.toString();
   if (!isSelf) {
-    if (!['admin', 'manager'].includes(requestor.role)) {
+    if (!hasPayrollAccess(requestor)) {
       throw new ApiError(403, 'Access denied');
     }
     const targetUser = await CrmUser.findOne({ _id: targetUserId, organizationId: requestor.organizationId }).select('_id').lean();
@@ -1665,7 +1659,7 @@ export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Respo
   const targetUserId = key.split('/')[1];
   const isSelf = targetUserId === requestor._id.toString();
   if (!isSelf) {
-    if (!['admin', 'manager'].includes(requestor.role)) {
+    if (!hasPayrollAccess(requestor)) {
       throw new ApiError(403, 'Access denied');
     }
     const targetUser = await CrmUser.findOne({ _id: targetUserId, organizationId: requestor.organizationId }).select('_id').lean();
@@ -1703,7 +1697,7 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
   const [, targetUserId, date] = key.split('/');
   const isSelf = targetUserId === requestor._id.toString();
   if (!isSelf) {
-    if (!['admin', 'manager'].includes(requestor.role)) {
+    if (!hasPayrollAccess(requestor)) {
       throw new ApiError(403, 'You can only delete your own screenshots');
     }
     const targetUser = await CrmUser.findOne({ _id: targetUserId, organizationId: requestor.organizationId }).select('_id').lean();
@@ -1763,7 +1757,7 @@ async function getPeriodLockStatus(userId: string, date: Date): Promise<{
 
 export const correctTimeLog = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Only admins/managers can correct time logs');
   }
 
@@ -1832,7 +1826,7 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
  */
 export const getAdminDayLogs = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (requestor.role !== 'admin') {
+  if (requestor.role !== 'admin' || !hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Only admins can use the manual time-override tool');
   }
   if (!(await isTimeEditExempt(requestor.organizationId?.toString(), requestor.department))) {
@@ -1859,7 +1853,7 @@ export const getAdminDayLogs = asyncHandler(async (req: Request, res: Response) 
  */
 export const adminTimeOverride = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (requestor.role !== 'admin') {
+  if (requestor.role !== 'admin' || !hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Only admins can use the manual time-override tool');
   }
   if (!(await isTimeEditExempt(requestor.organizationId?.toString(), requestor.department))) {
@@ -2284,7 +2278,7 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
  */
 export const clockOutUser = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Only admins/managers can clock out other users');
   }
 
@@ -2340,7 +2334,7 @@ export const clockOutUser = asyncHandler(async (req: Request, res: Response) => 
  */
 export const excludeScreenshots = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Only admins/managers can exclude screenshots');
   }
 
@@ -2666,7 +2660,7 @@ export const postClientDiagnostic = asyncHandler(async (req: Request, res: Respo
  */
 export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
+  if (!hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Access denied — admin or manager role required');
   }
   const { userId } = req.params;
@@ -2707,7 +2701,7 @@ export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Res
 
 export const wipeAllScreenshotsHandler = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (requestor.role !== 'admin') {
+  if (requestor.role !== 'admin' || !hasPayrollAccess(requestor)) {
     throw new ApiError(403, 'Only admins can wipe all screenshots');
   }
   const orgUsers = await CrmUser.find({ organizationId: requestor.organizationId }).select('_id').lean();
@@ -2834,7 +2828,7 @@ const findTargetInOrg = async (actor: any, rawId: unknown) => {
 
 export const getUserMonitoringDevice = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
-  if (!['admin', 'manager'].includes(actor.role)) throw new ApiError(403, 'Only admins and managers can view this');
+  if (!hasPayrollAccess(actor)) throw new ApiError(403, 'Only admins and managers can view this');
   const target = await findTargetInOrg(actor, req.params.userId);
   const view = await getDeviceSwitchView(target);
   const state: any = view.enabled
@@ -2855,7 +2849,7 @@ export const getUserMonitoringDevice = asyncHandler(async (req: Request, res: Re
 
 export const adminSetMonitoringDevice = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
-  if (actor.role !== 'admin') throw new ApiError(403, 'Only admins can change the monitoring device');
+  if (actor.role !== 'admin' || !hasPayrollAccess(actor)) throw new ApiError(403, 'Only admins can change the monitoring device');
   if (!isMonitoringDevice(req.body?.to)) throw new ApiError(400, 'Choose either desktop or mobile');
   const target = await findTargetInOrg(actor, req.params.userId);
   const result = await switchMonitoringDevice({ user: target, to: req.body.to, actor: 'admin', actorId: actor._id });
