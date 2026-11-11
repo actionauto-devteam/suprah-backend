@@ -1,5 +1,6 @@
 import express from "express";
 import driverProfileController from "../controllers/driverProfile.controller";
+import accountDeletionController from "../controllers/accountDeletion.controller";
 import driverStatusChangeRequestController from "../controllers/driverStatusChangeRequest.controller";
 import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
@@ -22,6 +23,8 @@ const driverOnly = authorize("driver");
 const staffOnly = authorize(["super_admin", "admin", "employee"]);
 
 router.get("/", driverOnly, driverProfileController.getProfile);
+// A driver deletes their own account, also while waiting for approval (2026-11-11).
+router.delete("/account", driverOnly, accountDeletionController.deleteMyAccount);
 router.patch("/equipment", driverOnly, driverProfileController.updateEquipment);
 router.patch("/personal-info", driverOnly, driverProfileController.updatePersonalInfo);
 router.patch("/compliance", driverOnly, driverProfileController.updateCompliance);
