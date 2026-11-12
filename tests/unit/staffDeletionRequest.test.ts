@@ -141,7 +141,7 @@ describe('sending a request', () => {
       ORG,
       'general',
       'Account deletion request',
-      'Sam Staff asked to delete their account. Review it in Settings, Dealership.',
+      'Sam Staff asked to delete their account. Review it in Settings, Organization.',
       { route: '/settings?tab=dealership', requestId: REQUEST },
       STAFF,
     );

@@ -174,7 +174,7 @@ export async function requestStaffDeletion(
         String(user.organizationId),
         'general',
         'Account deletion request',
-        `${who} asked to delete their account. Review it in Settings, Dealership.`,
+        `${who} asked to delete their account. Review it in Settings, Organization.`,
         { route: '/settings?tab=dealership', requestId: String(created._id) },
         String(user._id),
     );
