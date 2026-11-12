@@ -14,7 +14,7 @@ import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
 import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
-import { emitPresenceUpdate } from '../utils/socketEmitter';
+import { emitPresenceUpdate, emitToCrmUser } from '../utils/socketEmitter';
 import profileService from '../services/profile.service';
 import { storageService, BucketType } from '../services/storage.service';
 import { getCachedSignedUrl } from '../utils/signedUrlCache';
@@ -321,8 +321,10 @@ async function recomputeConversationLastMessage(conversationId: any, expectedLas
 }
 
 function emitNotificationToUser(userId: string, notification: any) {
+  const payload = notification?.toObject ? notification.toObject() : notification;
+  emitToCrmUser(userId, 'crm:notification:new', payload);
   try {
-    getIO().to(`user:${userId}`).emit('notification:new', notification?.toObject ? notification.toObject() : notification);
+    getIO().to(`user:${userId}`).emit('notification:new', payload);
   } catch (err) {
     logger.warn({ err, userId }, '[SupraSpace] Socket notification emit failed');
   }
