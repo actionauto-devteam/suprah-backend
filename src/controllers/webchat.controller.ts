@@ -11,6 +11,8 @@ import Organization from '../models/Organization.model';
 import WebChatSession from '../models/WebChatSession.model';
 import WebChatMessage from '../models/WebChatMessage.model';
 import IntakeClaim from '../models/IntakeClaim.model';
+import CrmLocation from '../models/CrmLocation.model';
+import { normalizeLocationKey } from '../utils/locationKey';
 import { LEAD_SOURCE } from '../constants/leadSource';
 import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
 import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
@@ -138,6 +140,26 @@ function validateMessageBody(raw: unknown): string {
 
 function isOrgWebchatEnabled(metadata: any): boolean {
   return process.env.WEBCHAT_ENABLED !== 'false' && metadata?.webchatEnabled !== false;
+}
+
+const MAX_NAME_PART_LENGTH = 40;
+const MAX_VEHICLE_INTEREST_LENGTH = 80;
+
+async function activeChatLocations(orgId: any): Promise<{ name: string; keys: string[] }[]> {
+  const rows = await CrmLocation.find({ organizationId: String(orgId), status: 'active' })
+    .select('name aliasKeys')
+    .sort({ name: 1, _id: 1 })
+    .lean();
+  return rows.map((row: any) => ({
+    name: String(row.name || '').trim(),
+    keys: [normalizeLocationKey(row.name), ...((row.aliasKeys || []) as string[])].filter(Boolean),
+  })).filter((row) => row.name);
+}
+
+function matchChatLocation(locations: { name: string; keys: string[] }[], raw: unknown): string | null {
+  const key = normalizeLocationKey(raw);
+  if (!key) return null;
+  return locations.find((row) => row.keys.includes(key))?.name || null;
 }
 
 async function resolveDealerName(organizationId: any): Promise<string> {
@@ -469,12 +491,13 @@ export const getPublicConfig = asyncHandler(async (req: Request, res: Response) 
 
   if (!orgId) {
     return res.json(
-      new ApiResponse(200, { enabled: false, greeting: '', withinHours: true, textMode: false }, 'Chat is not available for this dealership'),
+      new ApiResponse(200, { enabled: false, greeting: '', withinHours: true, textMode: false, locations: [] }, 'Chat is not available for this dealership'),
     );
   }
 
   const organization = await Organization.findById(orgId).select('name metadata').lean();
   const metadata = (organization?.metadata as any) || {};
+  const locations = await activeChatLocations(orgId).catch(() => []);
 
   res.json(
     new ApiResponse(
@@ -485,6 +508,7 @@ export const getPublicConfig = asyncHandler(async (req: Request, res: Response) 
         withinHours: isWithinSendingHours(),
         textMode: metadata.webchatTextMode === true,
         dealershipName: String((organization as any)?.name || '').trim(),
+        locations: locations.map((row) => row.name),
       },
       'Chat configuration',
     ),
@@ -500,9 +524,12 @@ interface WebchatConversationInput {
   orgId: any;
   systemUserId: any;
   visitorName: string;
+  visitorFirstName?: string;
+  visitorLastName?: string;
   visitorEmail?: string;
   visitorPhone?: string;
   vehicle: any;
+  location?: string;
   firstMessage: string;
   pageUrl?: string;
   sessionId?: mongoose.Types.ObjectId;
@@ -510,8 +537,11 @@ interface WebchatConversationInput {
 }
 
 async function createWebchatLead(input: WebchatConversationInput, sessionId: mongoose.Types.ObjectId) {
-  const [firstName, ...restOfName] = input.visitorName.split(/\s+/);
+  const [splitFirst, ...restOfName] = input.visitorName.split(/\s+/);
+  const firstName = input.visitorFirstName || splitFirst;
+  const lastName = input.visitorFirstName ? input.visitorLastName || '' : restOfName.join(' ');
   const vehicle = input.vehicle;
+  const location = input.location || vehicle?.dealerCity || undefined;
   const vehicleDetails = vehicle
     ? {
         year: vehicle.year ? String(vehicle.year) : undefined,
@@ -532,7 +562,7 @@ async function createWebchatLead(input: WebchatConversationInput, sessionId: mon
       source: LEAD_SOURCE.WEBSITE_CHAT,
       contact: {
         firstName: firstName || undefined,
-        lastName: restOfName.join(' ') || undefined,
+        lastName: lastName || undefined,
         email: input.visitorEmail || undefined,
         phone: input.visitorPhone || undefined,
         assurance: 'self_reported',
@@ -546,7 +576,7 @@ async function createWebchatLead(input: WebchatConversationInput, sessionId: mon
         createdBy: input.systemUserId,
         vehicle: vehicleDetails,
         vehicleId: vehicle?._id,
-        location: vehicle?.dealerCity || undefined,
+        location,
       },
     });
     const leadId = intake.status === 'associated' || intake.status === 'duplicate' ? intake.leadId : null;
@@ -573,12 +603,12 @@ async function createWebchatLead(input: WebchatConversationInput, sessionId: mon
     organizationId: input.orgId,
     createdBy: input.systemUserId,
     firstName: firstName || 'Unknown',
-    lastName: restOfName.join(' '),
+    lastName,
     email: input.visitorEmail || undefined,
     phone: input.visitorPhone || undefined,
     vehicle: vehicleDetails,
     vehicleId: vehicle?._id,
-    location: vehicle?.dealerCity || undefined,
+    location,
     comments: input.firstMessage,
     source: LEAD_SOURCE.WEBSITE_CHAT,
     channel: 'webchat',
@@ -601,6 +631,7 @@ async function createWebchatConversation(input: WebchatConversationInput) {
     visitorEmail: input.visitorEmail || undefined,
     visitorPhone: input.visitorPhone || undefined,
     vehicleId: vehicle?._id,
+    location: input.location || undefined,
     pageUrl: input.pageUrl ? String(input.pageUrl).slice(0, 500) : undefined,
     ...(input.carryPause?.aiPausedAt ? { aiPausedAt: input.carryPause.aiPausedAt, aiPausedBy: input.carryPause.aiPausedBy } : {}),
     ...(input.carryPause?.aiAutoPausedUntil ? { aiAutoPausedUntil: input.carryPause.aiAutoPausedUntil } : {}),
@@ -730,6 +761,7 @@ async function continueInFreshConversation(oldSession: any, body: string) {
       visitorEmail: oldSession.visitorEmail,
       visitorPhone: oldSession.visitorPhone,
       vehicle,
+      location: oldSession.location || undefined,
       firstMessage: body,
       pageUrl: oldSession.pageUrl,
       sessionId: nextSessionId,
@@ -754,10 +786,25 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
   const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 80);
   const wantsText = req.body?.continueByText === true;
 
-  const visitorName = String(name || '').trim().slice(0, 80);
+  const textUsForm = req.body?.firstName !== undefined || req.body?.lastName !== undefined;
+  const cleanPart = (raw: unknown, max: number) => String(raw || '').trim().replace(/\s+/g, ' ').slice(0, max);
+  const visitorFirstName = cleanPart(req.body?.firstName, MAX_NAME_PART_LENGTH);
+  const visitorLastName = cleanPart(req.body?.lastName, MAX_NAME_PART_LENGTH);
+  const vehicleInterest = textUsForm ? cleanPart(req.body?.vehicleInterest, MAX_VEHICLE_INTEREST_LENGTH) : '';
+
+  const visitorName = textUsForm
+    ? `${visitorFirstName} ${visitorLastName}`.trim()
+    : String(name || '').trim().slice(0, 80);
   const visitorEmail = String(email || '').trim().toLowerCase().slice(0, 120);
   const visitorPhone = String(phone || '').trim().slice(0, 30);
 
+  if (textUsForm) {
+    if (!visitorFirstName) throw new ApiError(400, 'Please add your first name');
+    if (!visitorLastName) throw new ApiError(400, 'Please add your last name');
+    if (visitorPhone.replace(/\D/g, '').length < 10) {
+      throw new ApiError(400, 'Please enter your mobile number with the area code');
+    }
+  }
   if (!visitorName) throw new ApiError(400, 'Please tell us your name');
   if (!visitorEmail && !visitorPhone) {
     throw new ApiError(400, 'Please add a phone number or email so we can reach you');
@@ -768,7 +815,11 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
   if (visitorPhone && visitorPhone.replace(/\D/g, '').length < 7) {
     throw new ApiError(400, 'Please enter a valid phone number');
   }
-  const firstMessage = validateMessageBody(message);
+  const typedMessage = validateMessageBody(message);
+  const firstMessage = vehicleInterest ? `${typedMessage}\n\nVehicle interest: ${vehicleInterest}` : typedMessage;
+  if (firstMessage.length > MAX_MESSAGE_LENGTH) {
+    throw new ApiError(400, `Messages are limited to ${MAX_MESSAGE_LENGTH} characters`);
+  }
 
   let vehicle: any = null;
   let orgId: any = null;
@@ -790,6 +841,16 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
   const organizationDoc = await Organization.findById(orgId).select('metadata').lean();
   if (!isOrgWebchatEnabled(organizationDoc?.metadata)) {
     throw new ApiError(503, 'Chat is currently unavailable. Please call us instead.');
+  }
+
+  let chosenLocation: string | undefined;
+  if (textUsForm) {
+    const locations = await activeChatLocations(orgId);
+    if (locations.length) {
+      const matched = matchChatLocation(locations, req.body?.location);
+      if (!matched) throw new ApiError(400, 'Please choose a dealership');
+      chosenLocation = matched;
+    }
   }
 
   const systemUser = await User.findOne({
@@ -859,9 +920,11 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
       orgId,
       systemUserId: (systemUser as any)._id,
       visitorName,
+      ...(textUsForm ? { visitorFirstName, visitorLastName } : {}),
       visitorEmail: visitorEmail || undefined,
       visitorPhone: visitorPhone || undefined,
       vehicle,
+      location: chosenLocation,
       firstMessage,
       pageUrl: pageUrl ? String(pageUrl) : undefined,
     });
@@ -889,7 +952,7 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
         sessionId: session._id,
         lead,
         phone: visitorPhone,
-        firstName: visitorName.split(/\s+/)[0],
+        firstName: visitorFirstName || visitorName.split(/\s+/)[0],
         message: firstMessage,
       }).catch((err): WebchatTextResult => {
         logger.warn({ err, sessionId: session._id }, '[Webchat] Could not continue by text');

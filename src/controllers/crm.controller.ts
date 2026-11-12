@@ -389,8 +389,9 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(400, "Organization context missing");
 
-  const org = await Organization.findById(orgId).select("metadata").lean();
+  const org = await Organization.findById(orgId).select("metadata slug").lean();
   const metadata = (org?.metadata as any) || {};
+  const webchatOrgKey = String((org as any)?.slug || "");
   const reviewLink = metadata.reviewLink || "";
   const reviewLinks = Array.isArray(metadata.reviewLinks)
     ? metadata.reviewLinks
@@ -422,6 +423,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
         webchatEnabled,
         webchatGreeting,
         webchatTextMode,
+        webchatOrgKey,
         aiAgentEnabled,
         aiAgentName,
         aiHandoffFallbackGroupId,
