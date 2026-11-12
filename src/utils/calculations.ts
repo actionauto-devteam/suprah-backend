@@ -1,6 +1,7 @@
 import axios from "axios";
 import logger from "./logger";
 import { cacheService } from "../services/cache.service";
+import { amazonPlacesSettings, positionOfZip } from "../services/amazonPlaces.service";
 
 interface Coordinates {
     lat: number;
@@ -19,19 +20,31 @@ export async function getCoordinatesFromZip(zipCode: string): Promise<Coordinate
 
     let result: Coordinates | null = null;
 
-    try {
-        const res = await axios.get(
-            `https://api.zippopotam.us/us/${zipCode}`,
-            { timeout: 8000 }
-        );
-        const place = res.data?.places?.[0];
-        if (place) {
-            result = {
-                lat: parseFloat(place.latitude),
-                lon: parseFloat(place.longitude),
-            };
+    // Amazon Location once it's switched on (2026-11-12). Quote prices depend
+    // on this, so if Amazon can't answer, the free services below still do.
+    if (amazonPlacesSettings().enabled && /^\d{5}$/.test(String(zipCode))) {
+        try {
+            const position = await positionOfZip(String(zipCode));
+            if (position) result = { lat: position.lat, lon: position.lng };
+        } catch {
         }
-    } catch {
+    }
+
+    if (!result) {
+        try {
+            const res = await axios.get(
+                `https://api.zippopotam.us/us/${zipCode}`,
+                { timeout: 8000 }
+            );
+            const place = res.data?.places?.[0];
+            if (place) {
+                result = {
+                    lat: parseFloat(place.latitude),
+                    lon: parseFloat(place.longitude),
+                };
+            }
+        } catch {
+        }
     }
 
     if (!result) {

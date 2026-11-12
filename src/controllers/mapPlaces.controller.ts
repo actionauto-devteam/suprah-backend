@@ -5,12 +5,7 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import DriverLocation from "../models/DriverLocation.model";
 import { canViewDriverExactGps, getDriverGpsTrackingLoads } from "../services/driverLocationAccess.service";
-import {
-  isGoogleGeocodingConfigured,
-  lookupAreaName,
-  lookupPlace,
-  MAX_PLACE_QUERY_LENGTH,
-} from "../services/googleGeocoding.service";
+import { areaNameOf, MAX_PLACE_QUERY_LENGTH, placeLookupAvailable, positionOf } from "../services/placeLookup.service";
 import {
   addressAtPosition,
   amazonPlacesSettings,
@@ -51,9 +46,10 @@ const getDriverAreaName = asyncHandler(async (req: ExpressRequest, res: ExpressR
   const location: any = await DriverLocation.findOne({ userId: driverId }).select("coords").lean();
   const lat = Number(location?.coords?.lat);
   const lng = Number(location?.coords?.lng);
-  const areaName = Number.isFinite(lat) && Number.isFinite(lng) ? await lookupAreaName(lat, lng) : null;
+  // Amazon Location once it's switched on, Google until then (2026-11-12).
+  const areaName = Number.isFinite(lat) && Number.isFinite(lng) ? await areaNameOf(lat, lng) : null;
 
-  return res.status(200).json(new ApiResponse(200, { areaName, available: isGoogleGeocodingConfigured() }));
+  return res.status(200).json(new ApiResponse(200, { areaName, available: placeLookupAvailable() }));
 });
 
 /**
@@ -66,8 +62,8 @@ const lookupPlacePosition = asyncHandler(async (req: ExpressRequest, res: Expres
   if (!query || query.length > MAX_PLACE_QUERY_LENGTH) {
     throw new ApiError(400, `Enter a place to look up (up to ${MAX_PLACE_QUERY_LENGTH} characters).`);
   }
-  const position = await lookupPlace(query);
-  return res.status(200).json(new ApiResponse(200, { position, available: isGoogleGeocodingConfigured() }));
+  const position = await positionOf(query);
+  return res.status(200).json(new ApiResponse(200, { position, available: placeLookupAvailable() }));
 });
 
 /**

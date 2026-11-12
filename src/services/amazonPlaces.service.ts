@@ -1,4 +1,5 @@
 import {
+  GeocodeCommand,
   GeoPlacesClient,
   GetPlaceCommand,
   ReverseGeocodeCommand,
@@ -19,7 +20,9 @@ import logger from "../utils/logger";
  *
  * Off by default. It uses the same AWS access, region and per-minute safety
  * cap as the routes (config/amazonLocation.ts); the server needs permission
- * for geo-places:Suggest, geo-places:GetPlace and geo-places:ReverseGeocode.
+ * for geo-places:Suggest, geo-places:GetPlace, geo-places:ReverseGeocode and
+ * (since 2026-11-12, for driver area names, place pins and ZIP distances)
+ * geo-places:Geocode.
  * Results that are saved on a load are asked for with the "Storage" use, as
  * Amazon's terms require.
  */
@@ -168,6 +171,57 @@ export async function addressAtPosition(lat: number, lng: number, settings = ama
   if (!match) return null;
   const fields = placeFields(match);
   return fields.address || fields.city || fields.zip ? fields : null;
+}
+
+/**
+ * Where a US place or address is (the driver's load pins, the customer's
+ * shipment map), or null when Amazon finds nothing (2026-11-12). The result is
+ * cached by the caller, so it's asked for with the "Storage" use.
+ */
+export async function positionOfPlace(query: string, settings = amazonPlacesSettings()): Promise<{ lat: number; lng: number } | null> {
+  const response = await send(settings, "geocode_place", (places, abortSignal) =>
+    places.send(
+      new GeocodeCommand({ QueryText: query, MaxResults: 1, Filter: { IncludeCountries: ["USA"] }, IntendedUse: "Storage" }),
+      { abortSignal },
+    ),
+  );
+  const match = response.ResultItems?.[0];
+  return match ? placeFields(match).position : null;
+}
+
+/** The middle of a US ZIP code, for quote distances and nearby drivers (2026-11-12). */
+export async function positionOfZip(zip: string, settings = amazonPlacesSettings()): Promise<{ lat: number; lng: number } | null> {
+  const response = await send(settings, "geocode_zip", (places, abortSignal) =>
+    places.send(
+      new GeocodeCommand({
+        QueryComponents: { PostalCode: zip, Country: "USA" },
+        MaxResults: 1,
+        Filter: { IncludeCountries: ["USA"], IncludePlaceTypes: ["PostalCode"] },
+        IntendedUse: "Storage",
+      }),
+      { abortSignal },
+    ),
+  );
+  const match = response.ResultItems?.[0];
+  return match ? placeFields(match).position : null;
+}
+
+/** "Dallas, TX" from an Amazon place: the city and state, or whichever is known. */
+export function areaNameFrom(fields: Pick<PlaceFields, "city" | "state">): string | null {
+  const parts = [fields.city.trim(), fields.state.trim()].filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+}
+
+/** The area ("Dallas, TX") around a position, for the Driver Tracker popup (2026-11-12). */
+export async function areaNameAt(lat: number, lng: number, settings = amazonPlacesSettings()): Promise<string | null> {
+  const response = await send(settings, "area_name", (places, abortSignal) =>
+    places.send(
+      new ReverseGeocodeCommand({ QueryPosition: [lng, lat], MaxResults: 1, IntendedUse: "Storage" }),
+      { abortSignal },
+    ),
+  );
+  const match = response.ResultItems?.[0];
+  return match ? areaNameFrom(placeFields(match)) : null;
 }
 
 export function resetAmazonPlacesForTests() {

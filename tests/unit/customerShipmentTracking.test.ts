@@ -25,10 +25,11 @@ jest.mock('../../src/services/loadRoute.service', () => {
   const actual = jest.requireActual('../../src/services/loadRoute.service');
   return { ...actual, getCustomerLoadRoute: (load: unknown) => mockCustomerRoute(load) };
 });
-jest.mock('../../src/services/googleGeocoding.service', () => ({
+// Amazon Location once it's on, Google until then (services/placeLookup, 2026-11-12).
+jest.mock('../../src/services/placeLookup.service', () => ({
   __esModule: true,
   MAX_PLACE_QUERY_LENGTH: 200,
-  lookupPlace: (query: string) => mockLookupPlace(query),
+  positionOf: (query: string) => mockLookupPlace(query),
 }));
 jest.mock('../../src/utils/logger', () => ({ __esModule: true, default: { error: jest.fn(), warn: jest.fn(), info: jest.fn() } }));
 

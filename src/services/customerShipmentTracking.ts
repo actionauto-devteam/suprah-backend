@@ -4,7 +4,7 @@ import Load from "../models/Load.model";
 import DriverLocation from "../models/DriverLocation.model";
 import { findQuoteFollower } from "./shipmentFollower";
 import { getCustomerLoadRoute, pinOf, stopAddressText, APPROXIMATE_POSITION_METERS, type RouteCoordinate } from "./loadRoute.service";
-import { lookupPlace, MAX_PLACE_QUERY_LENGTH } from "./googleGeocoding.service";
+import { MAX_PLACE_QUERY_LENGTH, positionOf } from "./placeLookup.service";
 import { ApiError } from "../utils/ApiError";
 
 /*
@@ -64,7 +64,7 @@ async function deliverySpot(place: Record<string, any> | null | undefined): Prom
   if (pin) return pin;
   const address = stopAddressText(place);
   if (!address) return null;
-  return lookupPlace(address.slice(0, MAX_PLACE_QUERY_LENGTH)).catch(() => null);
+  return positionOf(address.slice(0, MAX_PLACE_QUERY_LENGTH)).catch(() => null);
 }
 
 /**

@@ -81,7 +81,7 @@ import {
   evaluateDriverLoadCompatibilityWithRecommendations,
 } from "../services/driverLoadCompatibility.service";
 import { getDispatchProximityOrigins } from "../services/driverDispatchProximity.service";
-import { lookupPlace, MAX_PLACE_QUERY_LENGTH } from "../services/googleGeocoding.service";
+import { MAX_PLACE_QUERY_LENGTH, positionOf } from "../services/placeLookup.service";
 import { stopAddressText } from "../services/loadRoute.service";
 import { getCoordinatesFromZip } from "../utils/calculations";
 import {
@@ -3621,7 +3621,7 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: ExpressRequest, 
     // Tracker uses for stops (kept for an hour).
     if (!pickupCoordinates) {
       const address = stopAddressText(previewLoad?.pickupLocation);
-      const place = address ? await lookupPlace(address.slice(0, MAX_PLACE_QUERY_LENGTH)).catch(() => null) : null;
+      const place = address ? await positionOf(address.slice(0, MAX_PLACE_QUERY_LENGTH)).catch(() => null) : null;
       if (place) pickupCoordinates = { lat: place.lat, lng: place.lng };
     }
 
