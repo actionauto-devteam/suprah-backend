@@ -59,6 +59,8 @@ describe('what a deleted account keeps', () => {
       expect(update.$unset).toHaveProperty(field);
     }
     expect(anonymizedAccountUpdate(USER_ID, 'customer').$set.name).toBe('Former customer');
+    // An approved staff deletion request (2026-11-12).
+    expect(anonymizedAccountUpdate(USER_ID, 'staff').$set.name).toBe('Former staff member');
   });
 });
 

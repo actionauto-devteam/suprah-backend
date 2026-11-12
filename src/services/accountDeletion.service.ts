@@ -28,8 +28,10 @@ import { BucketType, storageService } from "./storage.service";
  * Deleting your own account (decided 2026-11-11). Apple requires apps that let
  * people sign up to let them delete their account in the app.
  *
- * Drivers and customers can delete their own account; staff accounts are
- * removed by their dealership. The account is locked and its personal details
+ * Drivers and customers can delete their own account. Staff send a request
+ * that an admin of their dealership approves or rejects with a reason
+ * (services/staffDeletionRequest.service, 2026-11-12); an approved request
+ * erases the account the same way, showing "Former staff member". The account is locked and its personal details
  * are removed straight away: sign-in, name, email, phone, photo, saved
  * signature and notifications, plus a driver's documents, equipment, location
  * history and tracking phone, or a customer's Wishlist, My Garage cars, AI
@@ -54,14 +56,18 @@ export const ACTIVE_LOAD_STATUSES = ["Assigned", "Accepted", "Picked Up", "In-Tr
 export const UNPAID_PAYOUT_STATUSES = ["pending", "processing", "failed"] as const;
 
 export const STAFF_DELETION_MESSAGE =
-  "Staff accounts can't be deleted here. Ask your dealership admin to remove your account.";
+  "Staff accounts are deleted through a request to your dealership admin. Open your Profile and press Request account deletion.";
 
 export const RETENTION_ACKNOWLEDGEMENT_REQUIRED =
   "Before your account can be deleted, confirm that you understand Suprah AI keeps some transaction records and personal information for compliance, accounting, tax laws and fraud prevention.";
 
-export const FORMER_NAME: Record<DeletableRole, string> = {
+/** Whose account is erased: a driver or customer deleting their own, or approved staff. */
+export type ErasedAccountKind = DeletableRole | "staff";
+
+export const FORMER_NAME: Record<ErasedAccountKind, string> = {
   driver: "Former driver",
   customer: "Former customer",
+  staff: "Former staff member",
 };
 
 export function deletableRole(role: unknown): DeletableRole | null {
@@ -69,7 +75,7 @@ export function deletableRole(role: unknown): DeletableRole | null {
 }
 
 /** What a deleted account keeps: no way to sign in and nothing that identifies the person. */
-export function anonymizedAccountUpdate(userId: string, role: DeletableRole) {
+export function anonymizedAccountUpdate(userId: string, role: ErasedAccountKind) {
   return {
     $set: {
       name: FORMER_NAME[role],
@@ -189,12 +195,26 @@ export async function deleteOwnAccount(user: AccountUser, options: { acknowledge
   const blocker = deletionBlockerMessage(await deletionFacts(user, role));
   if (blocker) throw new ApiError(409, blocker);
 
-  const userId = String(user._id);
+  await eraseAccount(String(user._id), role, (id, steps, privateFiles) => removeRoleData(role, id, steps, privateFiles));
+  logger.info({ userId: String(user._id), role, retentionNoticeAcknowledged: true }, "Account deleted by its owner");
+}
+
+/**
+ * Locks the account, removes what identifies the person (sign-in, name,
+ * email, phone, photo, notifications, passkeys) and runs `moreSteps` for the
+ * role's own personal data. Business records stay with the dealerships.
+ * Used by deleteOwnAccount and by an approved staff deletion request.
+ */
+export async function eraseAccount(
+  userId: string,
+  kind: ErasedAccountKind,
+  moreSteps?: (id: mongoose.Types.ObjectId, steps: Array<Promise<unknown>>, privateFiles: string[]) => Promise<void>,
+): Promise<void> {
   const id = new mongoose.Types.ObjectId(userId);
   const before = await User.findById(id).select("avatar").lean<{ avatar?: string | null } | null>();
 
   // 1. Lock the account and remove what identifies the person, so nothing can use it from here on.
-  await User.updateOne({ _id: id }, anonymizedAccountUpdate(userId, role));
+  await User.updateOne({ _id: id }, anonymizedAccountUpdate(userId, kind));
   await Session.updateMany({ userId: id, revokedAt: { $exists: false } }, { $set: { revokedAt: new Date() } });
   invalidateUserCache(userId);
 
@@ -205,7 +225,27 @@ export async function deleteOwnAccount(user: AccountUser, options: { acknowledge
     Notification.deleteMany({ userId: id }),
     WebAuthnCredential.deleteMany({ userId: id }),
   ];
+  if (moreSteps) await moreSteps(id, steps, privateFiles);
 
+  const results = await Promise.allSettled(steps);
+  const failed = results.filter((result) => result.status === "rejected").length;
+  if (failed) logger.error({ userId, kind, failed }, "Account deletion: some personal data couldn't be removed");
+
+  // 3. Stored files last; a file that can't be removed is logged, not shown.
+  await Promise.allSettled([
+    ...privateFiles.map((key) => storageService.delete(key, BucketType.PRIVATE)),
+    ...publicFiles.map((url) => storageService.delete(url)),
+  ]);
+}
+
+/** A driver's or customer's own personal data, removed after the account is locked. */
+async function removeRoleData(
+  role: DeletableRole,
+  id: mongoose.Types.ObjectId,
+  steps: Array<Promise<unknown>>,
+  privateFiles: string[],
+): Promise<void> {
+  const userId = String(id);
   if (role === "driver") {
     const profile = await DriverProfile.findOne({ userId: id }).select("documents").lean<{ documents?: Array<{ fileKey?: string; fileUrl?: string }> } | null>();
     for (const document of profile?.documents ?? []) {
@@ -242,16 +282,4 @@ export async function deleteOwnAccount(user: AccountUser, options: { acknowledge
       PointTransaction.deleteMany({ userId: id }),
     );
   }
-
-  const results = await Promise.allSettled(steps);
-  const failed = results.filter((result) => result.status === "rejected").length;
-  if (failed) logger.error({ userId, role, failed }, "Account deletion: some personal data couldn't be removed");
-
-  // 3. Stored files last; a file that can't be removed is logged, not shown.
-  await Promise.allSettled([
-    ...privateFiles.map((key) => storageService.delete(key, BucketType.PRIVATE)),
-    ...publicFiles.map((url) => storageService.delete(url)),
-  ]);
-
-  logger.info({ userId, role, retentionNoticeAcknowledged: true }, "Account deleted by its owner");
 }
