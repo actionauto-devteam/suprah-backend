@@ -30,6 +30,8 @@ describe('rate limits on routes', () => {
   it.each([
     '.post(dispatchChatMessageLimiter, dispatchChannelController.sendMessage)',
     'router.post("/:id/attachments", dispatchChatUploadLimiter, uploadDispatchChatFiles,',
+    // People search shows names and photos: limited so nobody can list everyone they may find.
+    'router.get("/people", channelPeopleSearchLimiter, dispatchChannelController.searchPeople);',
   ])('Dispatch channels: %s', (expected) => {
     expect(dispatchChannel).toContain(expected);
   });

@@ -59,6 +59,14 @@ export const quoteChangeLimiter = perPersonLimiter(
   "You've created or changed a lot of quotes in the last few minutes. Wait a few minutes, then try again.",
 );
 
+// Each Dispatch Chat people search shows names and photos. Typing a few names
+// stays far below this; looping through the alphabet doesn't (2026-11-13).
+export const channelPeopleSearchLimiter = perPersonLimiter(
+  10 * 60 * 1000,
+  150,
+  "You've searched for people many times in the last few minutes. Wait a few minutes, then search again.",
+);
+
 // Matching drivers to a load shows each sharing driver's rounded distance to
 // the pickup. Normal use (Create Load, Driver Tracker's Assign Driver) stays
 // far below this; trying many pickup spots to pin a driver down doesn't.

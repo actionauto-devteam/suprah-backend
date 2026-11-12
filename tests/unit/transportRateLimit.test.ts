@@ -6,6 +6,7 @@
 import express from 'express';
 import request from 'supertest';
 import {
+  channelPeopleSearchLimiter,
   dispatchChatMessageLimiter,
   dispatchChatUploadLimiter,
   driverLoadRequestLimiter,
@@ -49,6 +50,7 @@ describe.each([
   ['Dispatch Chat messages', dispatchChatMessageLimiter, 30, "You're sending messages very quickly. Wait a minute, then send your message again."],
   ['driver load requests', driverLoadRequestLimiter, 20, "You've requested, cancelled or released loads many times in the last few minutes. Wait a few minutes, then try again."],
   ['quote changes', quoteChangeLimiter, 60, "You've created or changed a lot of quotes in the last few minutes. Wait a few minutes, then try again."],
+  ['Dispatch Chat people search', channelPeopleSearchLimiter, 150, "You've searched for people many times in the last few minutes. Wait a few minutes, then search again."],
   ['driver matching', driverMatchPreviewLimiter, 120, "You've checked driver matches many times in the last few minutes. Wait a few minutes, then try again."],
 ])('%s', (_name, limiter, max, message) => {
   const app = appWith(limiter);

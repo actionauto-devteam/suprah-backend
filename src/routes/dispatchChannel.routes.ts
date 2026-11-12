@@ -2,7 +2,11 @@ import express from "express";
 import auth from "../middleware/auth.middleware";
 import dispatchChannelController from "../controllers/dispatchChannel.controller";
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
-import { dispatchChatMessageLimiter, dispatchChatUploadLimiter } from "../middleware/transportRateLimit.middleware";
+import {
+  channelPeopleSearchLimiter,
+  dispatchChatMessageLimiter,
+  dispatchChatUploadLimiter,
+} from "../middleware/transportRateLimit.middleware";
 
 // Dispatch Chat channels. Signed-in drivers and staff only (checked in the
 // controller); no organization is required because members can come from
@@ -15,7 +19,8 @@ router.use((req, res, next) => {
   next();
 });
 
-router.get("/people", dispatchChannelController.searchPeople);
+// Finds only the people each person works with (see utils/dispatchPeopleSearch.ts).
+router.get("/people", channelPeopleSearchLimiter, dispatchChannelController.searchPeople);
 
 router
   .route("/")
