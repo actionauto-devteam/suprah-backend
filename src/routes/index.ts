@@ -14,6 +14,7 @@ import userRoute from "./user.route";
 import googleCalendarRoute from "./googleCalendar.routes";
 import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
+import staffDeletionRequestRoute from "./staffDeletionRequest.routes";
 import driverTrackingRoute from "./driverTracking.routes";
 import dispatchChannelRoute from "./dispatchChannel.routes";
 import integrationsRoute from "./integrations.routes";
@@ -347,6 +348,11 @@ const defaultRoutes = [
   {
     path: "/invitations",
     route: invitationRoute,
+  },
+  {
+    // Staff ask to delete their account; their dealership admin decides (2026-11-12).
+    path: "/account-deletion-requests",
+    route: staffDeletionRequestRoute,
   },
   {
     path: "/crm/aftermarket",
