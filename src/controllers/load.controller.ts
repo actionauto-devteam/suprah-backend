@@ -38,6 +38,7 @@
     import activityService from "../services/activity.service";
     import emailService from "../services/email.service";
     import Quote from "../models/Quote.model";
+    import { applyQuotePhotos, quoteIdsNeedingPhotos } from "../utils/loadQuotePhoto";
     import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
     import { findLoadQuoteOrigin } from "../services/quoteLeadLink.service";
     import { addLoadCarToGarage, loadGarageState } from "../services/loadGarageTransfer.service";
@@ -231,14 +232,13 @@
         }
       }
 
-      if (idSet.size === 0 && vinSet.size === 0) return;
-
       const or: Record<string, unknown>[] = [];
       if (idSet.size) or.push({ _id: { $in: Array.from(idSet) } });
       if (vinSet.size) or.push({ vin: { $in: Array.from(vinSet) } });
 
       try {
-        const inventory = await Vehicle.find({ organizationId, isDeleted: false, $or: or })
+        // A load with no VIN or inventory car skips the inventory lookup.
+        const inventory = !or.length ? [] : await Vehicle.find({ organizationId, isDeleted: false, $or: or })
           .select("vin images exteriorColor")
           .lean();
 
@@ -263,6 +263,24 @@
       } catch (err) {
         // Non-fatal: loads render without photos rather than failing the request
         logger.error({ err, organizationId }, "Failed to attach inventory images to loads");
+      }
+
+      // A car that isn't in this dealership's inventory (e.g. a customer's own
+      // car) keeps the photo from the quote the load was made from. One query
+      // per request, and only this dealership's quotes.
+      const quoteIds = quoteIdsNeedingPhotos(loads);
+      if (!quoteIds.length) return;
+      try {
+        const quotes = await Quote.find({
+          _id: { $in: quoteIds },
+          organizationId,
+          vehicleImage: { $exists: true, $nin: [null, ""] },
+        })
+          .select("vehicleImage vin vehicleId")
+          .lean();
+        applyQuotePhotos(loads, new Map(quotes.map((quote) => [String(quote._id), quote])));
+      } catch (err) {
+        logger.error({ err, organizationId }, "Failed to attach quote photos to loads");
       }
     };
 
