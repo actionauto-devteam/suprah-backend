@@ -673,7 +673,7 @@ export async function buildLeadTimeline(
       id: `note:${note._id || new Date(note.createdAt).getTime()}`,
       channel: "note",
       direction: "system",
-      title: note.milestone ? "Milestone note" : "Internal note",
+      title: note.noteKind === "appointment" ? "Appointment" : note.milestone ? "Milestone note" : "Internal note",
       body: note.text,
       actor: note.authorName || "Team member",
       occurredAt: note.createdAt,

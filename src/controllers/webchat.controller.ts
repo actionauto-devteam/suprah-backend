@@ -14,6 +14,7 @@ import IntakeClaim from '../models/IntakeClaim.model';
 import CrmLocation from '../models/CrmLocation.model';
 import { normalizeLocationKey } from '../utils/locationKey';
 import { touchLeadActivity } from '../utils/leadActivity';
+import { activeLeadStores, storeForStock } from '../utils/leadStore';
 import { LEAD_SOURCE } from '../constants/leadSource';
 import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
 import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
@@ -544,7 +545,10 @@ async function createWebchatLead(input: WebchatConversationInput, sessionId: mon
   const firstName = input.visitorFirstName || splitFirst;
   const lastName = input.visitorFirstName ? input.visitorLastName || '' : restOfName.join(' ');
   const vehicle = input.vehicle;
-  const location = input.location || vehicle?.dealerCity || undefined;
+  const stockStore = !input.location && vehicle?.stockNumber
+    ? storeForStock(await activeLeadStores(input.orgId).catch(() => []), vehicle.stockNumber)
+    : null;
+  const location = input.location || stockStore || vehicle?.dealerCity || undefined;
   const vehicleDetails = vehicle
     ? {
         year: vehicle.year ? String(vehicle.year) : undefined,

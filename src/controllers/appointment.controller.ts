@@ -24,6 +24,8 @@ import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
 import { submitLeadInquiry } from '../services/leadIntake.service';
 import { startNewLeadAutomations } from '../services/leadIntakeIntegration';
 import { startDrivingSessionForAppointment, endDrivingSessionForAppointment } from './locator.controller';
+import { recordAppointmentHistory } from '../services/appointmentHistory.service';
+import { activeLeadStores, storeForStock } from '../utils/leadStore';
 
 const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
@@ -538,6 +540,10 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
         }
     }
 
+    const bookingStore = (vehicle.stockNumber
+        ? storeForStock(await activeLeadStores(orgId).catch(() => []), vehicle.stockNumber)
+        : null) || vehicle.dealerCity || undefined;
+
     if (intakeMode !== 'off') {
         const bookingTime = start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: CALENDAR_TZ });
         const inquiryVehicle = {
@@ -578,7 +584,7 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
                 leadDraft: {
                     createdBy: systemUserId,
                     vehicleId: vehicle._id,
-                    location: vehicle.dealerCity || undefined,
+                    location: bookingStore,
                     status: 'Appointment Set',
                     appointment: { date: start, time: bookingTime, notes },
                 },
@@ -592,6 +598,11 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
         }
         if (intake.status !== 'inactive') {
             const intakeLeadId = intake.status === 'associated' || intake.status === 'duplicate' ? intake.leadId : null;
+            await recordAppointmentHistory(
+                { _id: bookingAppointment._id, organizationId: orgId, leadId: intakeLeadId || bookingAppointment.leadId, type: 'test-drive', startTime: start },
+                { userId: null, name: 'Website booking' },
+                'created',
+            );
             if (clientRequestId) {
                 await IntakeClaim.updateOne(
                     { organizationId: orgId, kind: 'test_drive_booking', claimKey: clientRequestId },
@@ -628,7 +639,7 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
             stock: vehicle.stockNumber,
         },
         vehicleId: vehicle._id,
-        location: vehicle.dealerCity || undefined,
+        location: bookingStore,
         comments: notes || `Requested a test drive for ${vehicleLabel} via the website.`,
         source: LEAD_SOURCE.WEBSITE_BOOKING,
         channel: 'web',
@@ -658,6 +669,7 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
         },
         notes,
     });
+    await recordAppointmentHistory(appointment, { userId: null, name: 'Website booking' }, 'created');
 
     lead.status = 'Appointment Set';
     lead.appointment = {

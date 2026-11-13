@@ -63,6 +63,8 @@ async function tx<T = any>(
 
 /* --------------------------------- SMS ---------------------------------- */
 
+export const SMS_SEND_TIMEOUT_MS = 20_000;
+
 export async function sendSms(to: string, text: string, from?: string) {
   if (isDemoPhone(to)) {
     return { id: `demo-${crypto.randomUUID()}`, to: [{ phone_number: to }] };
@@ -73,7 +75,7 @@ export async function sendSms(to: string, text: string, from?: string) {
     to,
     text,
     messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID || undefined,
-  });
+  }, SMS_SEND_TIMEOUT_MS);
   return res.data; // { id, ... }
 }
 

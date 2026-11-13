@@ -26,6 +26,12 @@ describe('describeSmsFailure', () => {
     expect(result?.category).toBe('landline');
   });
 
+  it('explains a provider that did not answer in time', () => {
+    const result = describeSmsFailure('The operation was aborted due to timeout');
+    expect(result?.category).toBe('unknown');
+    expect(result?.friendlyMessage).toMatch(/took too long to answer/);
+  });
+
   it('returns a generic unknown-category message when nothing matches', () => {
     const result = describeSmsFailure('some unrelated provider hiccup');
     expect(result?.category).toBe('unknown');

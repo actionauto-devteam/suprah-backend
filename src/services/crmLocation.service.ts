@@ -18,6 +18,8 @@ export const LOCATION_LIMITS = {
   name: 80,
   aliases: 20,
   alias: 80,
+  stockPrefixes: 10,
+  stockPrefix: 6,
   suggestions: 200,
   auditRows: 50,
 } as const;
@@ -34,7 +36,10 @@ export interface LocationInput {
   code?: string;
   name?: string;
   aliases?: string[];
+  stockPrefixes?: string[];
 }
+
+const STOCK_PREFIX_PATTERN = /^[A-Z0-9]+$/;
 
 const LABEL_PATTERN = /^[\p{L}\p{N} .,'&()#/-]+$/u;
 const EMAIL_PATTERN = /[^\s@]+@[^\s@]+\.[a-z]{2,}/i;
@@ -139,7 +144,40 @@ export function parseLocationInput(raw: unknown, mode: 'create' | 'update'): { v
     }
   }
 
+  if (input.stockPrefixes !== undefined) {
+    if (!Array.isArray(input.stockPrefixes)) {
+      issues.push({ field: 'stockPrefixes', code: 'invalid_type', message: 'Stock number starts with must be a list.' });
+    } else {
+      const prefixes: string[] = [];
+      input.stockPrefixes.forEach((item, index) => {
+        const prefix = typeof item === 'string' ? item.trim().toUpperCase() : '';
+        if (typeof item === 'string' && !prefix) return;
+        if (!prefix || prefix.length > LOCATION_LIMITS.stockPrefix || !STOCK_PREFIX_PATTERN.test(prefix)) {
+          issues.push({ field: `stockPrefixes.${index}`, code: 'invalid_format', message: `Use 1 to ${LOCATION_LIMITS.stockPrefix} letters or numbers for "Stock number starts with", like L.` });
+          return;
+        }
+        if (!prefixes.includes(prefix)) prefixes.push(prefix);
+      });
+      if (prefixes.length > LOCATION_LIMITS.stockPrefixes) {
+        issues.push({ field: 'stockPrefixes', code: 'too_many', message: `Add at most ${LOCATION_LIMITS.stockPrefixes} stock number starts.` });
+      }
+      value.stockPrefixes = prefixes;
+    }
+  }
+
   return { value, issues };
+}
+
+async function assertNoStockPrefixConflict(organizationId: string, prefixes: string[], excludeId?: any) {
+  if (!prefixes.length) return;
+  const filter: Record<string, unknown> = { organizationId, stockPrefixes: { $in: prefixes } };
+  if (excludeId) filter._id = { $ne: excludeId };
+  const other: any = await CrmLocation.findOne(filter).select('name status stockPrefixes').lean();
+  if (!other) return;
+  const shared = prefixes.find((prefix) => (other.stockPrefixes || []).includes(prefix)) || prefixes[0];
+  throw new ApiError(409, `Stock numbers starting with "${shared}" already belong to ${other.name}${other.status === 'archived' ? ' (archived)' : ''}.`, [
+    { field: 'stockPrefixes', code: 'stock_prefix_taken', message: `"${shared}" is already used by ${other.name}.` },
+  ]);
 }
 
 export function computeAliasKeys(code: string, name: string, aliases: string[]): string[] {
@@ -147,8 +185,14 @@ export function computeAliasKeys(code: string, name: string, aliases: string[]):
   return Array.from(new Set(keys));
 }
 
-function snapshot(location: { code?: string; name: string; aliases: string[]; status: any }, includeCode = true): CrmLocationSnapshot {
-  return { ...(includeCode ? { code: location.code } : {}), name: location.name, aliases: [...(location.aliases || [])], status: location.status };
+function snapshot(location: { code?: string; name: string; aliases: string[]; stockPrefixes?: string[]; status: any }, includeCode = true): CrmLocationSnapshot {
+  return {
+    ...(includeCode ? { code: location.code } : {}),
+    name: location.name,
+    aliases: [...(location.aliases || [])],
+    ...(location.stockPrefixes?.length ? { stockPrefixes: [...location.stockPrefixes] } : {}),
+    status: location.status,
+  };
 }
 
 const withSession = (session: ClientSession | null) => (session ? { session } : {});
@@ -226,6 +270,7 @@ export async function createLocation(input: { organizationId: string; user: any;
   const code = value.code as string;
   const name = value.name as string;
   const aliases = value.aliases || [];
+  const stockPrefixes = value.stockPrefixes || [];
   const keys = computeAliasKeys(code, name, aliases);
   const total = await CrmLocation.countDocuments({ organizationId: input.organizationId });
   if (total >= LOCATION_LIMITS.perOrg) throw new ApiError(409, `Your organization already has ${LOCATION_LIMITS.perOrg} locations.`);
@@ -233,11 +278,12 @@ export async function createLocation(input: { organizationId: string; user: any;
     throw new ApiError(409, `The code "${code}" is already used by another location.`, [{ field: 'code', code: 'code_taken', message: `The code "${code}" is already used.` }]);
   }
   await assertNoAliasConflict(input.organizationId, keys);
+  await assertNoStockPrefixConflict(input.organizationId, stockPrefixes);
   const actor = locationActor(input.user);
   try {
     return await runTrainingWrite(async (session) => {
       const [location] = await CrmLocation.create([{
-        organizationId: input.organizationId, code, name, aliases, aliasKeys: keys, status: 'active', revision: 1, createdBy: actor, updatedBy: actor,
+        organizationId: input.organizationId, code, name, aliases, aliasKeys: keys, stockPrefixes, status: 'active', revision: 1, createdBy: actor, updatedBy: actor,
       }], withSession(session));
       await writeAudit({ organizationId: input.organizationId, locationId: location._id, action: 'created', revision: 1, after: snapshot(location), actor, session });
       return location;
@@ -259,17 +305,21 @@ export async function updateLocation(input: { organizationId: string; user: any;
   requireIssuesFree(issues);
   const name = value.name ?? location.name;
   const aliases = value.aliases ?? location.aliases;
+  const stockPrefixes = value.stockPrefixes ?? (location.stockPrefixes || []);
   const keys = computeAliasKeys(location.code, name, aliases);
-  const unchanged = name === location.name && JSON.stringify(aliases) === JSON.stringify(location.aliases);
+  const unchanged = name === location.name
+    && JSON.stringify(aliases) === JSON.stringify(location.aliases)
+    && JSON.stringify(stockPrefixes) === JSON.stringify(location.stockPrefixes || []);
   if (unchanged) return { location, changed: false };
   await assertNoAliasConflict(input.organizationId, keys, location._id);
+  await assertNoStockPrefixConflict(input.organizationId, stockPrefixes, location._id);
   const actor = locationActor(input.user);
   const before = snapshot(location, false);
   try {
     const updated = await runTrainingWrite(async (session) => {
       const next = await CrmLocation.findOneAndUpdate(
         { _id: location._id, organizationId: input.organizationId, revision: location.revision, status: 'active' },
-        { $set: { name, aliases, aliasKeys: keys, updatedBy: actor }, $inc: { revision: 1 } },
+        { $set: { name, aliases, aliasKeys: keys, stockPrefixes, updatedBy: actor }, $inc: { revision: 1 } },
         { new: true, runValidators: true, ...withSession(session) },
       );
       if (!next) throw new ApiError(409, CONFLICT_MESSAGE);

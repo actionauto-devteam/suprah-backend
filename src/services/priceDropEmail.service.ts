@@ -6,6 +6,7 @@ import emailService from './email.service';
 import { NURTURE_ELIGIBLE_STATUSES } from '../constants/leadStatus';
 import logger from '../utils/logger';
 import { isDoNotContactError } from './contactRestriction.service';
+import { stampLeadCampaign } from '../utils/leadActivity';
 
 const MIN_DROP_AMOUNT = parseFloat(process.env.PRICE_DROP_EMAIL_MIN_AMOUNT || '250');
 const CANDIDATE_SCAN_LIMIT = 2000;
@@ -109,7 +110,9 @@ export async function processVehicleForPriceDrop(vehicle: IVehicle): Promise<{ m
     try {
       const sent = await emailService.sendPriceDropEmail({ lead, vehicle, previousPrice, newPrice });
       if (sent) {
-        await writeLog({ ...base, status: 'sent', sentAt: new Date() });
+        const sentAt = new Date();
+        await writeLog({ ...base, status: 'sent', sentAt });
+        await stampLeadCampaign(lead._id, 'price_drop', sentAt);
       } else {
         await writeLog({ ...base, status: 'skipped', skippedReason: 'No email on file or opted out' });
       }

@@ -10,6 +10,7 @@ import {
   IActorRef,
   ICommunicationMessage,
 } from "../models/communication.model";
+import { firstContactForConversation } from "../utils/leadFirstContact";
 import * as telnyx from "./telnyx.service";
 import { getSocketIO } from "../utils/socketEmitter";
 import { orgEventRoom } from "../utils/crmStaffRoom";
@@ -1041,6 +1042,12 @@ export async function getOrCreateConversation(opts: {
  *  as the mutual-exclusion gate: claim its `leadId` first (pre-generated, so
  *  two simultaneous events for the same new number can never both win), then
  *  create the Lead, rolling the claim back if creation fails. */
+async function firstContactForPhone(orgId: any, phone: string) {
+  const conversation: any = await Conversation.findOne({ orgId, customerPhone: normalizePhone(phone) }).select("_id").lean();
+  if (!conversation?._id) return { firstContactBy: "customer" as const, firstContactVia: null };
+  return firstContactForConversation(conversation._id);
+}
+
 export async function findOrCreateLeadForContact(opts: {
   orgId: any;
   conversation: any;
@@ -1095,6 +1102,7 @@ export async function findOrCreateLeadForContact(opts: {
 
     const displayName = customerDisplayName(opts.customer);
     const [firstName, ...rest] = (displayName || "").trim().split(/\s+/).filter(Boolean);
+    const firstContact = await firstContactForConversation(opts.conversation._id).catch(() => null);
 
     const lead = await LeadModel.create({
       _id: candidateId,
@@ -1106,6 +1114,7 @@ export async function findOrCreateLeadForContact(opts: {
       channel: opts.channel,
       source: opts.channel === "sms" ? LEAD_SOURCE.INBOUND_SMS : LEAD_SOURCE.INBOUND_CALL,
       status: "New",
+      ...(firstContact ? firstContact : {}),
       ...leadFieldsForLine(opts.line),
     });
 
@@ -1649,6 +1658,8 @@ export async function retainInboundSms(payload: any, orgOverride?: any): Promise
   }
   const customer = await findCustomerByPhone(orgId, from);
   const [firstName, ...rest] = (customerDisplayName(customer) || "").trim().split(/\s+/).filter(Boolean);
+  const firstContact = await firstContactForPhone(orgId, from).catch(() => null);
+  const smsDraft = { ...(line ? leadFieldsForLine(line) : {}), ...(firstContact || {}) };
   const { event, created } = await (await inquiryRecords()).recordInquiryEvent({
     organizationId: String(orgId),
     kind: "sms",
@@ -1658,7 +1669,7 @@ export async function retainInboundSms(payload: any, orgOverride?: any): Promise
     contact: { phone: from, firstName, lastName: rest.join(" ") || undefined, assurance: "carrier_verified" },
     comments: String(body).slice(0, 10000),
     sourceIds: { smsProviderMessageId: payload?.id || undefined, communicationMessageId: messageId },
-    ...(line ? { leadDraft: leadFieldsForLine(line) } : {}),
+    ...(Object.keys(smsDraft).length ? { leadDraft: smsDraft } : {}),
   });
   const originalId = (event as any).sourceIds?.communicationMessageId;
   return {
@@ -2481,6 +2492,8 @@ export async function handleCallInitiated(payload: any) {
   let callInquiryId: string | null = null;
   if (lifecycle) {
     const [firstName, ...rest] = (customerDisplayName(customer) || "").trim().split(/\s+/).filter(Boolean);
+    const firstContact = await firstContactForPhone(orgId, from).catch(() => null);
+    const callDraft = { ...(line ? leadFieldsForLine(line) : {}), ...(firstContact || {}) };
     const recorded = await (await inquiryRecords()).recordInquiryEvent({
       organizationId: String(orgId),
       kind: "call",
@@ -2489,7 +2502,7 @@ export async function handleCallInitiated(payload: any) {
       source: LEAD_SOURCE.INBOUND_CALL,
       contact: { phone: from, firstName, lastName: rest.join(" ") || undefined, assurance: "carrier_verified" },
       sourceIds: { callControlId },
-      ...(line ? { leadDraft: leadFieldsForLine(line) } : {}),
+      ...(Object.keys(callDraft).length ? { leadDraft: callDraft } : {}),
     }).catch((err) => {
       console.error("[comm] inbound call could not be recorded for lead intake", err);
       return null;

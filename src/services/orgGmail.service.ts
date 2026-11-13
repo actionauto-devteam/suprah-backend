@@ -11,7 +11,7 @@ import { parseEmailBody, extractADFFromBody, parseADF, detectChannel } from '../
 import { getSocketIO } from '../utils/socketEmitter';
 import { withRetry } from '../utils/withRetry';
 import { LEAD_SOURCE } from '../constants/leadSource';
-import { resolveVehicleContextForLead } from './leadLocation.service';
+import { resolveLeadStore } from '../utils/leadStore';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { triggerAiReplyForNewInquiry } from './communication.service';
 import { triggerAiEmailReplyForNewInquiry } from './aiEmailReply.service';
@@ -276,7 +276,7 @@ class OrgGmailService {
                         : undefined;
 
                     const vehicleContext = adfData
-                        ? await resolveVehicleContextForLead(orgId, adfData.vehicle).catch(() => null)
+                        ? await resolveLeadStore(orgId, adfData.vehicle).catch(() => null)
                         : null;
 
                     const upsertResult = await Lead.findOneAndUpdate(

@@ -22,6 +22,16 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import CrmUser from '../models/CrmUser.model';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
+import {
+  appointmentSnapshot,
+  assertSalespersonAvailable,
+  denverDateTime,
+  denverTime,
+  diffAppointment,
+  recordAppointmentHistory,
+  resolveSalesperson,
+  type AppointmentActor,
+} from './appointmentHistory.service';
 
 interface CreateAppointmentData {
   title: string;
@@ -47,6 +57,21 @@ interface CreateAppointmentData {
   meetingLink?: string;
   notes?: string;
   outcomeNotes?: string;
+  salespersonUserId?: string | null;
+}
+
+export interface AppointmentEditOptions {
+  staffEditor?: boolean;
+  actorName?: string;
+}
+
+async function actorNameFor(userId: string, given?: string): Promise<string> {
+  if (given) return given;
+  try {
+    return (await resolveOrganizer(userId))?.name || 'Team member';
+  } catch {
+    return 'Team member';
+  }
 }
 
 const resolveCalendarTarget = async (userId: string, orgId: string) => {
@@ -101,7 +126,7 @@ const checkUserAvailability = async (
 
   const conflict = await Appointment.findOne(filter);
   if (conflict) {
-    const timeStr = `${conflict.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${conflict.endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const timeStr = `${denverDateTime(conflict.startTime)} - ${denverTime(conflict.endTime)}`;
     throw new ApiError(409, `Double-Booking Conflict: You already have "${conflict.title}" scheduled for ${timeStr}.`);
   }
 };
@@ -171,14 +196,27 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     throw new ApiError(400, 'End time must be after start time');
   }
 
-  // Double-Booking Prevention — scope conflicts to the active organization.
-  await checkUserAvailability(userId, start, end, undefined, orgId);
+  const isCustomerBooking = Boolean(data.customerBooking?.isCustomerBooking);
+  const salesperson = isCustomerBooking && data.salespersonUserId
+    ? await resolveSalesperson(orgId, data.salespersonUserId)
+    : null;
+  if (isCustomerBooking) {
+    if (salesperson) await assertSalespersonAvailable(orgId, salesperson, start, end);
+  } else {
+    await checkUserAvailability(userId, start, end, undefined, orgId);
+  }
 
   if (start < new Date()) {
     throw new ApiError(400, 'Cannot schedule appointments in the past');
   }
 
-  const participants = [...new Set([userId, ...(data.participants ?? [])])];
+  const isCrmUser = await CrmUser.exists({ _id: userId });
+  const identityModel = isCrmUser ? 'CrmUser' : 'User';
+  const salespersonParticipant = salesperson
+    ? String(identityModel === 'CrmUser' ? salesperson.crmUserId || '' : salesperson.userId)
+    : '';
+  const participants = [...new Set([...(salespersonParticipant ? [salespersonParticipant] : [userId]), ...(data.participants ?? [])])];
+  const { salespersonUserId: _salespersonUserId, ...appointmentData } = data;
 
   const guestEmails = (data.guestEmails || []).map(email => ({
     email: email.toLowerCase().trim(),
@@ -201,11 +239,9 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     };
   }
 
-  const isCrmUser = await CrmUser.exists({ _id: userId });
-  const identityModel = isCrmUser ? 'CrmUser' : 'User';
-
   const appointment = await Appointment.create({
-    ...data,
+    ...appointmentData,
+    salesperson,
     createdBy: userId,
     createdByModel: identityModel,
     participantModel: identityModel,
@@ -225,6 +261,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
   }
 
   console.log('Appointment created:', appointment._id);
+  await recordAppointmentHistory(appointment, { userId, name: organizer.name || 'Team member' }, 'created');
 
   try {
     const target = await resolveCalendarTarget(userId, orgId);
@@ -450,7 +487,8 @@ const updateAppointment = async (
   appointmentId: string,
   orgId: string,
   userId: string,
-  updateData: Partial<CreateAppointmentData & { status: string; outcomeNotes: string }>
+  updateData: Partial<CreateAppointmentData & { status: string; outcomeNotes: string }>,
+  options: AppointmentEditOptions = {}
 ) => {
   const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
     .populate('createdBy', 'name fullName email');
@@ -461,19 +499,73 @@ const updateAppointment = async (
 
   const isCreator = appointment.createdBy._id.toString() === userId;
   const isParticipant = appointment.participants.some(p => p.toString() === userId);
+  const isCustomerBooking = Boolean(appointment.customerBooking?.isCustomerBooking);
+  const staffMayEdit = Boolean(options.staffEditor) && isCustomerBooking;
 
-  if (!isCreator && !isParticipant) {
+  if (!isCreator && !isParticipant && !staffMayEdit) {
     throw new ApiError(403, 'Not authorized to update this appointment');
   }
+
+  updateData = { ...updateData };
+  const sameIds = (next: unknown, current: unknown[]) => {
+    if (!Array.isArray(next)) return false;
+    const a = [...new Set(next.map(String))].sort();
+    const b = [...new Set(current.map((item: any) => String(item?._id ?? item)))].sort();
+    return a.length === b.length && a.every((value, index) => value === b[index]);
+  };
+  const sameGuests = (next: unknown, current: unknown[]) => {
+    if (!Array.isArray(next)) return false;
+    const emails = (list: unknown[]) => [...new Set(list.map((item: any) => String(item?.email ?? item).toLowerCase().trim()))].sort();
+    const a = emails(next);
+    const b = emails(current);
+    return a.length === b.length && a.every((value, index) => value === b[index]);
+  };
+  if (updateData.participants !== undefined && sameIds(updateData.participants, appointment.participants)) delete updateData.participants;
+  if (updateData.guestEmails !== undefined && sameGuests(updateData.guestEmails, appointment.guestEmails || [])) delete updateData.guestEmails;
 
   if (!isCreator && (updateData.participants || updateData.guestEmails)) {
     throw new ApiError(403, 'Only the creator can modify participants or guests');
   }
 
   updateData = withoutServerOwnedNoticeFields(updateData);
+  const before = appointmentSnapshot(appointment);
+  const salespersonChange = Object.prototype.hasOwnProperty.call(updateData, 'salespersonUserId');
+  const requestedSalesperson = updateData.salespersonUserId;
+  delete updateData.salespersonUserId;
+  if (salespersonChange && !isCustomerBooking) {
+    throw new ApiError(400, 'Only customer appointments have a salesperson.');
+  }
+  const previousSalesperson: any = appointment.salesperson || null;
+  const nextSalesperson = salespersonChange
+    ? (requestedSalesperson ? await resolveSalesperson(orgId, requestedSalesperson) : null)
+    : previousSalesperson;
   const previousStatus = appointment.status;
   const previousStartTime = appointment.startTime;
+  const previousEndTime = appointment.endTime;
   Object.assign(appointment, updateData);
+  if (salespersonChange) {
+    const participantIdFor = (person: any) => person
+      ? String(appointment.participantModel === 'CrmUser' ? person.crmUserId || '' : person.userId)
+      : '';
+    const creatorId = String((appointment.createdBy as any)?._id ?? appointment.createdBy);
+    const removeId = participantIdFor(previousSalesperson);
+    const addId = participantIdFor(nextSalesperson);
+    let ids = appointment.participants.map((item: any) => String(item?._id ?? item));
+    ids = ids.filter((id) => id !== removeId && id !== creatorId);
+    ids.push(addId || creatorId);
+    appointment.participants = [...new Set(ids)].map((id) => new mongoose.Types.ObjectId(id)) as any;
+    appointment.salesperson = nextSalesperson as any;
+  }
+  const timeChanged = new Date(appointment.startTime).getTime() !== new Date(previousStartTime).getTime()
+    || new Date(appointment.endTime).getTime() !== new Date(previousEndTime).getTime();
+  if (updateData.endTime !== undefined && new Date(appointment.startTime).getTime() >= new Date(appointment.endTime).getTime()) {
+    throw new ApiError(400, 'End time must be after start time');
+  }
+  const activeSalesperson: any = appointment.salesperson;
+  if (isCustomerBooking && activeSalesperson?.userId && appointment.status !== 'cancelled'
+    && (timeChanged || (salespersonChange && String(activeSalesperson.userId) !== String(previousSalesperson?.userId || '')))) {
+    await assertSalespersonAvailable(orgId, activeSalesperson, appointment.startTime, appointment.endTime, appointment._id);
+  }
   if (updateData.status && updateData.status !== previousStatus) {
     appointment.statusHistory = appointment.statusHistory || [];
     appointment.statusHistory.push({
@@ -502,6 +594,8 @@ const updateAppointment = async (
   console.log(`[AppointmentService] Saving appointment ${appointmentId}...`);
   await appointment.save();
   console.log(`[AppointmentService] Saved. Starting sync...`);
+  const actorName = await actorNameFor(userId, options.actorName);
+  await recordAppointmentHistory(appointment, { userId, name: actorName }, 'updated', diffAppointment(before, appointmentSnapshot(appointment)));
 
   emitToOrg(orgId, 'appointment:status_updated', {
     _id: appointment._id,
@@ -593,7 +687,7 @@ const updateAppointment = async (
   return appointment.populate('participants createdBy', 'name email avatar');
 };
 
-const cancelAppointment = async (appointmentId: string, orgId: string, userId: string) => {
+const cancelAppointment = async (appointmentId: string, orgId: string, userId: string, options: AppointmentEditOptions = {}) => {
   const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
     .populate('createdBy', 'name fullName email');
 
@@ -601,11 +695,13 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     throw new ApiError(404, 'Appointment not found');
   }
 
-  if (appointment.createdBy._id.toString() !== userId) {
+  const staffMayCancel = Boolean(options.staffEditor) && Boolean(appointment.customerBooking?.isCustomerBooking);
+  if (appointment.createdBy._id.toString() !== userId && !staffMayCancel) {
     throw new ApiError(403, 'Only the creator can cancel this appointment');
   }
 
   const previousStatus = appointment.status;
+  const actorName = await actorNameFor(userId, options.actorName);
   appointment.status = 'cancelled';
   appointment.statusHistory = appointment.statusHistory || [];
   appointment.statusHistory.push({
@@ -613,8 +709,10 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     to: 'cancelled',
     changedAt: new Date(),
     changedBy: userId,
+    actorName,
   });
   await appointment.save();
+  if (previousStatus !== 'cancelled') await recordAppointmentHistory(appointment, { userId, name: actorName }, 'cancelled');
 
   if (appointment.googleCalendarEventId) {
     try {
@@ -697,6 +795,8 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
     throw new ApiError(403, 'Only the creator can delete this appointment');
   }
 
+  const deletedBy = await actorNameFor(userId);
+  await recordAppointmentHistory(appointment, { userId, name: deletedBy }, 'deleted');
   console.log(`[AppointmentService] Deleting appointment ${appointmentId}...`);
   if (appointment.googleCalendarEventId) {
     try {

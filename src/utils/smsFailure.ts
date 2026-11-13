@@ -20,6 +20,9 @@ const CODE_MESSAGES: Record<string, SmsFailureDescription> = {
 
 function classifyByKeywords(text: string): SmsFailureDescription | null {
   const lower = text.toLowerCase();
+  if (lower.includes('timeout') || lower.includes('timed out')) {
+    return { friendlyMessage: "The texting service took too long to answer, so this text may not have gone out. Check the conversation before trying again.", category: 'unknown' };
+  }
   if (lower.includes('landline') || lower.includes('not sms capable') || lower.includes('non-sms')) {
     return { friendlyMessage: "This looks like a landline and can't receive text messages.", category: 'landline' };
   }

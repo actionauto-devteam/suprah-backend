@@ -17,6 +17,7 @@ export interface ICrmLocation extends Document {
   name: string;
   aliases: string[];
   aliasKeys: string[];
+  stockPrefixes: string[];
   status: CrmLocationStatus;
   archivedAt?: Date | null;
   revision: number;
@@ -45,6 +46,7 @@ const CrmLocationSchema: Schema<ICrmLocation> = new Schema(
       type: [{ type: String, required: true }],
       validate: { validator: (keys: string[]) => Array.isArray(keys) && keys.length > 0, message: 'A location needs at least one alias key' },
     },
+    stockPrefixes: { type: [{ type: String, trim: true, uppercase: true, maxlength: 6 }], default: [] },
     status: { type: String, enum: CRM_LOCATION_STATUSES, default: 'active', required: true },
     archivedAt: { type: Date, default: null },
     revision: { type: Number, required: true, min: 1, default: 1 },
