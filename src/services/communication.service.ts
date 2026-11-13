@@ -81,6 +81,7 @@ import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAi
   attentionOrgIds, recoverAiHumanAttention } from './aiHumanAttention.service';
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode, AiWorkflow } from './aiOperatingMode.service';
 import { customerNumberOf, dealershipNumberOf, LIVE_CALL_STATUSES, liveCallCutoff } from "../utils/callActivity";
+import { touchLeadActivity } from "../utils/leadActivity";
 import { initializeIvr, handleIvrGather, handleIvrCustomerAnswered, emitIvrCall, clearIvrTimer, canReceiveIvrCall, ivrAgentFailed, recoverIvrCalls, startHoldAudio, stopHoldAudio } from './ivr.service';
 
 const AI_AGENT_ACTOR_ID = "ai-agent";
@@ -1286,6 +1287,7 @@ async function bumpConversation(conversationId: any, message: any) {
       $inc: { messageCount: 1 },
     }
   );
+  if (message.leadId) await touchLeadActivity(message.leadId, message.orgId, message.createdAt);
 }
 
 /** Fire-and-forget: generates and sends Alex's next SMS reply for this
@@ -2972,6 +2974,7 @@ export async function logClientCall(opts: {
       { new: true, upsert: true }
     );
     emitToOrg(opts.orgId, "comm:call:update", { call: call.toObject() });
+    if (call.leadId) await touchLeadActivity(call.leadId, opts.orgId, call.startedAt);
     return call;
   }
 

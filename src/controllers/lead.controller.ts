@@ -42,6 +42,8 @@ import {
 } from '../services/contactRestriction.service';
 import { normalizeIdentityPhone } from '../utils/contactIdentity';
 import { addLeadNoteAndNotify } from '../utils/leadNote';
+import { touchLeadActivity } from '../utils/leadActivity';
+import { resolveCrmStaff } from '../utils/crmStaff';
 import { withRetry } from '../utils/withRetry';
 import {
   LEAD_SOURCE,
@@ -72,6 +74,13 @@ import {
   normalizeClientRequestId,
   type ComposerSendStart,
 } from '../services/leadComposer.service';
+
+async function viewerUserId(req: Request): Promise<string> {
+  const actor = (req as any).crmUser || (req as any).user;
+  if (!actor?._id || !req.orgId) return '';
+  const staff = await resolveCrmStaff(String(req.orgId), actor).catch(() => null);
+  return staff?.userId || '';
+}
 
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
@@ -434,6 +443,8 @@ export async function sendLeadReplyEmail(
     `[REPLY] Email sent to ${recipientEmail} with ${attachments.length} attachment(s)`,
   );
 
+  await touchLeadActivity(lead._id, orgId);
+
   return {
     gmailMessageId: sendResult?.data?.id || null,
     threadId: sentThreadId || lead.threadId || null,
@@ -742,7 +753,8 @@ export const getAllLeads = async (req: Request, res: Response) => {
     const sortBy =
       req.query.sortBy === "oldest" ||
       req.query.sortBy === "waiting_longest" ||
-      req.query.sortBy === "latest_activity"
+      req.query.sortBy === "latest_activity" ||
+      req.query.sortBy === "customer_activity"
         ? req.query.sortBy
         : "newest";
 
@@ -825,7 +837,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
       'customerId customerLink normalizedEmail normalizedPhone ' +
       'parsedContent threadId messageId isRead isPending channel ' +
       'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
-      'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
+      'centralIngestion labels followUp statusHistory notes assignedTo assignedAt assignmentUnseenBy aiSummary aiSummaryGeneratedAt ' +
       'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt';
 
     let leads: any[];
@@ -851,13 +863,17 @@ export const getAllLeads = async (req: Request, res: Response) => {
         { $limit: limit },
         { $project: Object.fromEntries(listFields.split(' ').filter(Boolean).map((field) => [field, 1])) },
       ]);
-    } else if (sortBy === "latest_activity") {
+    } else if (sortBy === "latest_activity" || sortBy === "customer_activity") {
+      const customerAt = { $ifNull: ['$followUp.lastCustomerActivityAt', '$createdAt'] };
+      const activityAt = sortBy === "latest_activity"
+        ? { $max: ['$createdAt', customerAt, { $ifNull: ['$followUp.lastActivityAt', '$createdAt'] }] }
+        : { $max: ['$createdAt', customerAt] };
       const ranked: Array<{ _id: unknown }> = await Lead.aggregate([
         { $match: Lead.find().cast(Lead, { ...query }) },
         {
           $project: {
             createdAt: 1,
-            activityAt: { $max: ['$createdAt', { $ifNull: ['$followUp.lastCustomerActivityAt', '$createdAt'] }] },
+            activityAt,
           },
         },
         { $sort: { activityAt: -1, createdAt: -1, _id: -1 } },
@@ -974,6 +990,29 @@ export const getLeadLocationCounts = async (req: Request, res: Response) => {
   }
 };
 
+export const getAssignedNewCount = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    if (!orgId) {
+      return res.status(400).json({ message: 'Organization context missing' });
+    }
+    const viewerId = await viewerUserId(req);
+    if (!mongoose.isValidObjectId(viewerId)) {
+      return res.json(new ApiResponse(200, { count: 0 }));
+    }
+    const count = await Lead.countDocuments({
+      organizationId: orgId,
+      assignedTo: viewerId,
+      assignmentUnseenBy: viewerId,
+      'combinedInto.leadId': { $exists: false },
+    });
+    res.json(new ApiResponse(200, { count }));
+  } catch (error) {
+    console.error('[ERROR] Error counting newly assigned leads:', error);
+    res.status(500).json({ message: 'Error counting newly assigned leads' });
+  }
+};
+
 export const getAppointmentsForLead = async (req: Request, res: Response) => {
   try {
     const orgId = req.orgId;
@@ -1015,7 +1054,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'customerId customerLink normalizedEmail normalizedPhone ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
+        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt assignmentUnseenBy aiSummary aiSummaryGeneratedAt ' +
         'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt'
       )
       .lean();
@@ -1481,6 +1520,9 @@ export const assignLead = async (req: Request, res: Response) => {
 
     lead.assignedTo = assigneeUser?._id;
     lead.assignedAt = assigneeUser ? new Date() : undefined;
+    const actingUserId = await viewerUserId(req);
+    lead.assignmentUnseenBy =
+      assigneeUser && String(assigneeUser._id) !== actingUserId ? assigneeUser._id : null;
     await lead.save();
 
     await activityService.createActivity({
@@ -1778,6 +1820,13 @@ export const markAsRead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const orgId = req.orgId;
+    const viewerId = await viewerUserId(req);
+    if (mongoose.isValidObjectId(viewerId) && mongoose.isValidObjectId(String(id))) {
+      await Lead.updateOne(
+        { _id: id, organizationId: orgId, assignmentUnseenBy: viewerId },
+        { $set: { assignmentUnseenBy: null } },
+      );
+    }
     const lead = await Lead.findOneAndUpdate(
       { _id: id, organizationId: orgId },
       { isRead: true },

@@ -4,6 +4,7 @@ import {
   getAllLeads,
   getLeadStatusCounts,
   getLeadLocationCounts,
+  getAssignedNewCount,
   getLeadById,
   getUnansweredInquiryReminders,
   runUnansweredInquiryReminderCheck,
@@ -64,6 +65,7 @@ router.post("/", syncLimiter, createInquiry);
 
 router.get("/status-counts", getLeadStatusCounts);
 router.get("/location-counts", getLeadLocationCounts);
+router.get("/assigned-new-count", getAssignedNewCount);
 router.get("/possible-matches", getLicensePossibleMatchesHandler);
 
 router.post(

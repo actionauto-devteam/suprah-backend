@@ -500,8 +500,8 @@ async function assignLead(orgId: string, leadId: string | null, userId: string |
   await Lead.updateOne(
     { _id: lead._id },
     userId
-      ? { $set: { assignedTo: new mongoose.Types.ObjectId(userId), assignedAt: new Date() }, $push: { assignmentHistory: history } }
-      : { $unset: { assignedTo: '', assignedAt: '' }, $push: { assignmentHistory: history } },
+      ? { $set: { assignedTo: new mongoose.Types.ObjectId(userId), assignedAt: new Date(), assignmentUnseenBy: new mongoose.Types.ObjectId(userId) }, $push: { assignmentHistory: history } }
+      : { $set: { assignmentUnseenBy: null }, $unset: { assignedTo: '', assignedAt: '' }, $push: { assignmentHistory: history } },
   );
   emitToOrg(orgId, 'lead:update', { leadId: String(lead._id) });
   return userId ? 'Assigned the lead' : 'Removed the assigned team member';

@@ -7,6 +7,7 @@ import { notifyUsers } from './safeNotification';
 import { notificationTemplates } from './notificationTemplates';
 import logger from './logger';
 import { crmStaffRoom } from './crmStaffRoom';
+import { touchLeadActivity } from './leadActivity';
 
 export interface AddLeadNoteInput {
   organizationId: string;
@@ -77,10 +78,11 @@ export async function addLeadNoteAndNotify(input: AddLeadNoteInput) {
 
   const expandedGroupMemberIds = await resolveGroupMemberIds(input.organizationId, mentionedGroupIds);
 
+  const noteAt = new Date();
   lead.notes = lead.notes || [];
   lead.notes.push({
     text,
-    createdAt: new Date(),
+    createdAt: noteAt,
     createdBy: input.createdBy as any,
     authorType: input.authorType,
     authorName: input.authorName,
@@ -91,6 +93,7 @@ export async function addLeadNoteAndNotify(input: AddLeadNoteInput) {
   });
 
   await lead.save();
+  await touchLeadActivity(lead._id, input.organizationId, noteAt);
 
   const note = lead.notes[lead.notes.length - 1];
 

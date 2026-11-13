@@ -13,6 +13,7 @@ import WebChatMessage from '../models/WebChatMessage.model';
 import IntakeClaim from '../models/IntakeClaim.model';
 import CrmLocation from '../models/CrmLocation.model';
 import { normalizeLocationKey } from '../utils/locationKey';
+import { touchLeadActivity } from '../utils/leadActivity';
 import { LEAD_SOURCE } from '../constants/leadSource';
 import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
 import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
@@ -223,6 +224,7 @@ export async function sendWebchatUnavailableAck(session: any): Promise<boolean> 
       { _id: session._id, organizationId: session.organizationId },
       { $set: { lastMessageAt: new Date() } },
     );
+    await touchLeadActivity(session.leadId, session.organizationId, message.createdAt);
     emitToOrg(String(session.organizationId), 'webchat:message', {
       leadId: String(session.leadId),
       message: serializeForStaff(message),
@@ -395,6 +397,7 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
             WebChatSession.updateOne({ _id: session._id, organizationId: session.organizationId }, { $set: { lastMessageAt: now } }),
             Lead.updateOne({ _id: session.leadId, organizationId: session.organizationId }, { $set: { 'followUp.lastRepResponseAt': now } }),
           ]);
+          await touchLeadActivity(session.leadId, session.organizationId, now);
           const payload = serializeForStaff(message);
           emitToOrg(String(session.organizationId), 'webchat:message', {
             leadId: String(session.leadId),
@@ -1116,6 +1119,7 @@ export const sendStaffMessage = asyncHandler(async (req: Request, res: Response)
     WebChatSession.updateOne({ _id: session._id }, { $set: { lastMessageAt: now } }),
     Lead.updateOne({ _id: session.leadId }, { $set: { 'followUp.lastRepResponseAt': now } }),
   ]);
+  await touchLeadActivity(session.leadId, session.organizationId, now);
 
   await recordWebchatExceptionReply(session, replyDecision, {
     actor: { kind: 'staff', userId: staff.userId, name: staff.name },
