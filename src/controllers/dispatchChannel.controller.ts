@@ -12,7 +12,9 @@ import User, { IUser } from "../models/User.model";
 import Organization from "../models/Organization.model";
 import DispatchChannel, { IDispatchChannel } from "../models/DispatchChannel.model";
 import DispatchChannelMessage from "../models/DispatchChannelMessage.model";
+import Load from "../models/Load.model";
 import { storageService, BucketType } from "../services/storage.service";
+import { peopleSearchScope } from "../utils/dispatchPeopleSearch";
 
 // Business rules live in models/DispatchChannel.model.ts.
 
@@ -956,18 +958,51 @@ const markRead = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) 
 
 // ─── People search ───────────────────────────────────────────────────────────
 
-// GET /api/dispatch-channels/people?search=  (drivers and staff anywhere on the platform)
+/** A driver's dealerships (any load ever assigned to them) and the other drivers those dealerships have used. */
+async function driverWorkCircle(driverId: unknown) {
+  const haulOrganizationIds: unknown[] = await Load.distinct("organizationId", { assignedDriverId: driverId });
+  const dealerships = haulOrganizationIds.map(String).filter(Boolean);
+  const fellowDriverIds: unknown[] = dealerships.length
+    ? await Load.distinct("assignedDriverId", { organizationId: { $in: dealerships }, assignedDriverId: { $ne: null } })
+    : [];
+  return { haulOrganizationIds, fellowDriverIds };
+}
+
+/**
+ * The people this person may find (see utils/dispatchPeopleSearch.ts): for a
+ * driver, the dealerships they've hauled for and those dealerships' drivers;
+ * for everyone, the people already in a channel with them. Lookups on indexed
+ * fields.
+ */
+async function peopleSearchScopeFor(user: IUser, signedInOrganizationId: unknown) {
+  const role = String(user.role);
+  const [circle, channelMateIds] = await Promise.all([
+    role === "driver" ? driverWorkCircle(user._id) : Promise.resolve({ haulOrganizationIds: [], fellowDriverIds: [] }),
+    role === "super_admin" ? Promise.resolve([]) : DispatchChannel.distinct("members.userId", { "members.userId": user._id }),
+  ]);
+  return peopleSearchScope(
+    { id: String(user._id), role, organizationId: signedInOrganizationId || user.organizationId },
+    { ...circle, channelMateIds },
+  );
+}
+
+// GET /api/dispatch-channels/people?search=  Only people this person works with (2026-11-13).
 const searchPeople = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const search = String(req.query.search ?? "").trim().slice(0, 60);
   if (search.length < 2) {
     return res.status(200).json(new ApiResponse(200, { people: [] }, "Type at least 2 letters of a name"));
   }
+  const scope = await peopleSearchScopeFor(user, req.orgId);
+  if (!scope.length) {
+    return res.status(200).json(new ApiResponse(200, { people: [] }, "Nobody you work with matches that name"));
+  }
   const users: any[] = await User.find({
     _id: { $ne: user._id },
     isActive: true,
     role: { $in: CHANNEL_USER_ROLES },
     name: new RegExp(escapeRegex(search), "i"),
+    $or: scope,
   })
     .select("_id")
     .sort({ name: 1 })

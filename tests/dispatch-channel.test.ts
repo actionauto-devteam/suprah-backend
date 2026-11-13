@@ -1,6 +1,7 @@
 /**
  * Dispatch Chat channels — the business rules end to end:
- * staff create; anyone on the platform can be added; creator and
+ * staff create; anyone on the platform can be added, but the people search
+ * finds only the people each person works with (2026-11-13); creator and
  * administrators manage people and roles (never the creator); members
  * suggest and an administrator approves; people who leave or are removed lose
  * access; the creator closes the channel and its history stays readable.
@@ -13,11 +14,14 @@ import Organization from '../src/models/Organization.model';
 import Notification from '../src/models/Notification.model';
 import DispatchChannel from '../src/models/DispatchChannel.model';
 import DispatchChannelMessage from '../src/models/DispatchChannelMessage.model';
+import Load from '../src/models/Load.model';
 import tokenService from '../src/services/token.service';
 import { storageService } from '../src/services/storage.service';
 
 const DOMAIN = '@dispatch-channel-test.com';
 const SLUGS = ['dispatch-channel-test-a', 'dispatch-channel-test-b'];
+// Bare load records (only what the people search reads): who hauled for whom.
+const LOAD_MARK = /^CHANNEL-TEST-/;
 
 let orgA: any;
 let orgB: any;
@@ -46,6 +50,7 @@ async function cleanUp() {
   await DispatchChannelMessage.deleteMany({ channelId: { $in: channels.map((c) => c._id) } });
   await DispatchChannel.deleteMany({ _id: { $in: channels.map((c) => c._id) } });
   await Notification.deleteMany({ userId: { $in: ids } });
+  await Load.collection.deleteMany({ loadNumber: { $regex: LOAD_MARK } });
   await User.deleteMany({ _id: { $in: ids } });
   await Organization.deleteMany({ slug: { $in: SLUGS } });
 }
@@ -62,6 +67,13 @@ beforeAll(async () => {
   await makeUser('driverOne', 'driver');
   await makeUser('driverTwo', 'driver');
   await makeUser('customer', 'customer', orgA);
+  await makeUser('loneDriver', 'driver');
+  await makeUser('strangerStaff', 'employee', orgB);
+  // Both drivers have hauled for Org A, so they can find each other and Org A's staff.
+  await Load.collection.insertMany([
+    { loadNumber: 'CHANNEL-TEST-1', organizationId: String(orgA._id), assignedDriverId: people.driverOne.user._id, status: 'Delivered' },
+    { loadNumber: 'CHANNEL-TEST-2', organizationId: String(orgA._id), assignedDriverId: people.driverTwo.user._id, status: 'Delivered' },
+  ]);
 }, 60000);
 
 afterAll(async () => {
@@ -115,6 +127,23 @@ describe('Dispatch Chat channels', () => {
 
     const page = await request(app).get(`/api/dispatch-channels/${channelId}/messages`).set(auth('otherStaff')).expect(200);
     expect(page.body.data.messages.some((message: any) => message.content === 'Loaded and rolling')).toBe(true);
+  });
+
+  it('the people search finds only the people each person works with', async () => {
+    const find = async (who: string, name: string) =>
+      (await request(app).get('/api/dispatch-channels/people').query({ search: name }).set(auth(who)).expect(200)).body.data.people.map(
+        (person: any) => person.id,
+      );
+    // Staff: any driver, their own dealership's staff, and channel mates.
+    expect(await find('creator', 'Channel loneDriver')).toEqual([id('loneDriver')]);
+    expect(await find('creator', 'Channel otherStaff')).toEqual([id('otherStaff')]);
+    expect(await find('creator', 'Channel strangerStaff')).toEqual([]);
+    expect(await find('otherStaff', 'Channel strangerStaff')).toEqual([id('strangerStaff')]);
+    // Drivers: staff and drivers of dealerships they've hauled for, and channel mates.
+    expect(await find('driverTwo', 'Channel creator')).toEqual([id('creator')]);
+    expect(await find('driverTwo', 'Channel strangerStaff')).toEqual([]);
+    expect(await find('loneDriver', 'Channel')).toEqual([]);
+    await request(app).get('/api/dispatch-channels/people').query({ search: 'Channel' }).set(auth('customer')).expect(403);
   });
 
   it('members suggest people and an administrator approves them', async () => {
