@@ -55,6 +55,7 @@ export interface ILead extends Document {
 
   assignedTo?: mongoose.Types.ObjectId;
   assignedAt?: Date;
+  assignmentUnseenBy?: mongoose.Types.ObjectId | null;
   assignmentHistory?: Array<{
     from?: mongoose.Types.ObjectId;
     to?: mongoose.Types.ObjectId;
@@ -107,6 +108,7 @@ export interface ILead extends Document {
   followUp?: {
     lastCustomerActivityAt?: Date;
     lastRepResponseAt?: Date;
+    lastActivityAt?: Date;
     lastReminderSentAt?: Date;
     reminderCount?: number;
     nurtureCount?: number;
@@ -298,6 +300,12 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       default: null,
     },
 
+    assignmentUnseenBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+
     assignmentHistory: [
       {
         from: {
@@ -418,6 +426,11 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       },
 
       lastRepResponseAt: {
+        type: Date,
+        default: null,
+      },
+
+      lastActivityAt: {
         type: Date,
         default: null,
       },
