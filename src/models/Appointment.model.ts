@@ -110,6 +110,20 @@ export interface IAppointment extends Document {
     actorName?: string;
   }>;
 
+  salesperson?: {
+    userId: mongoose.Types.ObjectId;
+    crmUserId?: mongoose.Types.ObjectId | null;
+    name: string;
+  } | null;
+
+  changeHistory?: Array<{
+    at: Date;
+    byUserId?: string | null;
+    byName: string;
+    action: 'created' | 'updated' | 'cancelled' | 'status' | 'deleted';
+    changes: Array<{ field: string; label: string; from?: string; to?: string }>;
+  }>;
+
   googleCalendarEventId?: string;
   meetingLink?: string;
   syncedWithGoogleCalendar: boolean;
@@ -293,6 +307,27 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       changedAt: { type: Date, default: Date.now },
       changedBy: { type: String },
       actorName: { type: String, trim: true }
+    }],
+    salesperson: {
+      type: new Schema({
+        userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+        crmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', default: null },
+        name: { type: String, trim: true, required: true },
+      }, { _id: false }),
+      default: null,
+    },
+    changeHistory: [{
+      at: { type: Date, default: Date.now },
+      byUserId: { type: String, default: null },
+      byName: { type: String, trim: true, required: true },
+      action: { type: String, enum: ['created', 'updated', 'cancelled', 'status', 'deleted'], required: true },
+      changes: [{
+        _id: false,
+        field: { type: String, required: true },
+        label: { type: String, required: true },
+        from: { type: String },
+        to: { type: String },
+      }],
     }],
     googleCalendarEventId: String,
     meetingLink: String,

@@ -57,7 +57,7 @@ export interface ConversationItem {
   inquiry?: { isOriginal: boolean; kind: string; source?: string | null; sourceProvider?: string | null; channel?: string | null; vehicle?: Record<string, unknown> | null };
   attachments?: string[];
   messageId?: string;
-  note?: { authorType?: string; milestone?: boolean };
+  note?: { authorType?: string; milestone?: boolean; kind?: string };
 }
 
 const DELIVERY_LABELS: Record<DeliveryCode, string> = {
@@ -436,7 +436,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
       occurredAt: toIso(note.createdAt),
       body: note.text || '',
       author: { name: note.authorName || 'Team member', kind: note.authorType === 'ai' ? 'ai' : 'staff' },
-      note: { authorType: note.authorType || 'user', milestone: Boolean(note.milestone) },
+      note: { authorType: note.authorType || 'user', milestone: Boolean(note.milestone), ...(note.noteKind ? { kind: note.noteKind } : {}) },
     });
   });
 

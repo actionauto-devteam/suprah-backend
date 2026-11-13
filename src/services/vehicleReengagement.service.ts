@@ -356,6 +356,7 @@ export async function processLeadForVehicle(lead: any, vehicle: IVehicle): Promi
     {
       $set: { 'followUp.lastReengagementAt': now },
       $inc: { 'followUp.reengagementCount': 1 },
+      $max: { 'campaignSentAt.reengagement': now },
     },
   );
 

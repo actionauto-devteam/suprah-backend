@@ -10,6 +10,12 @@ import config from '../config';
 import appointmentService from '../services/appointment.service';
 import { emitToOrg, emitToUser } from '../utils/socketEmitter';
 import { readCalendarState, signCalendarState } from '../utils/calendarOAuthState';
+import { appointmentSnapshot, diffAppointment, recordAppointmentHistory } from '../services/appointmentHistory.service';
+
+function crmActorName(req: Request): string {
+  const actor: any = req.crmUser || {};
+  return String(actor.fullName || actor.name || actor.email || 'Team member');
+}
 
 
 const SCOPES = [
@@ -216,7 +222,8 @@ export const crmCalendarController = {
       id,
       orgId,
       crmUserId,
-      req.body
+      req.body,
+      { staffEditor: true, actorName: crmActorName(req) }
     );
 
     res.json({
@@ -237,7 +244,8 @@ export const crmCalendarController = {
     const appointment = await appointmentService.cancelAppointment(
       id,
       orgId,
-      crmUserId
+      crmUserId,
+      { staffEditor: true, actorName: crmActorName(req) }
     );
 
     res.json({
@@ -260,7 +268,7 @@ export const crmCalendarController = {
     }
 
     // Direct update — CRM staff can update any booking in their org without creator check
-    const current = await Appointment.findOne({ _id: id, organizationId: orgId }).select('status');
+    const current = await Appointment.findOne({ _id: id, organizationId: orgId });
     if (!current) throw new ApiError(404, 'Appointment not found');
 
     const updateFields: Record<string, any> = { status };
@@ -286,6 +294,12 @@ export const crmCalendarController = {
     );
 
     if (!appointment) throw new ApiError(409, 'Appointment status changed. Refresh and try again.');
+    await recordAppointmentHistory(
+      appointment,
+      { userId: String((req.crmUser as any)._id), name: crmActorName(req) },
+      'status',
+      diffAppointment(appointmentSnapshot(current), appointmentSnapshot(appointment)),
+    );
 
     // Push update to org (CRM table refreshes live) and to the customer (stepper advances live)
     emitToOrg(orgId, 'appointment:status_updated', { _id: id, status, orgId });

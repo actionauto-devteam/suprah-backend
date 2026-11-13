@@ -56,6 +56,14 @@ export interface ILead extends Document {
   assignedTo?: mongoose.Types.ObjectId;
   assignedAt?: Date;
   assignmentUnseenBy?: mongoose.Types.ObjectId | null;
+  firstContactBy?: 'customer' | 'team' | null;
+  firstContactVia?: 'team_text' | 'team_call' | 'added_by_team' | null;
+  campaignSentAt?: {
+    priceDrop?: Date | null;
+    reengagement?: Date | null;
+    smsCampaign?: Date | null;
+    emailCampaign?: Date | null;
+  };
   assignmentHistory?: Array<{
     from?: mongoose.Types.ObjectId;
     to?: mongoose.Types.ObjectId;
@@ -160,6 +168,7 @@ export interface ILead extends Document {
     mentionedUserIds?: mongoose.Types.ObjectId[];
     mentionedGroupIds?: mongoose.Types.ObjectId[];
     milestone?: boolean;
+    noteKind?: 'appointment';
     sourceTaskId?: mongoose.Types.ObjectId;
   }>;
 
@@ -304,6 +313,25 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       default: null,
+    },
+
+    firstContactBy: {
+      type: String,
+      enum: ['customer', 'team', null],
+      default: null,
+    },
+
+    firstContactVia: {
+      type: String,
+      enum: ['team_text', 'team_call', 'added_by_team', null],
+      default: null,
+    },
+
+    campaignSentAt: {
+      priceDrop: { type: Date, default: null },
+      reengagement: { type: Date, default: null },
+      smsCampaign: { type: Date, default: null },
+      emailCampaign: { type: Date, default: null },
     },
 
     assignmentHistory: [
@@ -640,6 +668,11 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
 
         milestone: {
           type: Boolean,
+        },
+
+        noteKind: {
+          type: String,
+          enum: ['appointment'],
         },
 
         sourceTaskId: {

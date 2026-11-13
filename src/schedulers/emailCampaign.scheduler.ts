@@ -8,6 +8,7 @@ import { isWithinSendingHours } from '../utils/sendingWindow';
 import { retryDbWrite } from '../utils/retryDbWrite';
 import logger from '../utils/logger';
 import { isDoNotContactError } from '../services/contactRestriction.service';
+import { stampLeadCampaign } from '../utils/leadActivity';
 
 const CRON_SCHEDULE = process.env.EMAIL_CAMPAIGN_CRON || '* * * * *';
 const BATCH_PER_TICK = parseInt(process.env.EMAIL_CAMPAIGN_BATCH_PER_TICK || '20', 10);
@@ -172,6 +173,7 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
         );
         if (updateResult.matchedCount > 0) {
           await EmailCampaign.updateOne({ _id: campaign._id }, { $inc: { sentCount: 1 } });
+          if (recipient.leadId) await stampLeadCampaign(recipient.leadId, 'email_campaign');
         } else {
           logger.warn(
             { campaignId: campaign._id, recipientId: recipient._id },

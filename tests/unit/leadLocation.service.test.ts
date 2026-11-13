@@ -94,6 +94,70 @@ describe('resolveVehicleContextForLead', () => {
     expect(result).toEqual({ vehicleId: 'vin-match-id', location: undefined });
   });
 
+  it('matches by stock number when the VIN is missing, before trying year+make+model', async () => {
+    mockVehicleFind.mockReturnValueOnce(selectLimitLean([{ _id: 'stock-match-id', dealerCity: 'Orem' }]));
+
+    const result = await resolveVehicleContextForLead('org-1', { stock: ' a1234 ', year: '2024', make: 'Toyota', model: 'Camry' });
+
+    expect(mockVehicleFindOne).not.toHaveBeenCalled();
+    expect(mockVehicleFind).toHaveBeenCalledTimes(1);
+    expect(mockVehicleFind).toHaveBeenCalledWith({ organizationId: 'org-1', stockNumber: { $in: ['a1234', 'A1234'] } });
+    expect(result).toEqual({ vehicleId: 'stock-match-id', location: 'Orem' });
+  });
+
+  it('falls back to stock number when the VIN is not in inventory', async () => {
+    mockVehicleFindOne.mockReturnValue(selectLean(null));
+    mockVehicleFind.mockReturnValueOnce(selectLimitLean([{ _id: 'stock-match-id', dealerCity: 'Lehi' }]));
+
+    const result = await resolveVehicleContextForLead('org-1', { vin: 'NOTFOUND', stock: 'L555' });
+
+    expect(result).toEqual({ vehicleId: 'stock-match-id', location: 'Lehi' });
+  });
+
+  it('leaves the store empty when the same stock number is at both stores', async () => {
+    mockVehicleFind.mockReturnValueOnce(selectLimitLean([
+      { _id: 'first', dealerCity: 'Lehi' },
+      { _id: 'second', dealerCity: 'Orem' },
+    ]));
+
+    const result = await resolveVehicleContextForLead('org-1', { stock: 'DUP1' });
+
+    expect(result).toEqual({ vehicleId: 'first', location: undefined });
+  });
+
+  it('moves on to year+make+model when the stock number is not in inventory', async () => {
+    mockVehicleFind
+      .mockReturnValueOnce(selectLimitLean([]))
+      .mockReturnValueOnce(selectLimitLean([{ _id: 'fuzzy-match-id', year: 2024, make: 'Toyota', modelName: 'Camry', dealerCity: 'Orem' }]));
+
+    const result = await resolveVehicleContextForLead('org-1', { stock: 'GONE1', year: '2024', make: 'Toyota', model: 'Camry' });
+
+    expect(mockVehicleFind).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ vehicleId: 'fuzzy-match-id', location: 'Orem' });
+  });
+
+  it('does not guess the store when year+make+model matches cars at both stores', async () => {
+    mockVehicleFind.mockReturnValue(selectLimitLean([
+      { _id: 'lehi-camry', year: 2024, make: 'Toyota', modelName: 'Camry', dealerCity: 'Lehi' },
+      { _id: 'orem-camry', year: 2024, make: 'Toyota', modelName: 'Camry', dealerCity: 'Orem' },
+    ]));
+
+    const result = await resolveVehicleContextForLead('org-1', { year: '2024', make: 'Toyota', model: 'Camry' });
+
+    expect(result).toEqual({ vehicleId: 'lehi-camry', location: undefined });
+  });
+
+  it('keeps the store when every year+make+model match is at the same store', async () => {
+    mockVehicleFind.mockReturnValue(selectLimitLean([
+      { _id: 'camry-1', year: 2024, make: 'Toyota', modelName: 'Camry', dealerCity: 'Lehi' },
+      { _id: 'camry-2', year: 2024, make: 'Toyota', modelName: 'Camry SE', dealerCity: ' lehi ' },
+    ]));
+
+    const result = await resolveVehicleContextForLead('org-1', { year: '2024', make: 'Toyota', model: 'Camry' });
+
+    expect(result).toEqual({ vehicleId: 'camry-1', location: 'Lehi' });
+  });
+
   it('exports the shared Unknown Location label', () => {
     expect(UNMAPPED_LEAD_LOCATION_LABEL).toBe('Unknown Location');
   });

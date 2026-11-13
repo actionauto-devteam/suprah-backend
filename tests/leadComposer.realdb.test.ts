@@ -284,6 +284,26 @@ describe('Real-DB: SMS / Email composer (local MongoDB only)', () => {
       expect(mockSendSms).not.toHaveBeenCalled();
     });
 
+    it('treats a texting provider that does not answer in time as "may have been sent"', async () => {
+      const phone = nextPhone();
+      const lead = await makeLead({ phone });
+      mockSendSms.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+      const res = await sendText({ toPhone: phone, body: 'Slow provider', leadId: String(lead._id), clientRequestId: nextRequestId() }).expect(409);
+      expect(codeOf(res)).toBe('SEND_UNCERTAIN');
+      const stored: any = await CommunicationMessage.findOne({ leadId: lead._id, direction: 'outbound' }).lean();
+      expect(stored.status).toBe('pending_reconciliation');
+    });
+
+    it('explains a provider timeout in plain words when there is no send request id', async () => {
+      const phone = nextPhone();
+      const lead = await makeLead({ phone });
+      mockSendSms.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+      const res = await sendText({ toPhone: phone, body: 'Slow provider again', leadId: String(lead._id) }).expect(502);
+      expect(res.body.message).toMatch(/took too long to answer/);
+      const stored: any = await CommunicationMessage.findOne({ leadId: lead._id, direction: 'outbound' }).lean();
+      expect(stored.status).toBe('failed');
+    });
+
     it('marks an unconfirmed provider outcome and never resends it automatically', async () => {
       const phone = nextPhone();
       const lead = await makeLead({ phone });

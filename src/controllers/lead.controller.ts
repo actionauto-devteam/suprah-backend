@@ -51,7 +51,19 @@ import {
   normalizeLeadSourceForDisplay,
   isGenuineDemoLead,
 } from '../constants/leadSource';
-import { resolveVehicleContextForLead, UNMAPPED_LEAD_LOCATION_LABEL } from '../services/leadLocation.service';
+import { UNMAPPED_LEAD_LOCATION_LABEL } from '../services/leadLocation.service';
+import { activeLeadStores, labelsForStore, resolveLeadStore, storeForLabel } from '../utils/leadStore';
+import { getCompanyDayRange } from '../utils/companyTimezone';
+import {
+  campaignDateCondition,
+  campaignKindsFor,
+  campaignSummary,
+  firstContactForStaffLead,
+  leadTypeCondition,
+  leadTypeCountsFromGroup,
+  leadTypeCountsGroup,
+  parseLeadTypeFilter,
+} from '../utils/leadType';
 import { triggerAiReplyForNewInquiry } from '../services/communication.service';
 import { triggerAiEmailReplyForNewInquiry } from '../services/aiEmailReply.service';
 import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
@@ -113,20 +125,18 @@ function parseDateOnlyBoundary(value: unknown, boundary: 'start' | 'end'): Date 
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
-  const date =
-    boundary === 'start'
-      ? new Date(year, month - 1, day, 0, 0, 0, 0)
-      : new Date(year, month - 1, day, 23, 59, 59, 999);
+  const check = new Date(Date.UTC(year, month - 1, day));
 
   if (
-    date.getFullYear() !== year ||
-    date.getMonth() !== month - 1 ||
-    date.getDate() !== day
+    check.getUTCFullYear() !== year ||
+    check.getUTCMonth() !== month - 1 ||
+    check.getUTCDate() !== day
   ) {
     return null;
   }
 
-  return date;
+  const range = getCompanyDayRange(trimmed);
+  return boundary === 'start' ? range.start : new Date(range.end.getTime() - 1);
 }
 
 function parseReminderThreshold(value: unknown) {
@@ -554,7 +564,7 @@ export const receiveADF = async (req: Request, res: Response) => {
     }
 
     if ((await getLeadIntakeMode(orgId)) !== 'off') {
-      const intakeVehicle = await resolveVehicleContextForLead(orgId, adfData.vehicle).catch(() => null);
+      const intakeVehicle = await resolveLeadStore(orgId, adfData.vehicle).catch(() => null);
       const intake = await submitLeadInquiry(adfInquiryRequest({
         organizationId: String(orgId),
         adf: adfData,
@@ -607,7 +617,7 @@ export const receiveADF = async (req: Request, res: Response) => {
       return res.status(200).send('Lead already processed');
     }
 
-    const vehicleContext = await resolveVehicleContextForLead(orgId, adfData.vehicle).catch(() => null);
+    const vehicleContext = await resolveLeadStore(orgId, adfData.vehicle).catch(() => null);
 
     const leadToInsert = {
       organizationId: orgId,
@@ -739,6 +749,8 @@ export const getAllLeads = async (req: Request, res: Response) => {
     const assignedTo = req.query.assignedTo as string;
     const location = req.query.location as string;
     const source = typeof req.query.source === 'string' ? req.query.source.trim() : '';
+    const leadTypeFilter = parseLeadTypeFilter(req.query.leadType);
+    const campaignKinds = campaignKindsFor(leadTypeFilter);
     const dateFrom = parseDateOnlyBoundary(req.query.dateFrom, 'start');
     const dateTo = parseDateOnlyBoundary(req.query.dateTo, 'end');
 
@@ -789,7 +801,14 @@ export const getAllLeads = async (req: Request, res: Response) => {
           ],
         });
       } else {
-        query.location = { $regex: `^${escapeRegex(location)}$`, $options: 'i' };
+        const stores = await activeLeadStores(orgId);
+        const storeName = storeForLabel(stores, location);
+        if (storeName) {
+          const savedLabels = await Lead.distinct('location', { organizationId: orgId });
+          query.location = { $in: labelsForStore(stores, storeName, savedLabels) };
+        } else {
+          query.location = { $regex: `^${escapeRegex(location)}$`, $options: 'i' };
+        }
       }
     }
 
@@ -798,11 +817,20 @@ export const getAllLeads = async (req: Request, res: Response) => {
       appendLeadCondition(query, sourceCondition);
     }
 
+    if (leadTypeFilter) {
+      appendLeadCondition(query, leadTypeCondition(leadTypeFilter));
+    }
+
     if (dateFrom || dateTo) {
-      query.createdAt = {
+      const range = {
         ...(dateFrom ? { $gte: dateFrom } : {}),
         ...(dateTo ? { $lte: dateTo } : {}),
       };
+      if (campaignKinds) {
+        appendLeadCondition(query, campaignDateCondition(campaignKinds, range));
+      } else {
+        query.createdAt = range;
+      }
     }
 
     let sort: Record<string, 1 | -1>;
@@ -838,7 +866,8 @@ export const getAllLeads = async (req: Request, res: Response) => {
       'parsedContent threadId messageId isRead isPending channel ' +
       'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
       'centralIngestion labels followUp statusHistory notes assignedTo assignedAt assignmentUnseenBy aiSummary aiSummaryGeneratedAt ' +
-      'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt';
+      'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt ' +
+      'firstContactBy firstContactVia campaignSentAt';
 
     let leads: any[];
     if (sortBy === "waiting_longest") {
@@ -892,6 +921,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
         .lean();
     }
 
+    const leadStores = await activeLeadStores(orgId);
     const normalizedLeads = leads.map((lead: any) => {
       const isDemoLead = isGenuineDemoLead(lead.source, lead.phone);
       const normalized = normalizeLeadSourceForDisplay({
@@ -899,7 +929,9 @@ export const getAllLeads = async (req: Request, res: Response) => {
         channel: lead.channel,
         sourceProvider: lead.sourceProvider,
       });
-      return { ...lead, source: normalized.source, sourceProvider: normalized.sourceProvider, isDemoLead };
+      const storeName = storeForLabel(leadStores, lead.location) || (typeof lead.location === 'string' ? lead.location.trim() : '') || null;
+      const campaign = campaignSummary(lead, campaignKinds || undefined);
+      return { ...lead, source: normalized.source, sourceProvider: normalized.sourceProvider, isDemoLead, storeName, campaign };
     });
 
     res.json(
@@ -975,9 +1007,13 @@ export const getLeadLocationCounts = async (req: Request, res: Response) => {
       },
     ]);
 
+    const stores = await activeLeadStores(orgId);
     const counts: Record<string, number> = {};
     for (const row of results) {
-      if (row._id) counts[row._id] = row.count;
+      if (!row._id) continue;
+      const label = row._id === UNMAPPED_LEAD_LOCATION_LABEL ? row._id : storeForLabel(stores, row._id) || String(row._id).trim();
+      if (!label) continue;
+      counts[label] = (counts[label] || 0) + row.count;
     }
 
     res.json(new ApiResponse(200, { counts }));
@@ -987,6 +1023,23 @@ export const getLeadLocationCounts = async (req: Request, res: Response) => {
     res.status(500).json({
       message: 'Error fetching lead location counts',
     });
+  }
+};
+
+export const getLeadTypeCounts = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    if (!orgId || !mongoose.isValidObjectId(orgId)) {
+      return res.status(400).json({ message: 'Organization context missing' });
+    }
+    const [row] = await Lead.aggregate([
+      { $match: { organizationId: new mongoose.Types.ObjectId(orgId), 'combinedInto.leadId': { $exists: false } } },
+      { $group: leadTypeCountsGroup() },
+    ]);
+    res.json(new ApiResponse(200, { counts: leadTypeCountsFromGroup(row) }));
+  } catch (error) {
+    console.error('[ERROR] Error fetching lead type counts:', error);
+    res.status(500).json({ message: 'Error fetching lead type counts' });
   }
 };
 
@@ -1722,7 +1775,7 @@ export const createInquiry = async (req: Request, res: Response) => {
 
     const detectedChannel = channel || detectChannel('', comments || '', '', source || '');
     const vehicleContext = vehicle
-      ? await resolveVehicleContextForLead(req.orgId, vehicle).catch(() => null)
+      ? await resolveLeadStore(req.orgId, vehicle).catch(() => null)
       : null;
     const manualLocation = String(location || '').trim();
 
@@ -1743,6 +1796,7 @@ export const createInquiry = async (req: Request, res: Response) => {
       location: manualLocation || vehicleContext?.location,
       comments: comments || '',
       source: source || LEAD_SOURCE.MANUAL_ENTRY,
+      ...firstContactForStaffLead(source),
       channel: detectedChannel,
       status: 'New',
       followUp: {
@@ -2584,7 +2638,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         }
 
         const vehicleContext = parsed.adfData
-          ? await resolveVehicleContextForLead(req.orgId, parsed.adfData.vehicle).catch(() => null)
+          ? await resolveLeadStore(req.orgId, parsed.adfData.vehicle).catch(() => null)
           : null;
 
         const newLead = new Lead({

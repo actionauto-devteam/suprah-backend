@@ -15,6 +15,8 @@ jest.mock('../../src/models/IntakeClaim.model', () => ({
   default: { findOneAndUpdate: mockIntakeClaimFindOneAndUpdate, updateOne: mockIntakeClaimUpdateOne },
 }));
 jest.mock('../../src/models/ServiceSlot.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/utils/leadStore', () => ({ activeLeadStores: jest.fn().mockResolvedValue([]), storeForStock: jest.fn().mockReturnValue(null) }));
+jest.mock('../../src/services/appointmentHistory.service', () => ({ recordAppointmentHistory: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../src/services/appointment.service', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/services/customerbooking.service', () => ({
   __esModule: true,

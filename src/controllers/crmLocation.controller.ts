@@ -39,6 +39,7 @@ function serializeLocation(location: any) {
     code: location.code,
     name: location.name,
     aliases: location.aliases || [],
+    stockPrefixes: location.stockPrefixes || [],
     status: location.status,
     archivedAt: location.archivedAt || undefined,
     revision: location.revision,
@@ -70,7 +71,7 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, {
     locations: locations.map(serializeLocation),
     counts,
-    limits: { perOrg: LOCATION_LIMITS.perOrg, aliases: LOCATION_LIMITS.aliases, name: LOCATION_LIMITS.name, alias: LOCATION_LIMITS.alias, code: LOCATION_LIMITS.code },
+    limits: { perOrg: LOCATION_LIMITS.perOrg, aliases: LOCATION_LIMITS.aliases, name: LOCATION_LIMITS.name, alias: LOCATION_LIMITS.alias, code: LOCATION_LIMITS.code, stockPrefixes: LOCATION_LIMITS.stockPrefixes, stockPrefix: LOCATION_LIMITS.stockPrefix },
     canManage: locationAccess(user) === 'admin',
   }, 'Locations'));
 });

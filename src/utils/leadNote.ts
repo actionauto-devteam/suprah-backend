@@ -19,6 +19,7 @@ export interface AddLeadNoteInput {
   mentionedUserIds?: string[];
   mentionedGroupIds?: string[];
   milestone?: boolean;
+  noteKind?: 'appointment';
   suppressNotification?: boolean;
   sourceTaskId?: string;
 }
@@ -89,6 +90,7 @@ export async function addLeadNoteAndNotify(input: AddLeadNoteInput) {
     mentionedUserIds: mentionedUserIds as any,
     mentionedGroupIds: mentionedGroupIds as any,
     milestone: input.milestone || false,
+    ...(input.noteKind ? { noteKind: input.noteKind } : {}),
     sourceTaskId: input.sourceTaskId as any,
   });
 

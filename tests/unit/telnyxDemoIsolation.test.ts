@@ -1,4 +1,4 @@
-import { sendSms } from '../../src/services/telnyx.service';
+import { SMS_SEND_TIMEOUT_MS, sendSms } from '../../src/services/telnyx.service';
 
 describe('Demo Lab numbers never reach the Telnyx network', () => {
   const realFetch = global.fetch;
@@ -20,5 +20,14 @@ describe('Demo Lab numbers never reach the Telnyx network', () => {
     global.fetch = fetchSpy as any;
     await sendSms('+13853365062', 'Hi');
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up on a text the provider does not answer within the time limit', async () => {
+    const fetchSpy = jest.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ data: { id: 'real-2', to: [] } }) });
+    global.fetch = fetchSpy as any;
+    await sendSms('+13853365062', 'Hi again');
+    const options = fetchSpy.mock.calls[0][1];
+    expect(SMS_SEND_TIMEOUT_MS).toBeLessThan(30_000);
+    expect(options.signal).toBeInstanceOf(AbortSignal);
   });
 });

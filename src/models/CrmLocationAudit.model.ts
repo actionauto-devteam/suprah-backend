@@ -9,6 +9,7 @@ export interface CrmLocationSnapshot {
   code?: string;
   name: string;
   aliases: string[];
+  stockPrefixes?: string[];
   status: CrmLocationStatus;
 }
 
@@ -27,6 +28,7 @@ const snapshotFields = () => ({
   code: { type: String, maxlength: 40 },
   name: { type: String, required: true, maxlength: 80 },
   aliases: { type: [{ type: String, maxlength: 80 }], default: [] },
+  stockPrefixes: { type: [{ type: String, maxlength: 6 }], default: undefined },
   status: { type: String, enum: CRM_LOCATION_STATUSES, required: true },
 });
 

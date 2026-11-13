@@ -3,7 +3,7 @@ import { parseEmailBody } from '../utils/adfParser';
 import { normalizeIdentityEmail } from '../utils/contactIdentity';
 import { buildInquiryContentKey } from '../utils/inquiryKeys';
 import { LEAD_SOURCE } from '../constants/leadSource';
-import { resolveVehicleContextForLead } from './leadLocation.service';
+import { activeLeadStores, resolveLeadStore, storeForStock } from '../utils/leadStore';
 import { LeadIntakeResult, submitLeadInquiry } from './leadIntake.service';
 import { adfInquiryRequest, startNewLeadAutomations } from './leadIntakeIntegration';
 import { findInventoryVehicleReference, isAutomatedEmail, isEmailReply } from './emailInquiryEvidence';
@@ -46,7 +46,7 @@ export async function processGmailMessageThroughIntake(input: {
   };
 
   if (adfData) {
-    const vehicleContext = await resolveVehicleContextForLead(organizationId, adfData.vehicle).catch(() => null);
+    const vehicleContext = await resolveLeadStore(organizationId, adfData.vehicle).catch(() => null);
     const result = await submitLeadInquiry(adfInquiryRequest({
       organizationId,
       adf: adfData,
@@ -86,6 +86,9 @@ export async function processGmailMessageThroughIntake(input: {
     ? await findInventoryVehicleReference(organizationId, [subject, rawBody].join('\n')).catch(() => null)
     : null;
   const referenced = reference?.vehicle;
+  const referencedStore = referenced?.stockNumber
+    ? storeForStock(await activeLeadStores(organizationId).catch(() => []), referenced.stockNumber)
+    : null;
   const result = await submitLeadInquiry({
     organizationId,
     kind: 'provider_inquiry',
@@ -112,7 +115,7 @@ export async function processGmailMessageThroughIntake(input: {
         ? {
             vehicle: { year: referenced.year ? String(referenced.year) : undefined, make: referenced.make, model: referenced.modelName, trim: referenced.trim, vin: referenced.vin, stock: referenced.stockNumber },
             vehicleId: referenced._id,
-            location: referenced.dealerCity || undefined,
+            location: referencedStore || referenced.dealerCity || undefined,
           }
         : {}),
     },

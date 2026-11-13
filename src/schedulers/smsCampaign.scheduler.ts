@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import SmsCampaign from '../models/SmsCampaign.model';
 import SmsCampaignRecipient from '../models/SmsCampaignRecipient.model';
 import { sendStaffAttributedSms } from '../services/communication.service';
+import { stampLeadCampaign } from '../utils/leadActivity';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import logger from '../utils/logger';
 import { isSmsDestinationError } from '../utils/smsDestination';
@@ -83,6 +84,7 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
           },
         );
         await SmsCampaign.updateOne({ _id: campaign._id }, { $inc: { sentCount: 1 } });
+        await stampLeadCampaign(recipient.leadId, 'sms_campaign');
       } else {
         await SmsCampaignRecipient.updateOne(
           { _id: recipient._id },

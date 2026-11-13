@@ -71,6 +71,22 @@ describe('location input validation', () => {
     expect(parseLocationInput({ code: 'orem', name: 'Orem', aliases }, 'create').issues.map((issue) => issue.code)).toContain('too_many');
   });
 
+  it('cleans "Stock number starts with" to unique upper-case letters and numbers', () => {
+    const { value, issues } = parseLocationInput({ name: 'Lehi', stockPrefixes: [' l ', 'L', 'lx2', ''] }, 'update');
+    expect(issues).toEqual([]);
+    expect(value.stockPrefixes).toEqual(['L', 'LX2']);
+  });
+
+  it.each([['L-1'], ['TOOLONG7'], ['#']])('rejects the stock number start %p', (prefix) => {
+    expect(parseLocationInput({ name: 'Lehi', stockPrefixes: [prefix] }, 'update').issues.map((issue) => issue.code)).toContain('invalid_format');
+  });
+
+  it('rejects a stock number start list that is not a list or too long', () => {
+    expect(parseLocationInput({ name: 'Lehi', stockPrefixes: 'L' }, 'update').issues.map((issue) => issue.code)).toContain('invalid_type');
+    const many = Array.from({ length: LOCATION_LIMITS.stockPrefixes + 1 }, (_, i) => `P${i}`);
+    expect(parseLocationInput({ name: 'Lehi', stockPrefixes: many }, 'update').issues.map((issue) => issue.code)).toContain('too_many');
+  });
+
   it('treats a code in an update as a value to compare, not a new code', () => {
     expect(parseLocationInput({ code: 'orem', name: 'Orem North' }, 'update').value).toEqual({ code: 'orem', name: 'Orem North' });
     expect(parseLocationInput({ name: 'Orem North' }, 'update').value).toEqual({ name: 'Orem North' });
