@@ -34,8 +34,10 @@ for (const [key, value] of Object.entries(defaults)) {
 if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
   const keys = require('crypto').createECDH('prime256v1');
   keys.generateKeys();
-  process.env.VAPID_PUBLIC_KEY = keys.getPublicKey().toString('base64url');
-  process.env.VAPID_PRIVATE_KEY = keys.getPrivateKey().toString('base64url');
+  const publicKey = keys.getPublicKey();
+  const privateKey = keys.getPrivateKey();
+  process.env.VAPID_PUBLIC_KEY = Buffer.concat([Buffer.alloc(65 - publicKey.length), publicKey]).toString('base64url');
+  process.env.VAPID_PRIVATE_KEY = Buffer.concat([Buffer.alloc(32 - privateKey.length), privateKey]).toString('base64url');
 }
 
 const net = require('net');
