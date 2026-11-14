@@ -13,6 +13,20 @@ process.env.ALLOW_PRODUCTION_DB = '';
 process.env.ALLOW_REMOTE_TEST_DB = '';
 process.env.MONGODB_URI = uri;
 process.env.MONGODB_URI_TEST = uri;
+const defaults = {
+  FRONTEND_URL: 'http://127.0.0.1:3000',
+  BACKEND_URL: 'http://127.0.0.1:5000',
+  BCRYPT_SALT_ROUNDS: '4',
+  STRIPE_SECRET_KEY: 'sk_test_release_validation',
+  STRIPE_PUBLISHABLE_KEY: 'pk_test_release_validation',
+  JWT_ACCESS_SECRET: 'release-validation-access-not-for-production',
+  JWT_REFRESH_SECRET: 'release-validation-refresh-not-for-production',
+  CRM_JWT_SECRET: 'release-validation-crm-not-for-production',
+  TOKEN_ENCRYPTION_KEY: 'release-validation-encryption-not-for-production',
+};
+for (const [key, value] of Object.entries(defaults)) {
+  if (!process.env[key]) process.env[key] = value;
+}
 
 const net = require('net');
 const connect = net.Socket.prototype.connect;
