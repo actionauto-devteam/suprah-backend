@@ -1,5 +1,9 @@
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import config from '../config';
+import tokenService from '../services/token.service';
+import { resolveCrmJwtSecret } from '../utils/crmJwtSecret';
 import { ApiError } from '../utils/ApiError';
 import { getTraccarConfig } from '../config/traccar';
 import { isTrustedTraccarForward } from '../services/traccarForwardGuard';
@@ -398,8 +402,40 @@ export const uploadLimiter = rateLimit({
  * secret) carry every driver's positions in one stream, so they get the
  * fleet's budget instead (TRACCAR_FORWARD_MAX_PER_MINUTE for 15 minutes).
  */
+export const GLOBAL_REQUEST_LIMIT = 1000;
+export const SIGNED_IN_REQUEST_LIMIT = 3000;
+
+export function hasSignedInToken(req: any): boolean {
+    const header = req?.headers?.authorization;
+    if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
+    const token = header.slice(7).trim();
+    if (!token) return false;
+    const peeked = jwt.decode(token) as { type?: string } | null;
+    if (!peeked) return false;
+    if (peeked.type === 'crm') {
+        try {
+            jwt.verify(token, resolveCrmJwtSecret());
+            return true;
+        } catch {
+            return false;
+        }
+    }
+    return tokenService.isValidAccessToken(token);
+}
+
 export function globalRequestLimit(req: any): number {
-    return isTrustedTraccarForward(req) ? getTraccarConfig().forwardMaxPerMinute * 15 : 1000;
+    if (isTrustedTraccarForward(req)) return getTraccarConfig().forwardMaxPerMinute * 15;
+    return hasSignedInToken(req) ? SIGNED_IN_REQUEST_LIMIT : GLOBAL_REQUEST_LIMIT;
+}
+
+export function allowBlockedResponseOrigin(req: any, res: any) {
+    const origin = req?.headers?.origin;
+    if (typeof origin !== 'string' || !origin) return;
+    const allowed = String(config.corsOrigin || '').split(',').map((value: string) => value.trim());
+    if (!allowed.includes(origin) && !allowed.includes('*') && config.env !== 'development') return;
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.append('Vary', 'Origin');
 }
 
 export const globalLimiter = rateLimit({
@@ -415,6 +451,7 @@ export const globalLimiter = rateLimit({
     skip: (req: any) => {
         return (
             process.env.SKIP_RATE_LIMIT === 'true' ||
+            req.method === 'OPTIONS' ||
             req.path === '/health' ||
             req.path === '/api/auth/refresh-tokens' ||
             req.path === '/api/users/me'
@@ -422,7 +459,12 @@ export const globalLimiter = rateLimit({
     },
     message: {
         success: false,
-        message: 'Too many requests from this IP, please try again after 15 minutes',
+        code: 'TOO_MANY_REQUESTS',
+        message: 'Suprah is getting too many requests from this browser right now. Please wait a few minutes and try again.',
+    },
+    handler: (req, res, _next, options) => {
+        allowBlockedResponseOrigin(req, res);
+        res.status(options.statusCode).json(options.message);
     },
     standardHeaders: true,
     legacyHeaders: false,
