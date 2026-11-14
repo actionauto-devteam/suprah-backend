@@ -1,5 +1,5 @@
 // Release validation is isolated even when a developer has a production .env.
-const uri = process.env.MONGODB_URI_TEST || 'mongodb://127.0.0.1:27017/suprah_release_test';
+const uri = process.env.MONGODB_URI_TEST || 'mongodb://127.0.0.1:27018/suprah_release_test';
 const loopback = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 const parsed = new URL(uri);
 if (parsed.protocol !== 'mongodb:' || !loopback.has(parsed.hostname) ||
@@ -24,6 +24,8 @@ const defaults = {
   CRM_JWT_SECRET: 'release-validation-crm-not-for-production',
   TOKEN_ENCRYPTION_KEY: 'release-validation-encryption-not-for-production',
   VAPID_SUBJECT: 'mailto:release-tests@example.test',
+  GEMINI_API_KEY: 'release-validation-gemini-not-for-production',
+  GROQ_API_KEY: 'release-validation-groq-not-for-production',
 };
 for (const [key, value] of Object.entries(defaults)) {
   if (!process.env[key]) process.env[key] = value;

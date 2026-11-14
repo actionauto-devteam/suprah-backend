@@ -17,14 +17,14 @@ jobs:
       mongodb:
         image: mongo:7
         ports:
-          - 27017:27017
+          - 27018:27017
         options: >-
           --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
-      MONGODB_URI_TEST: mongodb://127.0.0.1:27017/suprah_release_test
+      MONGODB_URI_TEST: mongodb://127.0.0.1:27018/suprah_release_test
       NODE_OPTIONS: --max-old-space-size=3072
     steps:
       - name: Checkout code
