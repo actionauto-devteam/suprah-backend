@@ -132,6 +132,12 @@ import {
 } from "../services/leadSalesperson.service";
 import { emailStaffQuoteCustomer, type StaffQuoteEmailEvent } from "../services/staffQuoteCustomerEmail";
 import {
+  DRIVER_CURRENT_LOAD_STATUSES,
+  driverLoadHistoryFilter,
+  driverLoadHistoryParams,
+  historyPagination,
+} from "../utils/driverLoadHistory";
+import {
   approveDriverVerification,
   evaluateDriverVerificationEligibility,
   listDriverReviewEvents,
@@ -3520,18 +3526,40 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
 const getMyLoads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const driverId = user._id.toString();
-  // ?view=active: only current loads (Assigned → In-Transit), for callers that
-  // just need to know what the driver is carrying (the GPS requirement check).
-  const activeOnly = req.query.view === "active";
+  // Views (2026-11-15):
+  // - ?view=active: current loads only, without Accept details, for callers
+  //   that just need to know what the driver is carrying (the GPS check).
+  // - ?view=current: current loads with Accept details (dashboard, Schedule,
+  //   the Loads page's Active tab).
+  // - ?view=history&page=&limit=&q=: delivered loads, newest first, a page at
+  //   a time (the Loads page's Completed and All tabs).
+  // - no view: every load except cancelled ones, as before (Earnings).
+  const view = String(req.query.view ?? "");
+  const activeOnly = view === "active";
+  const history = view === "history" ? driverLoadHistoryParams(req.query as Record<string, unknown>) : null;
 
-  const loads = await Load.find({
-    assignedDriverId: user._id,
-    status: activeOnly
-      ? { $in: ["Assigned", "Accepted", "Picked Up", "In-Transit"] }
-      : { $nin: ["Cancelled"] },
-  })
-    .sort({ createdAt: -1 })
-    .lean();
+  let loads: any[];
+  let total = 0;
+  if (history) {
+    const filter = driverLoadHistoryFilter(user._id, history.q);
+    [loads, total] = await Promise.all([
+      Load.find(filter)
+        .sort({ deliveredAt: -1, createdAt: -1 })
+        .skip((history.page - 1) * history.limit)
+        .limit(history.limit)
+        .lean(),
+      Load.countDocuments(filter),
+    ]);
+  } else {
+    loads = await Load.find({
+      assignedDriverId: user._id,
+      status: activeOnly || view === "current"
+        ? { $in: DRIVER_CURRENT_LOAD_STATUSES }
+        : { $nin: ["Cancelled"] },
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
 
   // Work Availability and retained-GPS policy are evaluated across every
   // organization for a shared driver. No first-organization fallback is used.
@@ -3574,6 +3602,13 @@ const getMyLoads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
     })),
   );
 
+  if (history) {
+    return res.status(200).json(new ApiResponse(
+      200,
+      { loads: data, pagination: historyPagination(history.page, history.limit, total) },
+      "My loads fetched",
+    ));
+  }
   return res.status(200).json(new ApiResponse(200, data, "My loads fetched"));
 });
 
