@@ -77,7 +77,6 @@ import whatsNewRoute from "./whatsNew.route";
 import internalTrayRoute from "./internalTray.route";
 import trayDeviceRoute from "./trayDevice.route";
 import mailRoute from "./mail.route";
-import pulse360Route from "./pulse360.route";
 import storyRoute from "./story.route";
 import noteRoute from "./note.route";
 import spotifyRoute from "./spotify.route";
@@ -193,15 +192,8 @@ const defaultRoutes = [
     path: "/crm/whats-new",
     route: whatsNewRoute,
   },
-  // Must stay ABOVE "/crm" — crm.route.ts owns "/users/:id", which would
-  // otherwise capture "/crm/pulse360/users/:id/health".
-  {
-    path: "/crm/pulse360",
-    route: pulse360Route,
-  },
-  // Stories / Notes / Spotify — also ABOVE "/crm" for the same reason: keep
-  // these dedicated prefixes from being shadowed by crm.route's dynamic
-  // "/:id"-style routes.
+  // Stories / Notes / Spotify — must stay ABOVE "/crm": keep these dedicated
+  // prefixes from being shadowed by crm.route's dynamic "/:id"-style routes.
   {
     path: "/crm/stories",
     route: storyRoute,
