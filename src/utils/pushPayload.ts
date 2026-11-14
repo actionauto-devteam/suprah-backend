@@ -70,7 +70,7 @@ export function truncatePushBody(body: string, maxLength = MAX_BODY_LENGTH): str
  * they share a coarse tag. `topic` is only ever set explicitly, at call
  * sites that intend real collapsing: the same dedupeKey (repeat
  * idle/geofence/shift-alert for the SAME subject), or the same SupraSpace
- * conversation / Pulse360 alert.
+ * conversation.
  */
 export function deriveWebPushTopic(topic: string): string {
   return crypto.createHash('sha256').update(topic).digest('base64url').slice(0, 32);

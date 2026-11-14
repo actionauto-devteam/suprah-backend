@@ -547,8 +547,7 @@ function sanitizeAvailableLoadForDriver(load: any, driverId: string) {
 // the controller compiling; every call site is wrapped in a non-fatal
 // try/catch, so an unknown enum value at runtime logs and moves on instead
 // of failing the request. PROPER FIX: add the new event names to the
-// ActivityType / NotificationType unions (and the Activity model enum) —
-// they're valuable Pulse360 signals.
+// ActivityType / NotificationType unions (and the Activity model enum).
 const logLoadActivityLoose = activityService.logLoadActivity.bind(
   activityService,
 ) as unknown as (
