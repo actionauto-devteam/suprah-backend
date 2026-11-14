@@ -100,6 +100,7 @@ export const crmCalendarController = {
           'googleCalendar.lastSyncAt': null,
           'googleCalendar.syncToken': null,
           'googleCalendar.meetRoomsSyncedAt': null,
+          'googleCalendar.meetRoomsSyncVersion': null,
         },
       });
     } catch (err) {

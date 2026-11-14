@@ -2,13 +2,13 @@ import mongoose from 'mongoose';
 const crmById = jest.fn(), crmFind = jest.fn(), crmUpdate = jest.fn();
 const crmClaim = jest.fn();
 const appointmentFind = jest.fn(), appointmentWrite = jest.fn(), appointmentUpdate = jest.fn();
-const syncRoom = jest.fn(), deleteRooms = jest.fn();
+const syncRoom = jest.fn(), deleteRooms = jest.fn(), findRooms = jest.fn();
 jest.mock('../../src/models/CrmUser.model', () => ({ __esModule: true, default: { findById: crmById, find: crmFind, updateOne: crmUpdate, findOneAndUpdate: crmClaim } }));
 jest.mock('../../src/models/User.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/OrgLeadConfig.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/Appointment.model', () => ({ __esModule: true, default: {
   find: appointmentFind, bulkWrite: appointmentWrite, updateMany: appointmentUpdate } }));
-jest.mock('../../src/models/Meeting.model', () => ({ __esModule: true, default: { deleteMany: deleteRooms } }));
+jest.mock('../../src/models/Meeting.model', () => ({ __esModule: true, default: { deleteMany: deleteRooms, find: findRooms } }));
 jest.mock('../../src/services/calendarMeetSync.service', () => ({ syncCalendarMeeting: syncRoom }));
 import service from '../../src/services/googleCalendar.service';
 
@@ -30,6 +30,7 @@ beforeEach(() => {
   appointmentFind.mockReturnValue({ select: () => ({ lean: async () => [] }) });
   appointmentWrite.mockResolvedValue({ insertedCount: 1, modifiedCount: 0 });
   syncRoom.mockResolvedValue(undefined);
+  findRooms.mockReturnValue({ select: () => ({ lean: async () => [] }) });
 });
 afterEach(() => jest.restoreAllMocks());
 
@@ -38,8 +39,10 @@ it('upgrades an already-connected calendar and creates a room for an owned timed
   expect(fetchEvents.mock.calls[0]).toHaveLength(3); // full pass instead of reusing its legacy sync token
   expect(syncRoom).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: `google:${userId}:event-one`,
     title: 'HR planning', status: 'scheduled', createdBy: userId, organizationId: orgId }));
-  expect(crmFind.mock.calls[0][0].email.$in).toEqual(['colleague@example.test']);
-  expect(crmUpdate).toHaveBeenCalledWith({ _id: String(userId) }, expect.objectContaining({ $set: { 'googleCalendar.meetRoomsSyncedAt': expect.any(Date) } }));
+  expect(crmFind.mock.calls[0][0].$or[0].email.$in).toEqual(['colleague@example.test']);
+  expect(crmUpdate).toHaveBeenCalledWith({ _id: String(userId) }, expect.objectContaining({ $set: {
+    'googleCalendar.meetRoomsSyncedAt': expect.any(Date), 'googleCalendar.meetRoomsSyncVersion': 2 } }));
+  expect(syncRoom.mock.calls[0][0].sendInvitations).toBe(false);
 });
 
 it('creates a Suprah room when a Google Calendar event already has a Google Meet conference', async () => {
@@ -83,6 +86,8 @@ it('a Google edit updates the same source meeting rather than creating an unrela
 });
 it.each([
   { organizer: { self: false } },
+  { organizer: { email: 'another-organizer@example.test' } },
+  { organizer: undefined },
   { start: { date: '2030-03-09' }, end: { date: '2030-03-10' } },
   { eventType: 'outOfOffice' },
 ])('does not create rooms for other organizers, all-day events or availability blocks: %o', async changes => {
@@ -90,6 +95,32 @@ it.each([
   await service.syncCrmUserCalendar(String(userId));
   expect(syncRoom).not.toHaveBeenCalled();
   expect(deleteRooms.mock.calls[0][0].status).toBe('scheduled');
+  expect(deleteRooms.mock.calls[0][0]).toMatchObject({ participants: { $size: 0 },
+    chimeMeetingId: null, startedAt: null, 'recording.videoKey': null });
+});
+
+it('upgrades the first mirror version with a complete scan, including the six-month recurrence horizon', async () => {
+  crmById.mockResolvedValue({ _id: userId, organizationId: orgId, googleCalendar: {
+    lastSyncAt: new Date(), meetRoomsSyncedAt: new Date(), meetRoomsSyncVersion: 1, syncToken: 'old-token' } });
+  await service.syncCrmUserCalendar(String(userId));
+  expect((service as any).getSyncWindow).toHaveBeenCalledWith(true);
+  expect(fetchEvents.mock.calls[0]).toHaveLength(3);
+});
+
+it('retains incremental sync once the ownership correction has completed', async () => {
+  crmById.mockResolvedValue({ _id: userId, organizationId: orgId, googleCalendar: {
+    lastSyncAt: new Date(), meetRoomsSyncedAt: new Date(), meetRoomsSyncVersion: 2, syncToken: 'current-token' } });
+  await service.syncCrmUserCalendar(String(userId));
+  expect(fetchEvents.mock.calls[0][3]).toBe('current-token');
+});
+
+it('matches normalized invitee addresses against CRM email and the connected Google identity', async () => {
+  entries[0].attendees = [{ email: ' Alternate@Example.Test ' }];
+  await service.syncCrmUserCalendar(String(userId));
+  expect(crmFind.mock.calls[0][0]).toMatchObject({ organizationId: String(orgId), $or: [
+    { email: { $in: ['alternate@example.test'] } },
+    { 'googleCalendar.calendarConnected': true, 'googleCalendar.gmailAddress': { $in: ['alternate@example.test'] } },
+  ] });
 });
 it('applies a changed meeting date outside the rolling appointment window', async () => {
   entries[0] = { ...entries[0], start: { dateTime: '2031-02-01T16:00:00Z' },

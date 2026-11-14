@@ -12,7 +12,8 @@ export type MeetingCalendarSource = Pick<ICalendarEvent,
   'organizationId' | 'createdBy' | 'type' | 'status' | 'deletedAt' | 'title' | 'assignees' |
   'start' | 'end' | 'repeatsDailyWindow' | 'dailyStartTime' | 'includedDates' |
   'generateMeetingLink' | 'meetingLink' | 'meetingRoomName'> & {
-    _id: unknown; sourceKey?: string; deferNotifications?: boolean; meetingSyncPending?: boolean; save(): Promise<unknown>;
+    _id: unknown; sourceKey?: string; deferNotifications?: boolean; sendInvitations?: boolean;
+    meetingSyncPending?: boolean; save(): Promise<unknown>;
   };
 
 /** Each daily window gets its own room, recording, and reminders. */
@@ -82,7 +83,7 @@ export async function syncCalendarMeeting(event: MeetingCalendarSource): Promise
             ...scope, calendarOccurrenceKey: key, code: `MEET-${randomInt(10_000_000, 100_000_000)}`,
             title: event.title, hostCrmUserId: (event.createdBy as any)?._id ?? event.createdBy,
             scheduledAt, status: 'scheduled', visibility: 'private',
-            invitees: audience, inviteAll: false, invitationNotificationPending: true,
+            invitees: audience, inviteAll: false, invitationNotificationPending: event.sendInvitations !== false,
           } }, { upsert: true, new: true, setDefaultsOnInsert: true });
           break;
         } catch (error: any) { if (error?.code !== 11000 || attempt === 4) throw error; }
@@ -98,6 +99,7 @@ export async function syncCalendarMeeting(event: MeetingCalendarSource): Promise
         ...(audienceChanged ? { invitationNotificationPending: true } : {}),
         ...(rescheduled ? { reminderSentAt: null, reminderClaimToken: null, reminderClaimUntil: null,
           invitationNotificationPending: true } : {}),
+        ...(event.sendInvitations === false ? { invitationNotificationPending: false } : {}),
       } }, { new: true }) ?? room;
     }
     rooms.push(room);
@@ -140,7 +142,8 @@ async function recoverUpcomingCalendarMeetings(organizationId: unknown): Promise
   ],
   }).sort({ start: 1 }).limit(50);
   for (const event of events) {
-    try { await syncCalendarMeeting(Object.assign(event, { deferNotifications: true })); }
+    try { await syncCalendarMeeting(Object.assign(event, { deferNotifications: true,
+      sendInvitations: event.meetingSyncPending ? undefined : false })); }
     catch (error) { logger.error({ error, calendarEventId: event._id }, '[CalendarMeet] Room recovery will retry'); }
   }
 }

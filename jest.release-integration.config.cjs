@@ -11,6 +11,7 @@ module.exports = {
     '**/tests/appointmentSalespersonHistory.realdb.test.ts',
     '**/tests/leadStoreAndType.realdb.test.ts',
     '**/tests/leadComposer.realdb.test.ts',
+    '**/tests/googleCalendarOwnership.realdb.test.ts',
   ],
   setupFilesAfterEnv: ['<rootDir>/tests/setup.ts'],
   testTimeout: 30000,

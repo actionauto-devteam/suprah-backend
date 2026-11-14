@@ -63,6 +63,18 @@ it('invite-all expands only within the same active organization audience', async
   expect(createNotification).toHaveBeenCalledTimes(2);
 });
 
+it('does not send creation invitations for Google copies, while retaining reminders and live alerts', async () => {
+  const meeting = buildMeeting({ calendarSourceId: 'google:person:event' });
+  await notifyMeetingCreated(meeting);
+  expect(createNotification).not.toHaveBeenCalled();
+  expect(updateMeeting).toHaveBeenCalled();
+  await notifyMeetingReminder(meeting, now);
+  expect(createNotification.mock.calls[0][0].type).toBe('suprah_meet_reminder');
+  createNotification.mockClear();
+  await notifyMeetingLive(meeting);
+  expect(createNotification.mock.calls[0][0].type).toBe('suprah_meet_live');
+});
+
 it('instant invitations say live now without an Upcoming/date claim', async () => {
   await notifyMeetingCreated(buildMeeting({ scheduledAt: null }));
   const notice = createNotification.mock.calls[0][0];

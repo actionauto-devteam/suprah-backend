@@ -1,5 +1,5 @@
 import CrmUser from '../models/CrmUser.model';
-import googleCalendarService from './googleCalendar.service';
+import googleCalendarService, { GOOGLE_MEET_SYNC_VERSION } from './googleCalendar.service';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import logger from '../utils/logger';
 
@@ -15,7 +15,8 @@ export async function syncConnectedCrmCalendars(now = new Date()): Promise<void>
     const coolingDown = [...failures].filter(([, retryAt]) => retryAt > now.getTime()).map(([id]) => id);
     const users = await CrmUser.find({ isActive: { $ne: false }, 'googleCalendar.calendarConnected': true,
       ...(coolingDown.length ? { _id: { $nin: coolingDown } } : {}),
-      $or: [{ 'googleCalendar.lastSyncAt': null },
+      $or: [{ 'googleCalendar.meetRoomsSyncVersion': { $ne: GOOGLE_MEET_SYNC_VERSION } },
+        { 'googleCalendar.lastSyncAt': null },
         { 'googleCalendar.lastSyncAt': { $lte: new Date(now.getTime() - 5 * 60_000) } }],
     }).select('_id').sort({ 'googleCalendar.lastSyncAt': 1 }).limit(10).lean();
     const startedAt = Date.now();

@@ -6,7 +6,7 @@ export const MEET_REMINDER_WINDOW_MS = 10 * 60_000;
 
 type MeetingNotice = Pick<IMeeting,
   '_id' | 'organizationId' | 'hostCrmUserId' | 'invitees' | 'inviteAll' |
-  'title' | 'code' | 'scheduledAt' | 'status' | 'openedAt' | 'createdAt'>;
+  'title' | 'code' | 'scheduledAt' | 'status' | 'openedAt' | 'createdAt' | 'calendarSourceId'>;
 
 /** Resolve only active people in this organization, including department-expanded invitees. */
 async function recipients(meeting: MeetingNotice, includeHost: boolean) {
@@ -26,6 +26,9 @@ async function recipients(meeting: MeetingNotice, includeHost: boolean) {
 }
 
 async function send(meeting: MeetingNotice, kind: 'invitation' | 'reminder' | 'live', now: Date) {
+  // Google owns its invitations. In particular, never turn a recurring
+  // calendar import (or an old queued backfill) into hundreds of new alerts.
+  if (kind === 'invitation' && meeting.calendarSourceId?.startsWith('google:')) return;
   const host = await CrmUser.findOne({
     _id: meeting.hostCrmUserId, organizationId: meeting.organizationId,
   }).select('fullName').lean();

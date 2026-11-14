@@ -51,6 +51,11 @@
       "title": "Calendar sync handles temporary service limits",
       "description": "Temporary Google Calendar rate limits keep your account connected and show a retry message. Sync also recovers more reliably from temporary network or credential-save failures, and overlapping sync requests no longer compete for the same account.",
       "kind": "fix", "media": []
+    },
+    {
+      "title": "Calendar copies stay organized",
+      "description": "Only meetings organized by the connected Google account create rooms. Attendee copies are skipped, and teammates can receive access through their connected Google email. Calendar backfills avoid duplicate invitation bursts while reminders and room-open alerts remain available. Existing calls, saved history, and native meeting schedules are kept.",
+      "kind": "fix", "media": []
     }
   ]
 }

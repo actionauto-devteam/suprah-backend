@@ -13,6 +13,8 @@ import { syncCalendarMeeting } from './calendarMeetSync.service';
 import Meeting from '../models/Meeting.model';
 import { randomUUID } from 'crypto';
 import logger from '../utils/logger';
+import Notification from '../models/Notification.model';
+import { emitToCrmUser, emitToUser } from '../utils/socketEmitter';
 
 interface GoogleTokens {
   access_token: string;
@@ -23,6 +25,31 @@ interface GoogleTokens {
 }
 
 const MAX_PAGES = 100;
+export const GOOGLE_MEET_SYNC_VERSION = 2;
+
+/** One-time cleanup of invitation bursts from the original calendar backfill. */
+async function clearLegacyCalendarInvitations(organizationId: string, roomIds: string[]) {
+  for (let start = 0; start < roomIds.length; start += 100) {
+    const scope = { organizationId, type: 'suprah_meet_invited',
+      'metadata.meetingId': { $in: roomIds.slice(start, start + 100) } };
+    const notices = await Notification.find(scope).select('_id userId metadata.pushTag').lean();
+    if (!notices.length) continue;
+    await Notification.deleteMany({ ...scope, _id: { $in: notices.map(notice => notice._id) } });
+    let delivered = 0;
+    for (const notice of notices) {
+      if (!notice.userId) continue;
+      const userId = String(notice.userId), notificationId = String(notice._id);
+      emitToUser(userId, 'notification:deleted', { notificationId });
+      emitToCrmUser(userId, 'crm:notification:deleted', { notificationId });
+      if (notice.metadata?.pushTag) {
+        // Close foreground device notifications over sockets, never silent Web Push.
+        emitToUser(userId, 'notification:dismiss', { tag: notice.metadata.pushTag });
+        emitToCrmUser(userId, 'notification:dismiss', { tag: notice.metadata.pushTag });
+      }
+      if (++delivered % 50 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  }
+}
 
 /**
  * Transportation writes shipment events (pickup windows and delivery
@@ -240,6 +267,7 @@ class GoogleCalendarService {
     let userIdForAttribution: mongoose.Types.ObjectId;
     let currentSyncToken: string | undefined;
     let isInitialSync = false;
+    let correctLegacyRooms = false;
 
     if (target.type === 'org') {
       organizationId = target.id;
@@ -257,7 +285,8 @@ class GoogleCalendarService {
       isInitialSync = !crmUser.googleCalendar?.lastSyncAt;
       // One full pass upgrades already-connected accounts whose old sync
       // token predates calendar-to-Meet room creation.
-      if (!crmUser.googleCalendar?.meetRoomsSyncedAt) forceFullSync = true;
+      correctLegacyRooms = crmUser.googleCalendar?.meetRoomsSyncVersion !== GOOGLE_MEET_SYNC_VERSION;
+      if (!crmUser.googleCalendar?.meetRoomsSyncedAt || correctLegacyRooms) forceFullSync = true;
       if (!forceFullSync) {
         currentSyncToken = crmUser.googleCalendar?.syncToken;
       }
@@ -420,6 +449,13 @@ class GoogleCalendarService {
     // lobby never saw them. Materialize private rooms for the user's timed
     // meetings, retaining the original Google event and conference link.
     if (target.type === 'crmUser') {
+      if (correctLegacyRooms) {
+        // Keep the IDs before pruning invalid copies so their old invitations
+        // can be removed too. Native rooms and reminder/live alerts are excluded.
+        const previous = await Meeting.find({ organizationId,
+          calendarSourceId: { $regex: `^google:${target.id}:` } }).select('_id').lean();
+        await clearLegacyCalendarInvitations(organizationId, previous.map(room => String(room._id)));
+      }
       // Incremental results can include a meeting moved outside the rolling
       // appointment window. Apply those edits too so its room cannot retain
       // the old date after the sync token advances.
@@ -429,18 +465,29 @@ class GoogleCalendarService {
         const isMeeting = Boolean(event.hangoutLink || event.conferenceData ||
           /\b(meeting|sync|call)\b/i.test(event.summary || '') || event.attendees?.length);
         const isAvailabilityBlock = event.eventType && event.eventType !== 'default';
-        if (!times || !event.start?.dateTime || !isMeeting || isAvailabilityBlock || event.organizer?.self === false) {
-          await Meeting.deleteMany({ organizationId, calendarSourceId: sourceKey, status: 'scheduled' });
+        // Google omits false optional booleans. Missing `self` is an attendee
+        // copy, not proof that this connected account owns the meeting.
+        if (!times || !event.start?.dateTime || !isMeeting || isAvailabilityBlock || event.organizer?.self !== true) {
+          await Meeting.deleteMany({ organizationId, calendarSourceId: sourceKey, status: 'scheduled',
+            participants: { $size: 0 }, startedAt: null, endedAt: null, chimeMeetingId: null,
+            'recording.status': { $in: ['idle', null] }, 'recording.videoKey': null,
+            'recording.capturePipelineId': null, 'ai.status': { $in: ['idle', null] },
+            'ai.transcriptKey': null, 'ai.summary.overview': null, 'distribution.sentAt': null });
           continue;
         }
-        const emails = (event.attendees ?? []).filter(a => a.responseStatus !== 'declined').map(a => a.email).filter(Boolean);
-        const attendees = await CrmUser.find({ organizationId, email: { $in: emails }, isActive: { $ne: false } })
+        const emails = [...new Set((event.attendees ?? []).filter(a => a.responseStatus !== 'declined')
+          .map(a => a.email?.trim().toLowerCase()).filter((email): email is string => Boolean(email)))];
+        const attendees = await CrmUser.find({ organizationId, isActive: { $ne: false }, $or: [
+          { email: { $in: emails } },
+          { 'googleCalendar.calendarConnected': true, 'googleCalendar.gmailAddress': { $in: emails } },
+        ] })
           .select('_id').lean();
         await syncCalendarMeeting({ _id: event.id, sourceKey,
           organizationId: new mongoose.Types.ObjectId(organizationId), createdBy: userIdForAttribution,
           title: event.summary || 'Calendar meeting', type: 'meeting', status: 'scheduled', deletedAt: null,
           start: times.startTime, end: times.endTime, repeatsDailyWindow: false,
           assignees: attendees.map(user => user._id), generateMeetingLink: true, deferNotifications: true,
+          sendInvitations: false, // Google already sent calendar invitations; avoid a backfill notification burst.
           async save() { /* Google remains the owner of its original event. */ },
         });
       }
@@ -448,7 +495,8 @@ class GoogleCalendarService {
 
     // 4. Update syncToken and lastSyncAt
     if (target.type === 'crmUser') {
-      await CrmUser.updateOne({ _id: target.id }, { $set: { 'googleCalendar.meetRoomsSyncedAt': new Date() } });
+      await CrmUser.updateOne({ _id: target.id }, { $set: { 'googleCalendar.meetRoomsSyncedAt': new Date(),
+        'googleCalendar.meetRoomsSyncVersion': GOOGLE_MEET_SYNC_VERSION } });
     }
     if (finalSyncToken) {
       if (target.type === 'org') {

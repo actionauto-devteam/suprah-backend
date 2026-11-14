@@ -68,6 +68,7 @@ export interface ICrmUser extends Document {
     lastSyncAt?: Date;
     syncToken?: string;
     meetRoomsSyncedAt?: Date;
+    meetRoomsSyncVersion?: number;
     syncClaimToken?: string;
     syncClaimUntil?: Date;
   };
@@ -293,6 +294,7 @@ const CrmUserSchema = new Schema<ICrmUser>(
       lastSyncAt: { type: Date },
       syncToken: { type: String },
       meetRoomsSyncedAt: { type: Date },
+      meetRoomsSyncVersion: { type: Number },
       syncClaimToken: { type: String },
       syncClaimUntil: { type: Date },
     },
