@@ -8,7 +8,6 @@ import { OwnedVehicle } from "../models/OwnedVehicle.model";
 import GarageTransfer from "../models/GarageTransfer.model";
 import notificationService from "./notification.service";
 import cacheService from "./cache.service";
-import { emitToOrg } from "../utils/socketEmitter";
 import { ApiError } from "../utils/ApiError";
 import logger from "../utils/logger";
 
@@ -205,13 +204,9 @@ export async function addLoadCarToGarage(
     status: existed ? "already_in_garage" : "transferred",
   });
 
-  emitToOrg(String(organizationId), "garage:vehicle_transferred", {
-    transferId: record._id,
-    vehicleId: vehicle._id,
-    customerId: context.customer._id,
-    vin: vehicle.vin,
-    status: record.status,
-  });
+  // No dealership-wide live announcement (removed 2026-11-14): nothing used
+  // it, and it sent the customer's ID and the car's VIN to everyone connected
+  // to the dealership. The customer's own notification below is unchanged.
 
   // Told once: only when the car wasn't already in their garage.
   if (!wasActive) {

@@ -105,7 +105,8 @@ describe('adding the car to the garage', () => {
     expect(mockTransferCreate).toHaveBeenCalledWith(expect.objectContaining({
       organizationId: ORG, vehicleId: CAR, customerId: CUSTOMER, vehicleMarkedSold: true, performedBy: 'crm-1', performedByName: 'Jovi CRM', status: 'transferred',
     }));
-    expect(mockEmit).toHaveBeenCalledWith(ORG, 'garage:vehicle_transferred', expect.objectContaining({ vehicleId: CAR, status: 'transferred' }));
+    // No dealership-wide announcement with the customer's ID and VIN (2026-11-14).
+    expect(mockEmit).not.toHaveBeenCalled();
     expect(mockNotify).toHaveBeenCalledWith(expect.objectContaining({
       userId: CUSTOMER, type: 'vehicle_added', title: 'Added to My Garage',
       message: 'Action Auto added your 2021 Toyota Camry to My Garage.', metadata: { vehicleId: CAR, route: MY_GARAGE_ROUTE },
