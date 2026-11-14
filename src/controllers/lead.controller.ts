@@ -95,6 +95,7 @@ async function viewerUserId(req: Request): Promise<string> {
 }
 
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
+const DUPLICATE_NOTE_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
 
 function createAdfIngestionFingerprint(xmlData: string) {
@@ -1965,6 +1966,26 @@ export const addLeadNote = async (
     }
 
     const authorName = (user as any).fullName || (user as any).name || 'Team member';
+
+    const sameNote = await Lead.findOne(
+      {
+        _id: id,
+        organizationId: orgId,
+        notes: {
+          $elemMatch: {
+            createdBy: user._id,
+            text: note.trim(),
+            createdAt: { $gte: new Date(Date.now() - DUPLICATE_NOTE_WINDOW_MS) },
+          },
+        },
+      },
+      { 'notes.$': 1 },
+    ).lean();
+    if (sameNote?.notes?.[0]) {
+      return res.status(200).json(
+        new ApiResponse(200, { note: sameNote.notes[0], duplicate: true }, 'This note was already saved'),
+      );
+    }
 
     let result;
     try {

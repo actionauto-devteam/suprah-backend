@@ -60,6 +60,15 @@ class TokenService {
         }
     }
 
+    isValidAccessToken(token: string): boolean {
+        try {
+            jwt.verify(token, this.accessSecret);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     verifyRefreshToken(token: string): any {
         try {
             return jwt.verify(token, this.refreshSecret);
