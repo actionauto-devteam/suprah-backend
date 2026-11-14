@@ -9,7 +9,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import config from '../config';
 import appointmentService from '../services/appointment.service';
 import { emitToOrg, emitToUser } from '../utils/socketEmitter';
-import { readCalendarState, signCalendarState } from '../utils/calendarOAuthState';
+import { readCalendarStateDetails, signCalendarState } from '../utils/calendarOAuthState';
 import { appointmentSnapshot, diffAppointment, recordAppointmentHistory } from '../services/appointmentHistory.service';
 
 function crmActorName(req: Request): string {
@@ -38,12 +38,16 @@ export const crmCalendarController = {
     );
 
     const crmUserId = (req.crmUser as any)._id.toString();
+    const returnTo = req.query.returnTo === '/crm/suprah-meet' ? '/crm/suprah-meet' : '/crm/appointments';
+    const state = signCalendarState(crmUserId, Date.now(), returnTo);
+    res.cookie('crm_calendar_oauth_state', state, { httpOnly: true, secure: config.env === 'production',
+      sameSite: 'lax', path: '/api/crm/calendar', maxAge: 15 * 60_000 });
 
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
       scope: SCOPES,
       prompt: 'consent',
-      state: signCalendarState(crmUserId),
+      state,
     });
 
     res.json({ url: authUrl });
@@ -54,8 +58,9 @@ export const crmCalendarController = {
    */
   callback: asyncHandler(async (req: Request, res: Response) => {
     const { code, state } = req.query;
+    let returnTo = '/crm/appointments';
     const backToAppointments = (result: 'connected' | 'cancelled' | 'error') =>
-      res.redirect(`${config.frontendUrl}/crm/appointments?calendar=${result}`);
+      res.redirect(`${config.frontendUrl}${returnTo}?calendar=${result}`);
 
     if (!code || !state) {
       backToAppointments(req.query.error === 'access_denied' ? 'cancelled' : 'error');
@@ -68,12 +73,15 @@ export const crmCalendarController = {
       CRM_REDIRECT_URI
     );
 
-    const crmUserId = readCalendarState(state);
-    if (!crmUserId) {
+    const verifiedState = readCalendarStateDetails(state);
+    if (!verifiedState || (verifiedState.requiresCookie && req.cookies?.crm_calendar_oauth_state !== state)) {
       backToAppointments('error');
       return;
     }
+    const crmUserId = verifiedState.crmUserId;
+    returnTo = verifiedState.returnTo;
     try {
+      res.clearCookie('crm_calendar_oauth_state', { path: '/api/crm/calendar' });
       const { tokens } = await oauth2Client.getToken(code as string);
 
       // Get user info to get email
@@ -84,18 +92,18 @@ export const crmCalendarController = {
       // Update CrmUser with tokens
       await CrmUser.findByIdAndUpdate(crmUserId, {
         $set: {
-          googleCalendar: {
-            calendarConnected: true,
-            gmailAddress: userInfo.data.email,
-            accessToken: encrypt(tokens.access_token!),
-            refreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
-            expiryDate: tokens.expiry_date,
-            lastSyncAt: new Date(),
-          },
+          'googleCalendar.calendarConnected': true,
+          'googleCalendar.gmailAddress': userInfo.data.email,
+          'googleCalendar.accessToken': encrypt(tokens.access_token!),
+          ...(tokens.refresh_token ? { 'googleCalendar.refreshToken': encrypt(tokens.refresh_token) } : {}),
+          'googleCalendar.expiryDate': tokens.expiry_date,
+          'googleCalendar.lastSyncAt': null,
+          'googleCalendar.syncToken': null,
+          'googleCalendar.meetRoomsSyncedAt': null,
         },
       });
     } catch (err) {
-      console.error(`Google Calendar connect failed for CrmUser ${crmUserId}:`, err);
+      console.error('Google Calendar connection failed:', err);
       backToAppointments('error');
       return;
     }

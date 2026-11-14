@@ -67,6 +67,9 @@ export interface ICrmUser extends Document {
     expiryDate?: number;
     lastSyncAt?: Date;
     syncToken?: string;
+    meetRoomsSyncedAt?: Date;
+    syncClaimToken?: string;
+    syncClaimUntil?: Date;
   };
   googleMail?: {
     connected: boolean;
@@ -289,6 +292,9 @@ const CrmUserSchema = new Schema<ICrmUser>(
       expiryDate: { type: Number },
       lastSyncAt: { type: Date },
       syncToken: { type: String },
+      meetRoomsSyncedAt: { type: Date },
+      syncClaimToken: { type: String },
+      syncClaimUntil: { type: Date },
     },
     googleMail: {
       connected: { type: Boolean, default: false },

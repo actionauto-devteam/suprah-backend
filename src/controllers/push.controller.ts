@@ -11,7 +11,7 @@ export class PushController {
         const { subscription, deviceHint } = req.body;
         const userId = req.user?._id;
 
-        if (!subscription || !subscription.endpoint || !subscription.keys) {
+        if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
             throw new ApiError(400, 'Invalid subscription object. Expected endpoint and keys (p256dh, auth).');
         }
 
@@ -24,7 +24,7 @@ export class PushController {
         // dashboard load and silently strip each other's subscription.
         await Promise.all([
             User.updateMany(
-                { 'pushSubscriptions.endpoint': subscription.endpoint },
+                { _id: { $ne: userId }, 'pushSubscriptions.endpoint': subscription.endpoint },
                 {
                     $pull: { pushSubscriptions: { endpoint: subscription.endpoint } },
                 }
@@ -38,7 +38,12 @@ export class PushController {
         ]);
 
         await User.updateOne(
-            { _id: userId },
+            { _id: userId, 'pushSubscriptions.endpoint': subscription.endpoint },
+            { $set: { 'pushSubscriptions.$': { endpoint: subscription.endpoint, keys: subscription.keys,
+                deviceHint, createdAt: new Date() } } },
+        );
+        await User.updateOne(
+            { _id: userId, 'pushSubscriptions.endpoint': { $ne: subscription.endpoint } },
             {
                 $push: {
                     pushSubscriptions: {

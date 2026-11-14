@@ -2,6 +2,7 @@ import { Router } from 'express';
 import crmAuth from '../middleware/crmAuth.middleware';
 import suprahMeetController from '../controllers/suprahMeet.controller';
 import { testMeetingDevicePush } from '../controllers/suprahMeetPush.controller';
+import { previewUnusedMeetings, removeUnusedMeetings } from '../controllers/suprahMeetCleanup.controller';
 
 // NOTE: if your existing route file imports the auth middleware differently
 // (named import / different filename), keep YOUR import + router.use line and
@@ -22,6 +23,8 @@ router.get('/guest/recording/:code', suprahMeetController.recordingAccess); // t
 router.use(crmAuth());
 
 router.post('/device-notifications/test', testMeetingDevicePush);
+router.get('/unused-schedules', previewUnusedMeetings);
+router.delete('/unused-schedules', removeUnusedMeetings);
 
 router.post('/meetings',                        suprahMeetController.createMeeting);
 router.get('/meetings',                         suprahMeetController.listMeetings);

@@ -13,19 +13,32 @@ import type { IMeeting } from '../models/Meeting.model';
  *   MEET_SMTP_USER, MEET_SMTP_PASS, MEET_SMTP_FROM ("Suprah Meet <meet@...>")
  */
 
+function mailSettings() {
+  const dedicated = Boolean(process.env.MEET_SMTP_HOST);
+  const prefix = dedicated ? 'MEET_SMTP_' : 'SMTP_';
+  const port = Number(process.env[`${prefix}PORT`] || 587);
+  return { host: process.env[`${prefix}HOST`], port,
+    secure: process.env[`${prefix}SECURE`] === 'true' || port === 465,
+    user: process.env[`${prefix}USER`], pass: process.env[`${prefix}PASS`],
+    from: process.env.MEET_SMTP_FROM || process.env.SMTP_FROM || (!dedicated ? process.env.SMTP_USER : undefined) };
+}
+
 export function mailConfigured(): boolean {
-  return Boolean(process.env.MEET_SMTP_HOST && process.env.MEET_SMTP_FROM);
+  const settings = mailSettings();
+  return Boolean(settings.host && settings.from);
 }
 
 let transporter: nodemailer.Transporter | null = null;
 function getTransporter(): nodemailer.Transporter {
   if (!transporter) {
+    const settings = mailSettings();
     transporter = nodemailer.createTransport({
-      host: process.env.MEET_SMTP_HOST,
-      port: Number(process.env.MEET_SMTP_PORT || 587),
-      secure: String(process.env.MEET_SMTP_SECURE || '') === 'true',
-      auth: process.env.MEET_SMTP_USER
-        ? { user: process.env.MEET_SMTP_USER, pass: process.env.MEET_SMTP_PASS }
+      host: settings.host,
+      port: settings.port,
+      secure: settings.secure,
+      connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 30_000,
+      auth: settings.user
+        ? { user: settings.user, pass: settings.pass }
         : undefined,
     });
   }
@@ -33,7 +46,7 @@ function getTransporter(): nodemailer.Transporter {
 }
 
 const esc = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 function summaryHtml(summary: IMeeting['ai']['summary'] | null | undefined): string {
   if (!summary?.overview) {
@@ -63,8 +76,10 @@ export async function sendRecordingEmail(opts: {
   durationMin: number | null;
   link: string;             // tokenized secure recording page
   summary: IMeeting['ai']['summary'] | null | undefined;
+  recordingAvailable?: boolean;
 }): Promise<void> {
   const { to, recipientName, meetingTitle, code, whenStr, durationMin, link, summary } = opts;
+  const recordingAvailable = opts.recordingAvailable !== false;
   const first = esc((recipientName || '').split(' ')[0] || 'there');
   const html = `
   <div style="background:#f3f6f5;padding:28px 12px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif">
@@ -75,13 +90,13 @@ export async function sendRecordingEmail(opts: {
       <div style="padding:24px">
         <p style="margin:0 0 6px;color:#1f2937;font-size:15px">Hi ${first},</p>
         <p style="margin:0 0 18px;color:#4b5563;font-size:14px;line-height:1.6">
-          Here's the recording and AI summary from
+          Here's the ${recordingAvailable ? 'recording and AI summary' : 'AI summary'} from
           <strong>${esc(meetingTitle)}</strong> (${esc(code)}) — ${esc(whenStr)}${durationMin ? ` · ${durationMin} min` : ''}.
         </p>
         <p style="margin:0 0 22px">
-          <a href="${link}"
+          <a href="${esc(link)}"
              style="display:inline-block;background:#059669;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 22px;border-radius:10px">
-            ▶ Watch the recording
+            ${recordingAvailable ? '▶ Watch the recording' : 'Read the meeting summary'}
           </a>
         </p>
         <div style="border:1px solid #d7e5df;border-radius:12px;padding:16px 18px;background:#f8fbfa">
@@ -95,10 +110,16 @@ export async function sendRecordingEmail(opts: {
       </div>
     </div>
   </div>`;
-  await getTransporter().sendMail({
-    from: process.env.MEET_SMTP_FROM,
+  const result = await getTransporter().sendMail({
+    from: mailSettings().from,
     to,
-    subject: `Recording & AI summary — ${meetingTitle} (${code})`,
+    subject: `${recordingAvailable ? 'Recording & AI summary' : 'AI summary'} — ${meetingTitle} (${code})`,
+    text: [`Hi ${recipientName || 'there'},`, meetingTitle, whenStr,
+      link, summary?.overview, ...(summary?.keyPoints ?? []), ...(summary?.decisions ?? []),
+      ...(summary?.actionItems ?? []), 'This personal link expires in 7 days.'].filter(Boolean).join('\n\n'),
     html,
   });
+  if (!result.accepted?.length || result.rejected?.length) {
+    throw new Error('The mail server did not accept this recipient.');
+  }
 }

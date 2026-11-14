@@ -1,0 +1,56 @@
+{
+  "title": "Suprah Meet, Calendar & Notification Improvements",
+  "description": "This release fixes repeat meeting entry, adds reconnect and schedule cleanup controls, brings calendar-created rooms into Meet, and improves meeting reports and notification reliability.",
+  "items": [
+    {
+      "title": "Hosts can enter their next meeting",
+      "description": "Starting or joining another meeting no longer carries over the previous call's ended screen, summary, chat, or controls. Your microphone and camera choices from the device check are kept for the new call. Mini Meet continues the active call while you navigate around CRM.",
+      "kind": "fix", "media": []
+    },
+    {
+      "title": "Rejoin after a connection interruption",
+      "description": "Leaving a call or losing the connection now shows your own session status instead of saying the entire meeting ended. Staff and guests can use Rejoin meeting, review their devices, and reconnect. Meetings ended by the host stay closed.",
+      "kind": "improvement", "media": []
+    },
+    {
+      "title": "More reliable joining and host controls",
+      "description": "People joining together retain their places in the room, including separate device sessions. Ending a meeting closes admission before media cleanup. Late responses from an older call no longer change the current meeting. Guest access remains tied to its meeting and organization.",
+      "kind": "fix", "media": []
+    },
+    {
+      "title": "Suprah Calendar meetings create Meet rooms",
+      "description": "New meetings in Suprah Calendar create a private Suprah Meet room by default, with an option to turn room creation off. Calendar rescheduling, participants, cancellation, and recurring daily windows update the linked schedule. Completed calls and their reports are kept.",
+      "kind": "feature", "media": []
+    },
+    {
+      "title": "Google Calendar meetings appear in Suprah Meet",
+      "description": "Connect your Google account from the Meet lobby. Timed meetings you organize on its primary calendar receive corresponding Suprah Meet rooms, including recurring sessions and events with a Google Meet link. Changes sync automatically or through Sync Calendar. Original Google invitations and join links are retained; share the Suprah link when meeting in Suprah.",
+      "kind": "feature", "media": []
+    },
+    {
+      "title": "Clearer meeting reports and email retries",
+      "description": "A ready AI summary can be emailed even when a video recording is unavailable. Recipient selections stay in place during processing. Failed recipients can be retried without resending to recipients already accepted by the mail server. Personal report links open the correct meeting and organization.",
+      "kind": "fix", "media": []
+    },
+    {
+      "title": "Device notification recovery",
+      "description": "Suprah rechecks notification registration when the app resumes or reconnects, reusing existing browser permission where supported. Temporary delivery failures retain the device subscription. Explicitly turning off device notifications remains respected.",
+      "kind": "fix", "media": []
+    },
+    {
+      "title": "Easier notification controls and correct destinations",
+      "description": "The notification drawer has a larger close control, mobile scrolling, readable preference text, and a theme-aware scrollbar. Arrival, geofence, offline, and place-visit alerts have separate controls. Customer and driver links open their own pages, and staff-only meeting alerts stay in staff areas.",
+      "kind": "improvement", "media": []
+    },
+    {
+      "title": "Review unused Instant meeting schedules",
+      "description": "Clean up unused schedules previews unstarted drafts titled Instant meeting. Review the codes and dates, choose which drafts to remove, and confirm the selection. Staff manage their own drafts; admins and managers can manage team drafts. Other titles, active calls, calendar-linked rooms, recordings, and summaries are kept.",
+      "kind": "feature", "media": []
+    },
+    {
+      "title": "Calendar sync handles temporary service limits",
+      "description": "Temporary Google Calendar rate limits keep your account connected and show a retry message. Sync also recovers more reliably from temporary network or credential-save failures, and overlapping sync requests no longer compete for the same account.",
+      "kind": "fix", "media": []
+    }
+  ]
+}

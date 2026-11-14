@@ -37,6 +37,8 @@ export interface IMeeting extends Document {
   code: string;
   title: string;
   hostCrmUserId: mongoose.Types.ObjectId;
+  calendarSourceId?: string;
+  calendarOccurrenceKey?: string;
   status: 'scheduled' | 'live' | 'ended';
   visibility: 'public' | 'private';  // private → join-by-code users wait for the host
   scheduledAt?: Date;              // UTC instant of the MDT wall time chosen
@@ -81,6 +83,8 @@ export interface IMeeting extends Document {
     error?: string;
   };
   distribution?: {
+    claimToken?: string | null;
+    claimUntil?: Date | null;
     sentAt?: Date;
     sentBy?: mongoose.Types.ObjectId;
     recipients: {
@@ -100,9 +104,11 @@ export interface IMeeting extends Document {
 const MeetingSchema = new Schema<IMeeting>(
   {
     organizationId: { type: Schema.Types.ObjectId, ref: 'Organization', required: true, index: true },
-    code: { type: String, required: true, trim: true, uppercase: true },
+    code: { type: String, required: true, trim: true, uppercase: true, index: true },
     title: { type: String, required: true, trim: true, default: 'Instant meeting' },
     hostCrmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
+    calendarSourceId: { type: String, index: true },
+    calendarOccurrenceKey: { type: String },
     status: { type: String, enum: ['scheduled', 'live', 'ended'], default: 'live', index: true },
     visibility: { type: String, enum: ['public', 'private'], default: 'public' },
     scheduledAt: { type: Date, default: null, index: true },
@@ -179,6 +185,8 @@ const MeetingSchema = new Schema<IMeeting>(
       error: { type: String },
     },
     distribution: {
+      claimToken: { type: String, default: null },
+      claimUntil: { type: Date, default: null },
       sentAt: { type: Date },
       sentBy: { type: Schema.Types.ObjectId, ref: 'CrmUser' },
       recipients: [

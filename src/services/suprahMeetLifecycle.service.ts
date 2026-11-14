@@ -4,6 +4,31 @@ import { notifyMeetingLive } from './suprahMeetNotification.service';
 import { abandonedMeetingReason, clearParticipantSessions, hasScheduledMeetingOpened, reconcileMeetingTimer, stopMeetingTimer } from './suprahMeetPresence.service';
 import logger from '../utils/logger';
 import { ApiError } from '../utils/ApiError';
+import { randomInt } from 'crypto';
+
+/** End admission before waiting for AWS cleanup, preserving the newest roster. */
+export async function claimHostMeetingEnd(source: IMeeting, hostId: unknown, now = new Date()) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const current = await reloadMeeting(source);
+    if (String(current.hostCrmUserId) !== String(hostId)) throw new ApiError(403, 'Only the meeting host can end the meeting for everyone.');
+    if (current.status === 'ended') return { meeting: current, claimed: false };
+    const version = current.get('__v') ?? null;
+    stopMeetingTimer(current, now);
+    current.participants.forEach(person => clearParticipantSessions(person, now));
+    const ended = await Meeting.findOneAndUpdate({
+      _id: current._id, organizationId: current.organizationId, hostCrmUserId: current.hostCrmUserId,
+      status: current.status, updatedAt: current.updatedAt, __v: version,
+    }, { $set: {
+      status: 'ended', endedAt: now, endedReason: 'host-ended', participants: current.participants,
+      timerElapsedMs: current.timerElapsedMs, timerActiveSince: null,
+      liveNotificationPending: false, invitationNotificationPending: false,
+      captionsEnabled: false, captionStartClaimUntil: null,
+    }, $inc: { __v: 1 } }, { new: true });
+    if (ended) return { meeting: ended, claimed: true };
+    await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1) + randomInt(0, 20)));
+  }
+  throw new ApiError(409, 'This meeting is changing. Please try ending it again.');
+}
 
 async function reloadMeeting(meeting: IMeeting): Promise<IMeeting> {
   const fresh = await Meeting.findById(meeting._id);

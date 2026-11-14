@@ -1,3 +1,4 @@
+jest.mock('../../src/services/calendarMeetSync.service', () => ({ recoverCalendarMeetings: jest.fn() }));
 const findMeetings = jest.fn();
 
 jest.mock('../../src/utils/asyncHandler', () => ({ asyncHandler: (handler: unknown) => handler }));

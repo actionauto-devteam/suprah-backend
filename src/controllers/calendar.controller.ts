@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { Types } from "mongoose";
-import { CalendarEvent } from "../models/calendarEvent.model";
+import { CalendarEvent, ICalendarEvent } from "../models/calendarEvent.model";
 import Appointment from "../models/Appointment.model";
 import {
   emitCalendarChange,
@@ -9,6 +9,17 @@ import notificationService from "../services/notification.service";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiError } from "../utils/ApiError";
 import ical, { ICalCalendarMethod } from "ical-generator";
+import { calendarMeetingTimes, syncCalendarMeeting } from '../services/calendarMeetSync.service';
+import logger from '../utils/logger';
+
+/** Persist the schedule even if room synchronization needs a later retry. */
+async function saveCalendarEvent(doc: ICalendarEvent): Promise<void> {
+  doc.meetingSyncPending = doc.type === 'meeting' || Boolean(doc.meetingRoomName) || doc.meetingSyncPending;
+  await doc.save();
+  if (!doc.meetingSyncPending) return;
+  try { await syncCalendarMeeting(doc); }
+  catch (error) { logger.error({ error, calendarEventId: doc._id }, '[CalendarMeet] Saved calendar change; room sync pending retry'); }
+}
 
 /**
  * crmAuth attaches req.crmUser (ICrmUser or synthetic plain object) and
@@ -137,6 +148,8 @@ interface FeedItem {
   status: string;
   color?: string;
   meetingLink?: string;
+  generateMeetingLink?: boolean;
+  meetingSyncPending?: boolean;
   createdBy?: unknown;
   assignees?: unknown[];
   /** Viewer-specific: true when the requester created the item or is an org admin. */
@@ -169,6 +182,8 @@ const mapCalendarEvent = (
   status: doc.status,
   color: doc.color,
   meetingLink: doc.meetingLink,
+  generateMeetingLink: doc.generateMeetingLink,
+  meetingSyncPending: doc.meetingSyncPending,
   createdBy: doc.createdBy,
   assignees: doc.assignees,
   canEdit:
@@ -462,9 +477,11 @@ export const createEvent = asyncHandler(async (req: Request, res: Response) => {
     createdBy: auth.userId,
     assignees,
     color,
+    generateMeetingLink: req.body.generateMeetingLink !== false,
   });
 
-  await doc.save();
+  if (doc.type === 'meeting' && doc.repeatsDailyWindow) calendarMeetingTimes(doc);
+  await saveCalendarEvent(doc);
   await doc.populate(POPULATE_USERS);
 
   const item = mapCalendarEvent(doc.toObject(), auth.userId, isAdminRole(auth.role));
@@ -529,12 +546,14 @@ export const updateEvent = asyncHandler(async (req: Request, res: Response) => {
     "assignees",
     "status",
     "color",
+    "generateMeetingLink",
   ] as const;
   for (const key of editable) {
     if (key in req.body) (doc as any)[key] = req.body[key];
   }
 
-  await doc.save();
+  if (doc.type === 'meeting' && doc.repeatsDailyWindow) calendarMeetingTimes(doc);
+  await saveCalendarEvent(doc);
   await doc.populate(POPULATE_USERS);
 
   const item = mapCalendarEvent(doc.toObject(), auth.userId, isAdmin);
@@ -576,7 +595,7 @@ export const deleteEvent = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, "Only the creator or an admin can delete this item.");
   }
   doc.deletedAt = new Date();
-  await doc.save();
+  await saveCalendarEvent(doc);
   emitCalendarChange("calendar:deleted", auth.orgId, {
     source: "calendarEvent",
     id: String(doc._id),
@@ -636,7 +655,7 @@ export const bulkDeleteEvents = asyncHandler(async (req: Request, res: Response)
       continue;
     }
     loaded.doc.deletedAt = new Date();
-    await loaded.doc.save();
+    await saveCalendarEvent(loaded.doc);
     emitCalendarChange("calendar:deleted", auth.orgId, {
       source: "calendarEvent",
       id: String(loaded.doc._id),
@@ -663,7 +682,7 @@ export const bulkUpdateStatus = asyncHandler(async (req: Request, res: Response)
       continue;
     }
     loaded.doc.status = req.body.status;
-    await loaded.doc.save();
+    await saveCalendarEvent(loaded.doc);
     await loaded.doc.populate(POPULATE_USERS);
     emitCalendarChange("calendar:updated", auth.orgId, {
       source: "calendarEvent",
@@ -692,7 +711,7 @@ export const bulkReassignEvents = asyncHandler(async (req: Request, res: Respons
       continue;
     }
     loaded.doc.assignees = assignees;
-    await loaded.doc.save();
+    await saveCalendarEvent(loaded.doc);
     await loaded.doc.populate(POPULATE_USERS);
     emitCalendarChange("calendar:updated", auth.orgId, {
       source: "calendarEvent",

@@ -22,6 +22,8 @@ if (config.redis.enabled) {
     'push-notifications',
     async (job: Job) => {
       const { userId, payload } = job.data;
+      // Old queued read/dismiss jobs cannot use silent Web Push safely.
+      if (payload?.isSyncAction) return;
 
       if (!userId || !payload) {
         logger.warn(`${LOG_PREFIX} Invalid job data for job ${job.id}`);

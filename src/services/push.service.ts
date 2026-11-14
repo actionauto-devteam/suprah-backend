@@ -4,19 +4,17 @@ import logger from '../utils/logger';
 import config from '../config';
 import User from '../models/User.model';
 import CrmPushService from './crmPush.service';
+import UnifiedPushService from './unifiedPush.service';
 
 const LOG_PREFIX = '[PushService]';
 
 export class PushService {
   static async send(userId: string | mongoose.Types.ObjectId, payload: any) {
+    if (payload?.isSyncAction) return UnifiedPushService.dismiss(userId.toString(), String(payload.tag || ''));
     if (!config.redis.enabled || !pushQueue) {
-      // warn, not debug — this returns success:true while delivering nothing;
-      // it's easy to lose track of this legacy Redis-dependent path silently
-      // no-op'ing in a deployment that has Redis disabled. Prefer
-      // UnifiedPushService (services/unifiedPush.service.ts) for new code —
-      // it isn't Redis-gated.
-      logger.warn(`${LOG_PREFIX} Skipping push (Redis is disabled) — this push will NOT be delivered.`);
-      return { success: true, message: 'Push skipped (Redis disabled).' };
+      // Keep delivery working on deployments without the optional queue.
+      const result = await UnifiedPushService.sendToUser(userId.toString(), payload);
+      return { success: result.failed === 0, ...result, message: 'Push processed directly.' };
     }
     try {
       await pushQueue.add('send-push', { 
@@ -31,15 +29,10 @@ export class PushService {
   }
 
   /**
-   * Queues a synchronized "dismiss" signal to clear notifications across devices.
+   * Clear read notifications on connected devices without silent Web Push.
    */
   static async dismiss(userId: string | mongoose.Types.ObjectId, tag: string) {
-    const payload = {
-      isSyncAction: true,
-      action: 'dismiss',
-      tag: tag,
-    };
-    return this.send(userId, payload);
+    return UnifiedPushService.dismiss(userId.toString(), tag);
   }
 
   /**
@@ -61,8 +54,9 @@ export class PushService {
       }));
 
       if (!config.redis.enabled || !pushQueue) {
-        logger.warn(`${LOG_PREFIX} Skipping broadcast of ${jobs.length} notifications (Redis is disabled) — NOT delivered.`);
-        return { success: true, sentCount: 0, skippedCount: jobs.length };
+        const results = await Promise.all(userIds.map(id => UnifiedPushService.sendToUser(id.toString(), payload)));
+        return { success: results.every(result => result.failed === 0),
+          sentCount: results.reduce((sum, result) => sum + result.sent, 0) };
       }
 
       // BullMQ addBulk is highly optimized for performance

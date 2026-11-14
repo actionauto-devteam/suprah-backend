@@ -4,6 +4,7 @@ import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import logger from '../utils/logger';
 import { normalizePushPayload } from '../utils/pushPayload';
+import { emitToUser, emitToCrmUser } from '../utils/socketEmitter';
 
 const LOG_PREFIX = '[UnifiedPushService]';
 
@@ -40,6 +41,7 @@ interface PushTarget {
 
 const RECENT_DELIVERY_MS = 30_000;
 const recentDeliveries = new Map<string, { at: number; recipient: string }>();
+const pendingDeliveries = new Map<string, { recipient: string; done: Promise<boolean> }>();
 
 function deliveryKey(endpoint: string, payload: Record<string, unknown>): string {
   return [endpoint, payload.tag, payload.title, payload.body].map((part) => String(part ?? '')).join('|');
@@ -47,12 +49,9 @@ function deliveryKey(endpoint: string, payload: Record<string, unknown>): string
 
 function deliveredToOtherIdentity(key: string, recipient: string): boolean {
   const now = Date.now();
-  if (recentDeliveries.size > 5000) {
-    for (const [stored, entry] of recentDeliveries) if (now - entry.at > RECENT_DELIVERY_MS) recentDeliveries.delete(stored);
-  }
   const last = recentDeliveries.get(key);
   if (last && now - last.at < RECENT_DELIVERY_MS && last.recipient !== recipient) return true;
-  recentDeliveries.set(key, { at: now, recipient });
+  if (last && now - last.at >= RECENT_DELIVERY_MS) recentDeliveries.delete(key);
   return false;
 }
 
@@ -89,8 +88,6 @@ async function sendToSubscriptions(
   if (!subscriptions.length) return { sent: 0, failed: 0, pruned: 0 };
 
   const { payload: normalized, topic } = normalizePushPayload(payload as any);
-  subscriptions = subscriptions.filter((sub) => !deliveredToOtherIdentity(deliveryKey(sub.endpoint, normalized), recipient));
-  if (!subscriptions.length) return { sent: 0, failed: 0, pruned: 0 };
   const stringifiedPayload = JSON.stringify(normalized);
   const endpointsToPrune: string[] = [];
   let sent = 0;
@@ -98,13 +95,29 @@ async function sendToSubscriptions(
 
   await Promise.allSettled(
     subscriptions.map(async (sub) => {
+      const key = deliveryKey(sub.endpoint, normalized);
+      const pending = pendingDeliveries.get(key);
+      // A linked identity may race this request. Wait for its actual result
+      // before suppressing a duplicate; a failed attempt is safe to retry.
+      if (pending && pending.recipient !== recipient && await pending.done) return;
+      if (deliveredToOtherIdentity(key, recipient)) return;
+      let finish!: (delivered: boolean) => void;
+      const reservation = { recipient, done: new Promise<boolean>(resolve => { finish = resolve; }) };
+      pendingDeliveries.set(key, reservation);
+      let delivered = false;
       try {
         await webpush.sendNotification(
           { endpoint: sub.endpoint, keys: sub.keys },
           stringifiedPayload,
-          { TTL: 86400, urgency: 'high', ...(topic ? { topic } : {}) }
+          { TTL: 86400, urgency: 'high', timeout: 15_000, ...(topic ? { topic } : {}) }
         );
         sent += 1;
+        delivered = true;
+        if (recentDeliveries.size >= 10_000) {
+          const oldest = recentDeliveries.keys().next().value;
+          if (oldest !== undefined) recentDeliveries.delete(oldest);
+        }
+        recentDeliveries.set(key, { at: Date.now(), recipient });
       } catch (error: any) {
         if (error.statusCode === 410 || error.statusCode === 404) {
           endpointsToPrune.push(sub.endpoint);
@@ -122,6 +135,9 @@ async function sendToSubscriptions(
             `${LOG_PREFIX} Push failed for ${model} ${userId}`
           );
         }
+      } finally {
+        finish(delivered);
+        if (pendingDeliveries.get(key) === reservation) pendingDeliveries.delete(key);
       }
     })
   );
@@ -134,6 +150,9 @@ async function sendToSubscriptions(
 }
 
 const sendToUser = async (userId: string, payload: object, includeSupraSpaceApp = false) => {
+  if ((payload as { isSyncAction?: boolean }).isSyncAction) {
+    return dismiss(userId, String((payload as { tag?: string }).tag || ''));
+  }
   try {
     const targets = await resolveTargets(userId, includeSupraSpaceApp);
     if (!targets.length) {
@@ -159,7 +178,11 @@ const sendToUser = async (userId: string, payload: object, includeSupraSpaceApp 
 };
 
 const dismiss = async (userId: string, tag: string) => {
-  return sendToUser(userId, { isSyncAction: true, action: 'dismiss', tag });
+  // Silent Web Push violates userVisibleOnly and can revoke Safari permission.
+  // Connected clients can dismiss locally without waking a closed app.
+  emitToUser(userId, 'notification:dismiss', { tag });
+  emitToCrmUser(userId, 'notification:dismiss', { tag });
+  return { sent: 0, failed: 0, pruned: 0 };
 };
 
 const broadcastToUsers = async (userIds: string[], payload: object) => {

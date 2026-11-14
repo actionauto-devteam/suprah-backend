@@ -9,6 +9,10 @@ import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import { IUser } from '../models/User.model';
 import { IAppointment } from '../models/Appointment.model';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
+import { syncCalendarMeeting } from './calendarMeetSync.service';
+import Meeting from '../models/Meeting.model';
+import { randomUUID } from 'crypto';
+import logger from '../utils/logger';
 
 interface GoogleTokens {
   access_token: string;
@@ -18,7 +22,7 @@ interface GoogleTokens {
   token_type?: string;
 }
 
-const MAX_PAGES = 5;
+const MAX_PAGES = 100;
 
 /**
  * Transportation writes shipment events (pickup windows and delivery
@@ -72,20 +76,24 @@ class GoogleCalendarService {
     });
 
     oauth2Client.on('tokens', async (newTokens: any) => {
-      const update: Record<string, any> = {};
-      if (newTokens.expiry_date)   update['expiryDate'] = newTokens.expiry_date;
-      if (newTokens.access_token)  update['accessToken']  = encrypt(newTokens.access_token);
-      if (newTokens.refresh_token) update['refreshToken'] = encrypt(newTokens.refresh_token);
+      try {
+        const update: Record<string, any> = {};
+        if (newTokens.expiry_date)   update['expiryDate'] = newTokens.expiry_date;
+        if (newTokens.access_token)  update['accessToken']  = encrypt(newTokens.access_token);
+        if (newTokens.refresh_token) update['refreshToken'] = encrypt(newTokens.refresh_token);
 
-      if (target.type === 'org') {
-        await OrgLeadConfig.updateOne({ organizationId: target.id }, { $set: update });
-      } else {
-        // Nested update for CrmUser.googleCalendar
-        const nestedUpdate: Record<string, any> = {};
-        for (const [key, val] of Object.entries(update)) {
-          nestedUpdate[`googleCalendar.${key}`] = val;
+        if (target.type === 'org') {
+          await OrgLeadConfig.updateOne({ organizationId: target.id }, { $set: update });
+        } else {
+          // Nested update for CrmUser.googleCalendar
+          const nestedUpdate: Record<string, any> = {};
+          for (const [key, val] of Object.entries(update)) {
+            nestedUpdate[`googleCalendar.${key}`] = val;
+          }
+          await CrmUser.updateOne({ _id: target.id }, { $set: nestedUpdate });
         }
-        await CrmUser.updateOne({ _id: target.id }, { $set: nestedUpdate });
+      } catch (error) {
+        logger.error({ error, targetType: target.type, targetId: target.id }, '[CalendarSync] Refreshed credentials could not be saved');
       }
     });
 
@@ -155,13 +163,14 @@ class GoogleCalendarService {
       page++;
       if (page > MAX_PAGES) {
         console.warn(`⚠️  MAX_PAGES (${MAX_PAGES}) reached — halting pagination`);
-        break;
+        throw new ApiError(502, 'Google Calendar returned too many pages. The sync was not marked complete; please retry.');
       }
 
       const params: calendar_v3.Params$Resource$Events$List = {
         calendarId:   'primary',
         maxResults:   2500,
         pageToken,
+        singleEvents: true,
       };
 
       if (syncToken) {
@@ -173,7 +182,7 @@ class GoogleCalendarService {
         params.showDeleted = true;
       }
 
-      const response = await calendar.events.list(params);
+      const response = await calendar.events.list(params, { timeout: 15_000 });
 
       const items = response.data.items ?? [];
       allEvents.push(...items);
@@ -246,6 +255,9 @@ class GoogleCalendarService {
       organizationId = crmUser.organizationId.toString();
       userIdForAttribution = crmUser._id;
       isInitialSync = !crmUser.googleCalendar?.lastSyncAt;
+      // One full pass upgrades already-connected accounts whose old sync
+      // token predates calendar-to-Meet room creation.
+      if (!crmUser.googleCalendar?.meetRoomsSyncedAt) forceFullSync = true;
       if (!forceFullSync) {
         currentSyncToken = crmUser.googleCalendar?.syncToken;
       }
@@ -271,7 +283,13 @@ class GoogleCalendarService {
         usedFallback = true;
       } else {
         const msg: string = err?.message ?? '';
-        if (msg.toLowerCase().includes('insufficient') || err?.code === 403) {
+        const reasons = (err?.response?.data?.error?.errors ?? err?.errors ?? []).map((item: { reason?: string }) => item.reason);
+        // Google also uses 403 for quota/rate limits. Those are retryable and
+        // must not disconnect an otherwise healthy calendar account.
+        if (err?.code === 429 || reasons.some((reason: string) => ['userRateLimitExceeded', 'rateLimitExceeded', 'quotaExceeded'].includes(reason))) {
+          throw new ApiError(429, 'Google Calendar is temporarily rate-limited. Your account is still connected; try syncing again shortly.');
+        }
+        if (msg.toLowerCase().includes('insufficient') || reasons.includes('insufficientPermissions')) {
           await this.markDisconnected(target);
           throw new ApiError(403, 'Insufficient permissions. Please reconnect your calendar.');
         }
@@ -315,6 +333,10 @@ class GoogleCalendarService {
         { googleCalendarEventId: { $in: cancelledIds }, createdBy: userIdForAttribution },
         { $set: { status: 'cancelled' } }
       );
+      if (target.type === 'crmUser') {
+        await Meeting.deleteMany({ organizationId,
+          calendarSourceId: { $in: cancelledIds.map(id => `google:${target.id}:${id}`) }, status: 'scheduled' });
+      }
     }
 
     const ops: any[] = [];
@@ -394,7 +416,40 @@ class GoogleCalendarService {
       console.log(`⚠️  No operations to write (ops.length=${ops.length})`);
     }
 
+    // Google imports previously stopped at Appointment documents, so the Meet
+    // lobby never saw them. Materialize private rooms for the user's timed
+    // meetings, retaining the original Google event and conference link.
+    if (target.type === 'crmUser') {
+      // Incremental results can include a meeting moved outside the rolling
+      // appointment window. Apply those edits too so its room cannot retain
+      // the old date after the sync token advances.
+      for (const event of finalEvents.filter(event => event.id && event.status !== 'cancelled')) {
+        const times = this.parseEventTimes(event);
+        const sourceKey = `google:${target.id}:${event.id}`;
+        const isMeeting = Boolean(event.hangoutLink || event.conferenceData ||
+          /\b(meeting|sync|call)\b/i.test(event.summary || '') || event.attendees?.length);
+        const isAvailabilityBlock = event.eventType && event.eventType !== 'default';
+        if (!times || !event.start?.dateTime || !isMeeting || isAvailabilityBlock || event.organizer?.self === false) {
+          await Meeting.deleteMany({ organizationId, calendarSourceId: sourceKey, status: 'scheduled' });
+          continue;
+        }
+        const emails = (event.attendees ?? []).filter(a => a.responseStatus !== 'declined').map(a => a.email).filter(Boolean);
+        const attendees = await CrmUser.find({ organizationId, email: { $in: emails }, isActive: { $ne: false } })
+          .select('_id').lean();
+        await syncCalendarMeeting({ _id: event.id, sourceKey,
+          organizationId: new mongoose.Types.ObjectId(organizationId), createdBy: userIdForAttribution,
+          title: event.summary || 'Calendar meeting', type: 'meeting', status: 'scheduled', deletedAt: null,
+          start: times.startTime, end: times.endTime, repeatsDailyWindow: false,
+          assignees: attendees.map(user => user._id), generateMeetingLink: true, deferNotifications: true,
+          async save() { /* Google remains the owner of its original event. */ },
+        });
+      }
+    }
+
     // 4. Update syncToken and lastSyncAt
+    if (target.type === 'crmUser') {
+      await CrmUser.updateOne({ _id: target.id }, { $set: { 'googleCalendar.meetRoomsSyncedAt': new Date() } });
+    }
     if (finalSyncToken) {
       if (target.type === 'org') {
         await OrgLeadConfig.updateOne(
@@ -434,7 +489,27 @@ class GoogleCalendarService {
   }
 
   async syncCrmUserCalendar(crmUserId: string, forceFullSync?: boolean): Promise<number> {
-    return this.syncInternal({ type: 'crmUser', id: crmUserId }, undefined, forceFullSync);
+    if (isLocalUiAcceptanceMode()) return 0;
+    const claimToken = randomUUID();
+    const leaseMs = 15 * 60_000;
+    const claim = await CrmUser.findOneAndUpdate({ _id: crmUserId,
+      'googleCalendar.calendarConnected': true,
+      $or: [{ 'googleCalendar.syncClaimUntil': null }, { 'googleCalendar.syncClaimUntil': { $lte: new Date() } }],
+    }, { $set: { 'googleCalendar.syncClaimToken': claimToken,
+      'googleCalendar.syncClaimUntil': new Date(Date.now() + leaseMs) } }, { new: true }).select('_id');
+    if (!claim) throw new ApiError(409, 'Calendar sync is already running or Google Calendar needs to be connected.');
+    const ownedClaim = { _id: crmUserId, 'googleCalendar.syncClaimToken': claimToken };
+    const renewal = setInterval(() => {
+      void CrmUser.updateOne(ownedClaim, { $set: { 'googleCalendar.syncClaimUntil': new Date(Date.now() + leaseMs) } })
+        .catch(error => logger.warn({ error, crmUserId }, '[CalendarSync] Lease renewal failed'));
+    }, 60_000);
+    renewal.unref();
+    try { return await this.syncInternal({ type: 'crmUser', id: crmUserId }, undefined, forceFullSync); }
+    finally {
+      clearInterval(renewal);
+      await CrmUser.updateOne(ownedClaim, { $unset: { 'googleCalendar.syncClaimToken': '', 'googleCalendar.syncClaimUntil': '' } })
+        .catch(error => logger.warn({ error, crmUserId }, '[CalendarSync] Lease release failed'));
+    }
   }
 
   // ─── Outbound Sync ──────────────────────────────────────────────────────────

@@ -59,6 +59,10 @@ jest.mock('../../src/models/Appointment.model', () => ({
   default: { findOne: mockAppointmentFindOne, updateOne: mockAppointmentUpdateOne },
 }));
 jest.mock('../../src/utils/safeNotification', () => ({ notifyOrgAdmins: mockNotifyOrgAdmins }));
+jest.mock('../../src/models/CrmUser.model', () => ({
+  __esModule: true,
+  default: { find: jest.fn(() => ({ select: () => ({ lean: async () => [] }) })) },
+}));
 jest.mock('../../src/utils/aiAgentTask', () => ({ createAiAgentTaskAndNotify: jest.fn() }));
 jest.mock('../../src/utils/leadNote', () => ({ addLeadNoteAndNotify: jest.fn() }));
 jest.mock('../../src/utils/smsFailure', () => ({ describeSmsFailure: jest.fn() }));

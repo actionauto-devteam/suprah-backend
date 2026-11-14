@@ -53,6 +53,7 @@ import { initCalendarShipmentSyncScheduler } from "./schedulers/calendarShipment
 import { startProjectDeadlineReminders } from "./services/projectDeadlineReminder.service";
 import { startCalendarReminderSweep } from "./services/calendarReminderSweep.service";
 import { initSuprahMeetReminders } from "./services/suprahMeetReminder.service";
+import { initCrmCalendarSync } from './services/crmCalendarSync.service';
 import healthRoute from "./routes/health.route";
 import crmExtensionRoute from "./routes/crmExtension.routes";
 import supraSpaceRoute from "./routes/supraspace.route";
@@ -265,6 +266,7 @@ if (require.main === module) {
       // tagged users. Safe here: first tick runs after the DB is open, same
       // guard the schedulers above rely on.
       initSuprahMeetReminders();
+      initCrmCalendarSync();
 
       // Suprah Mail — start the Gmail history poll + socket fan-out engine.
       // Placed after waitForDbConnection() so its first tick never queries a

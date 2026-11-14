@@ -6,14 +6,8 @@ import { normalizePushPayload } from '../utils/pushPayload';
 
 const LOG_PREFIX = '[CrmPushService]';
 
-// A push send can fail for reasons that never surface as a clean 404/410 (iOS
-// web push is known to be inconsistent about this, especially for a
-// torn-down/reinstalled PWA's orphaned endpoint) — without this, a dead
-// subscription that never 404s just sits there forever, silently failing on
-// every future send with nothing pruning it and nothing alerting anyone.
-// Requiring several consecutive failures (not a single blip) avoids evicting
-// a subscription over one transient network error.
-const STALE_FAILURE_THRESHOLD = 5;
+// Only 404/410 establish that an endpoint has expired. Timeouts, rate limits,
+// provider outages and VAPID errors must never delete a healthy subscription.
 
 type CrmPushSendOptions = {
   deviceHints?: string[];
@@ -209,7 +203,7 @@ export class CrmPushService {
               await webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: sub.keys },
                 stringifiedPayload,
-                { TTL: options.ttlSeconds ?? 86400, urgency: 'high', ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}), ...(topic ? { topic } : {}) }
+                { TTL: options.ttlSeconds ?? 86400, urgency: 'high', timeout: options.timeoutMs ?? 15_000, ...(topic ? { topic } : {}) }
               );
               stats.sent += 1;
               endpointsSucceeded.push(sub.endpoint);
@@ -229,13 +223,7 @@ export class CrmPushService {
                   },
                   `${LOG_PREFIX} Push failed for user ${user._id}`
                 );
-                const newFailureCount = (sub.failureCount || 0) + 1;
-                if (newFailureCount >= STALE_FAILURE_THRESHOLD) {
-                  logger.warn(`${LOG_PREFIX} Pruning endpoint for user ${user._id} after ${newFailureCount} consecutive non-410/404 failures.`);
-                  endpointsToPrune.push(sub.endpoint);
-                } else {
-                  endpointsFailedSoft.push(sub.endpoint);
-                }
+                endpointsFailedSoft.push(sub.endpoint);
               }
             }
           })
@@ -314,12 +302,7 @@ export class CrmPushService {
                   },
                   `${LOG_PREFIX} Push failed for admin ${admin.fullName}`
                 );
-                const newFailureCount = (sub.failureCount || 0) + 1;
-                if (newFailureCount >= STALE_FAILURE_THRESHOLD) {
-                  endpointsToPrune.push(sub.endpoint);
-                } else {
-                  endpointsFailedSoft.push(sub.endpoint);
-                }
+                endpointsFailedSoft.push(sub.endpoint);
               }
             }
           })

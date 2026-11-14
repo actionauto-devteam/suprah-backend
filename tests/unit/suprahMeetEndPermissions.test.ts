@@ -5,6 +5,7 @@ const deleteSeries = jest.fn();
 const updateScheduled = jest.fn();
 const updateSeries = jest.fn();
 const findById = jest.fn();
+const findPublic = jest.fn();
 const deleteChimeMeeting = jest.fn();
 const stopRecordingPipelines = jest.fn();
 const getChimeMeeting = jest.fn();
@@ -15,7 +16,7 @@ const setChimeAttendeeMuted = jest.fn();
 const notifyMeetingLive = jest.fn();
 
 jest.mock('../../src/utils/asyncHandler', () => ({ asyncHandler: (handler: unknown) => handler }));
-jest.mock('../../src/models/Meeting.model', () => ({ __esModule: true, default: { findOne: findMeeting, findOneAndUpdate: transitionMeeting, deleteOne: deleteScheduled, deleteMany: deleteSeries, updateOne: updateScheduled, updateMany: updateSeries, findById } }));
+jest.mock('../../src/models/Meeting.model', () => ({ __esModule: true, default: { findOne: findMeeting, find: findPublic, findOneAndUpdate: transitionMeeting, deleteOne: deleteScheduled, deleteMany: deleteSeries, updateOne: updateScheduled, updateMany: updateSeries, findById } }));
 jest.mock('../../src/models/CrmUser.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/services/suprahMeetAws.service', () => ({
   deleteChimeMeeting, stopRecordingPipelines, getChimeMeeting, createChimeMeeting, createChimeAttendee,
@@ -50,7 +51,10 @@ beforeEach(() => {
       { crmUserId: 'participant', fullName: 'Participant' },
     ],
     save: jest.fn().mockResolvedValue(undefined),
+    get: jest.fn().mockReturnValue(0),
   };
+  findById.mockResolvedValue(meeting);
+  findPublic.mockReturnValue({ limit: async () => [meeting] });
   findMeeting.mockResolvedValue(meeting);
   transitionMeeting.mockImplementation(async (_filter, update) => Object.assign(meeting, update.$set));
   deleteChimeMeeting.mockResolvedValue(undefined);
@@ -90,7 +94,24 @@ it('allows the creator to end for everyone and closes the recording and particip
   expect(meeting.status).toBe('ended');
   expect(meeting.endedAt).toBeInstanceOf(Date);
   expect(meeting.participants.every((person: any) => person.leftAt instanceof Date)).toBe(true);
-  expect(meeting.save).toHaveBeenCalledTimes(1);
+  expect(meeting.save).not.toHaveBeenCalled();
+  expect(transitionMeeting).toHaveBeenCalledWith(expect.objectContaining({ _id: meeting._id, status: 'live' }),
+    expect.objectContaining({ $set: expect.objectContaining({ status: 'ended', endedReason: 'host-ended' }) }), { new: true });
+});
+
+it('closes admission before waiting for AWS recording cleanup', async () => {
+  meeting.recording = { status: 'recording', capturePipelineId: 'capture-1' };
+  stopRecordingPipelines.mockImplementationOnce(async () => {
+    expect(meeting.status).toBe('ended');
+    await expect(invoke(controller.joinMeeting, request('host'), response())).rejects.toMatchObject({ statusCode: 410 });
+  });
+  await invoke(controller.endMeeting, request('host'), response());
+});
+
+it('does not choose an arbitrary organization for an ambiguous guest code', async () => {
+  findPublic.mockReturnValue({ limit: async () => [meeting, { ...meeting, organizationId: 'other-org' }] });
+  await expect(invoke(controller.guestRequest, { params: { code: meeting.code }, body: { name: 'Guest' }, headers: {} }, response()))
+    .rejects.toMatchObject({ statusCode: 409 });
 });
 
 it('lets the host end the meeting even if their previous participant entry has left', async () => {
@@ -141,7 +162,7 @@ it('opens a scheduled room for its host, but starts its clock only when another 
   meeting.participants = [];
   await invoke(controller.joinMeeting, request('host'), response());
   expect(meeting.status).toBe('live');
-  expect(meeting.startedAt).toBeUndefined();
+  expect(meeting.startedAt).toBeFalsy();
   expect(notifyMeetingLive).toHaveBeenCalledWith(meeting);
 
   await invoke(controller.joinMeeting, request('participant'), response());

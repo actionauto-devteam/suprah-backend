@@ -51,6 +51,7 @@ jest.mock('../../src/services/gmailLeadIntake', () => ({ processGmailMessageThro
 jest.mock('../../src/services/communication.service', () => ({ triggerAiReplyForNewInquiry: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../src/services/aiEmailReply.service', () => ({ triggerAiEmailReplyForNewInquiry: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../src/services/leadLocation.service', () => ({ resolveVehicleContextForLead: jest.fn().mockResolvedValue(null) }));
+jest.mock('../../src/utils/safeNotification', () => ({ notifyOrgAdmins: jest.fn().mockResolvedValue(undefined) }));
 
 import orgGmailService, { forgetCheckedMessages, wasMessageCheckedRecently } from '../../src/services/orgGmail.service';
 

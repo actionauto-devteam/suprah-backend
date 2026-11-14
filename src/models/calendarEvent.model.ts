@@ -34,6 +34,8 @@ export interface ICalendarEvent extends Document {
   assignees: Types.ObjectId[];
   meetingLink?: string;
   meetingRoomName?: string;
+  generateMeetingLink: boolean;
+  meetingSyncPending?: boolean;
   status: CalendarItemStatus;
   color?: string;
   /** "YYYY-MM-DD" (America/Denver) the "starts today" reminder last fired — dedupe key so it only sends once per day. */
@@ -97,6 +99,8 @@ const CalendarEventSchema = new Schema<ICalendarEvent>(
     assignees: [{ type: Schema.Types.ObjectId, ref: "CrmUser", index: true }],
     meetingLink: { type: String, trim: true },
     meetingRoomName: { type: String, trim: true },
+    generateMeetingLink: { type: Boolean, default: true },
+    meetingSyncPending: { type: Boolean, default: false },
     status: {
       type: String,
       enum: ["scheduled", "completed", "cancelled"],

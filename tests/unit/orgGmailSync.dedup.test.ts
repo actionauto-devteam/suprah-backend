@@ -40,6 +40,7 @@ jest.mock('../../src/models/User.model', () => ({
   default: { findOne: mockUserFindOne },
 }));
 jest.mock('../../src/utils/orgSystemUser', () => ({ resolveOrgSystemUserId: jest.fn().mockResolvedValue('staff-1') }));
+jest.mock('../../src/utils/safeNotification', () => ({ notifyOrgAdmins: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../src/utils/crypto', () => ({
   __esModule: true,
   encrypt: (v: string) => `enc:${v}`,
