@@ -14,7 +14,7 @@ process.env.ALLOW_REMOTE_TEST_DB = '';
 process.env.MONGODB_URI = uri;
 process.env.MONGODB_URI_TEST = uri;
 const defaults = {
-  FRONTEND_URL: 'http://127.0.0.1:3000',
+  FRONTEND_URL: 'http://localhost:3000',
   BACKEND_URL: 'http://127.0.0.1:5000',
   BCRYPT_SALT_ROUNDS: '4',
   STRIPE_SECRET_KEY: 'sk_test_release_validation',
