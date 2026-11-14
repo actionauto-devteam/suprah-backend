@@ -23,9 +23,16 @@ const defaults = {
   JWT_REFRESH_SECRET: 'release-validation-refresh-not-for-production',
   CRM_JWT_SECRET: 'release-validation-crm-not-for-production',
   TOKEN_ENCRYPTION_KEY: 'release-validation-encryption-not-for-production',
+  VAPID_SUBJECT: 'mailto:release-tests@example.test',
 };
 for (const [key, value] of Object.entries(defaults)) {
   if (!process.env[key]) process.env[key] = value;
+}
+if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+  const keys = require('crypto').createECDH('prime256v1');
+  keys.generateKeys();
+  process.env.VAPID_PUBLIC_KEY = keys.getPublicKey().toString('base64url');
+  process.env.VAPID_PRIVATE_KEY = keys.getPrivateKey().toString('base64url');
 }
 
 const net = require('net');
