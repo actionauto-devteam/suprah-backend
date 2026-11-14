@@ -9,12 +9,14 @@ import { issueCrmExtensionToken, revokeCrmExtensionToken } from '../middleware/c
 import { createExtensionSignInCode, redeemExtensionSignInCode } from '../services/crmExtensionSignIn.service';
 import {
   addExtensionLeadNote,
+  createExtensionLead,
   getExtensionReplyOptions,
   getLeadAiControlChannel,
   getLeadAiStatus,
   getLeadHistory,
   getLeadNotes,
   lookupLeadsByEmail,
+  lookupLeadsByName,
   lookupLeadsByPhone,
   sendExtensionEmail,
   sendExtensionText,
@@ -85,15 +87,26 @@ export const deleteSessionHandler = asyncHandler(async (req: Request, res: Respo
 });
 
 export const lookupHandler = asyncHandler(async (req: Request, res: Response) => {
-  const { phone, email } = req.body || {};
+  const { phone, email, name } = req.body || {};
   req.body = {};
   const hasPhone = phone !== undefined && phone !== null && phone !== '';
   const hasEmail = email !== undefined && email !== null && email !== '';
-  if (hasPhone && hasEmail) throw new ApiError(400, 'Look up one phone number or email address at a time');
+  const hasName = name !== undefined && name !== null && name !== '';
+  if (Number(hasPhone) + Number(hasEmail) + Number(hasName) > 1) throw new ApiError(400, 'Look up one phone number, email address or name at a time');
   const orgId = String(req.orgId || '');
-  const result = hasEmail ? await lookupLeadsByEmail(orgId, email) : await lookupLeadsByPhone(orgId, phone);
-  logger.info({ crmUserId: String(req.crmUser?._id || ''), organizationId: req.orgId, matches: result.total }, hasEmail ? '[CrmExtension] Email lookup' : '[CrmExtension] Phone lookup');
+  const result = hasName ? await lookupLeadsByName(orgId, name) : hasEmail ? await lookupLeadsByEmail(orgId, email) : await lookupLeadsByPhone(orgId, phone);
+  logger.info({ crmUserId: String(req.crmUser?._id || ''), organizationId: req.orgId, matches: result.total }, hasName ? '[CrmExtension] Name lookup' : hasEmail ? '[CrmExtension] Email lookup' : '[CrmExtension] Phone lookup');
   res.json(new ApiResponse(200, result, 'Lookup complete'));
+});
+
+export const createLeadHandler = asyncHandler(async (req: Request, res: Response) => {
+  const input = req.body && typeof req.body === 'object' ? { ...req.body } : {};
+  req.body = {};
+  const user: any = req.crmUser;
+  const result = await createExtensionLead(String(req.orgId || ''), user, input);
+  logger.info({ crmUserId: String(user?._id || ''), organizationId: req.orgId, leadId: result.leadId, created: result.created }, result.created ? '[CrmExtension] Lead added' : '[CrmExtension] Lead already existed');
+  const status = result.created ? 201 : 200;
+  res.status(status).json(new ApiResponse(status, result, result.created ? 'Lead added' : 'This customer is already in Suprah CRM'));
 });
 
 export const historyHandler = asyncHandler(async (req: Request, res: Response) => {

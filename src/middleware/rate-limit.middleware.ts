@@ -170,6 +170,19 @@ export const crmExtensionNoteWriteLimiter = rateLimit({
     legacyHeaders: false,
 });
 
+export const crmExtensionLeadCreateLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: extensionEmployeeKey('ext-lead-create'),
+    message: { success: false, message: 'Too many customers added in a short time. Please wait a minute and try again.' },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
 export const crmExtensionSendLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 10,

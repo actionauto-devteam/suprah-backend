@@ -16,6 +16,15 @@ import { COMPOSER_MESSAGES, getLeadReplyOptions, normalizeClientRequestId, type 
 import { channelStateFor } from './leadConversation.service';
 import { resolveAiChannelModes, type AiChannel } from './aiOperatingMode.service';
 import { resolveAiAgentSettings } from './aiAgent.service';
+import { LEAD_SOURCE } from '../constants/leadSource';
+import { firstContactForStaffLead } from '../utils/leadType';
+import { resolveLeadStore } from '../utils/leadStore';
+import { resolveCrmStaff } from '../utils/crmStaff';
+import { notifyOrgAdmins } from '../utils/safeNotification';
+import { notificationTemplates } from '../utils/notificationTemplates';
+import { getSocketIO } from '../utils/socketEmitter';
+import { crmStaffRoom } from '../utils/crmStaffRoom';
+import activityService from './activity.service';
 
 const MAX_PHONE_INPUT = 40;
 const MAX_EMAIL_INPUT = 254;
@@ -30,7 +39,12 @@ const MAX_HISTORY_CURSOR = 300;
 const DUPLICATE_NOTE_WINDOW_MS = 15000;
 const MAX_TEXT_LENGTH = 1600;
 const MAX_EMAIL_LENGTH = 5000;
-const MESSAGING_OFF_SERVER = "Sending texts and emails from the extension isn't turned on for this server yet.";
+const MAX_NAME_LENGTH = 60;
+const MAX_VEHICLE_TEXT = 40;
+const MAX_NEW_LEAD_NOTE = 2000;
+const VIN_SHAPE = /^[A-HJ-NPR-Z0-9]{17}$/;
+const STOCK_SHAPE = /^[A-Z0-9][A-Z0-9-]{0,19}$/;
+const MESSAGING_OFF_SERVER ="Sending texts and emails from the extension isn't turned on for this server yet.";
 const MESSAGING_OFF_DEALERSHIP = 'Sending texts and emails from the extension is turned off for this dealership. An admin can turn it on in Suprah CRM settings.';
 const EMAIL_CHANGED = "This lead's email address changed. Reload the lead and check the address before sending.";
 const BLOCKED_STATUS: Record<string, number> = {
@@ -41,7 +55,9 @@ const BLOCKED_STATUS: Record<string, number> = {
   CONTACT_RESTRICTED: 403,
   CONTACT_RESTRICTION_UNAVAILABLE: 503,
 };
-const MATCH_FIELDS = 'firstName lastName status source sourceProvider channel vehicle assignedTo location createdAt updatedAt followUp.lastCustomerActivityAt notes._id customerId customerLink.status';
+const MAX_NAME_SEARCH = 60;
+const NAME_SEARCH_SHAPE = /^[\p{L}][\p{L}'’.\-]*(?: [\p{L}][\p{L}'’.\-]*){0,3}$/u;
+const MATCH_FIELDS = 'firstName lastName phone email status source sourceProvider channel vehicle assignedTo location createdAt updatedAt followUp.lastCustomerActivityAt notes._id customerId customerLink.status';
 
 const AI_CHANNEL_LABELS: Record<AiChannel, string> = {
   sms: 'Text messages',
@@ -106,6 +122,7 @@ function toMatch(lead: any) {
     lastActivity: latest(lead.followUp?.lastCustomerActivityAt, lead.createdAt),
     noteCount: Array.isArray(lead.notes) ? lead.notes.length : 0,
     customerRecordId: lead.customerId && lead.customerLink?.status === 'linked' ? String(lead.customerId) : null,
+    contact: String(lead.phone || lead.email || ''),
   };
 }
 
@@ -170,6 +187,38 @@ export async function lookupLeadsByEmail(orgId: string, rawEmail: unknown) {
       restrictionUnknown: restriction.status === 'unavailable',
       textOptOut: false,
     },
+  };
+}
+
+export function normalizeLookupName(raw: unknown) {
+  if (typeof raw !== 'string') return null;
+  const text = raw.replace(/\s+/g, ' ').trim();
+  if (text.length < 2 || text.length > MAX_NAME_SEARCH || !NAME_SEARCH_SHAPE.test(text)) return null;
+  return text.replace(/[^\p{L}]/gu, '').length >= 2 ? text : null;
+}
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const startsWith = (value: string) => new RegExp(`^${escapeRegex(value)}`, 'i');
+
+export function nameLookupConditions(name: string) {
+  const words = name.split(' ');
+  if (words.length === 1) return [{ firstName: startsWith(name) }, { lastName: startsWith(name) }];
+  return [
+    { firstName: startsWith(words[0]), lastName: startsWith(words.slice(1).join(' ')) },
+    { firstName: startsWith(words[words.length - 1]), lastName: startsWith(words.slice(0, -1).join(' ')) },
+    { firstName: startsWith(name) },
+  ];
+}
+
+export async function lookupLeadsByName(orgId: string, rawName: unknown) {
+  assertOrg(orgId);
+  const name = normalizeLookupName(rawName);
+  if (!name) throw new ApiError(400, 'Search by first and last name, using letters only.');
+  const found = await findMatches(orgId, { organizationId: orgObjectId(orgId), $or: nameLookupConditions(name) });
+  return {
+    query: { kind: 'name' as const, display: name },
+    ...found,
+    contact: { doNotContact: false, restrictionUnknown: false, textOptOut: false },
   };
 }
 
@@ -263,6 +312,150 @@ export async function addExtensionLeadNote(orgId: string, author: { id: string; 
     if (error?.message === 'Note cannot exceed 5000 characters') throw new ApiError(400, error.message);
     throw error;
   }
+}
+
+export interface ExtensionNewLeadInput {
+  firstName?: unknown;
+  lastName?: unknown;
+  phone?: unknown;
+  email?: unknown;
+  vehicle?: unknown;
+  note?: unknown;
+  site?: unknown;
+}
+
+function formText(raw: unknown, max: number, label: string) {
+  if (raw === undefined || raw === null) return '';
+  if (typeof raw !== 'string') throw new ApiError(400, `${label} must be text.`);
+  const text = raw.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (text.length > max) throw new ApiError(400, `${label} can be up to ${max} characters.`);
+  return text;
+}
+
+export function newLeadVehicle(raw: unknown) {
+  const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const year = formText(value.year, 4, 'Year');
+  if (year && !/^(19|20)\d{2}$/.test(year)) throw new ApiError(400, 'The year must be 4 digits, like 2023.');
+  const make = formText(value.make, MAX_VEHICLE_TEXT, 'Make');
+  const model = formText(value.model, MAX_VEHICLE_TEXT, 'Model');
+  const vin = formText(value.vin, 17, 'VIN').toUpperCase();
+  if (vin && !VIN_SHAPE.test(vin)) throw new ApiError(400, 'The VIN must be 17 letters and numbers, without I, O or Q.');
+  const stock = formText(value.stock, 20, 'Stock number').toUpperCase();
+  if (stock && !STOCK_SHAPE.test(stock)) throw new ApiError(400, 'The stock number can only have letters, numbers and dashes.');
+  return { year, make, model, vin, stock };
+}
+
+export function newLeadSiteHost(raw: unknown) {
+  if (typeof raw !== 'string' || !raw || raw.length > 300) return '';
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.host : '';
+  } catch {
+    return '';
+  }
+}
+
+async function existingLeadLookup(orgId: string, phone: string | null, email: string | null) {
+  if (phone) {
+    const byPhone = await lookupLeadsByPhone(orgId, phone);
+    if (byPhone.total > 0) return byPhone;
+  }
+  if (email) {
+    const byEmail = await lookupLeadsByEmail(orgId, email);
+    if (byEmail.total > 0) return byEmail;
+  }
+  return null;
+}
+
+export async function createExtensionLead(orgId: string, crmUser: any, input: ExtensionNewLeadInput) {
+  assertOrg(orgId);
+  if (!crmUser?._id) throw new ApiError(401, 'Please authenticate');
+  const firstName = formText(input.firstName, MAX_NAME_LENGTH, 'First name');
+  if (!firstName) throw new ApiError(400, "Enter the customer's first name.");
+  const lastName = formText(input.lastName, MAX_NAME_LENGTH, 'Last name');
+  const phoneText = formText(input.phone, MAX_PHONE_INPUT, 'Phone');
+  const emailText = formText(input.email, MAX_EMAIL_INPUT, 'Email');
+  const normalizedPhone = phoneText ? normalizeLookupPhone(phoneText) : null;
+  if (phoneText && !normalizedPhone) throw new ApiError(400, "That isn't a complete phone number.");
+  const normalizedEmail = emailText ? normalizeLookupEmail(emailText) : null;
+  if (emailText && !normalizedEmail) throw new ApiError(400, "That email address doesn't look right.");
+  if (!normalizedPhone && !normalizedEmail) throw new ApiError(400, 'Add a phone number or an email address.');
+  const vehicle = newLeadVehicle(input.vehicle);
+  if (input.note !== undefined && input.note !== null && typeof input.note !== 'string') throw new ApiError(400, 'The note must be text.');
+  const extraNote = typeof input.note === 'string' ? input.note.trim() : '';
+  if (extraNote.length > MAX_NEW_LEAD_NOTE) throw new ApiError(400, 'The note can be up to 2,000 characters.');
+  const host = newLeadSiteHost(input.site);
+
+  const existing = await existingLeadLookup(orgId, normalizedPhone, normalizedEmail);
+  if (existing) return { created: false, leadId: existing.matches[0]?.id || null, lookup: existing };
+
+  const staff = await resolveCrmStaff(orgId, crmUser);
+  const hasVehicle = Boolean(vehicle.vin || vehicle.stock || (vehicle.year && vehicle.make && vehicle.model));
+  const context = hasVehicle ? await resolveLeadStore(orgId, vehicle).catch(() => null) : null;
+  const now = new Date();
+  const assignee = staff.userId ? new mongoose.Types.ObjectId(staff.userId) : null;
+  const addedFrom = `Added from the Chrome extension${host ? ` on ${host}` : ''}.`;
+  const channel = normalizedPhone ? 'sms' : 'email';
+
+  const lead: any = await new Lead({
+    organizationId: orgObjectId(orgId),
+    createdBy: crmUser._id,
+    firstName,
+    lastName,
+    ...(normalizedEmail ? { email: normalizedEmail } : {}),
+    ...(normalizedPhone ? { phone: displayPhone(normalizedPhone) } : {}),
+    vehicle: {
+      year: vehicle.year,
+      make: vehicle.make,
+      model: vehicle.model,
+      ...(vehicle.vin ? { vin: vehicle.vin } : {}),
+      ...(vehicle.stock ? { stock: vehicle.stock } : {}),
+    },
+    vehicleId: context?.vehicleId,
+    location: context?.location,
+    comments: '',
+    source: LEAD_SOURCE.MANUAL_ENTRY,
+    ...firstContactForStaffLead(LEAD_SOURCE.MANUAL_ENTRY),
+    channel,
+    status: 'New',
+    assignedTo: assignee,
+    assignedAt: assignee ? now : null,
+    assignmentUnseenBy: null,
+    assignmentHistory: assignee ? [{ to: assignee, changedAt: now, changedBy: crmUser._id }] : [],
+    followUp: { lastCustomerActivityAt: now, reminderCount: 0, reminderHistory: [] },
+    notes: [{
+      text: extraNote ? `${extraNote}\n\n${addedFrom}` : addedFrom,
+      createdAt: now,
+      createdBy: crmUser._id,
+      authorType: 'user',
+      authorName: staff.name,
+      mentionedUserIds: [],
+    }],
+  }).save();
+
+  const leadId = String(lead._id);
+  const customerName = `${firstName} ${lastName}`.trim();
+  const vehicleInterest = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ');
+  const { title, message } = notificationTemplates.new_lead({ customerName, source: 'the Chrome extension', vehicleInterest: vehicleInterest || undefined });
+  await notifyOrgAdmins(orgId, 'new_lead', title, message, {
+    leadId,
+    customerName,
+    email: normalizedEmail || undefined,
+    source: LEAD_SOURCE.MANUAL_ENTRY,
+    channel,
+  }, staff.userId || undefined).catch(() => undefined);
+  await activityService.createActivity({
+    userId: String(crmUser._id),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Lead added from the Chrome extension',
+    description: `${customerName} added by ${staff.name}`,
+    metadata: { leadId, source: LEAD_SOURCE.MANUAL_ENTRY, site: host || null },
+  }).catch(() => undefined);
+  getSocketIO()?.to(crmStaffRoom(orgId)).emit('lead:new', lead);
+
+  const lookup = normalizedPhone ? await lookupLeadsByPhone(orgId, normalizedPhone) : await lookupLeadsByEmail(orgId, normalizedEmail);
+  return { created: true, leadId, lookup };
 }
 
 function aiLeadChannel(lead: any): AiChannel | null {

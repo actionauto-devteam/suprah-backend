@@ -3,6 +3,7 @@ import cors from 'cors';
 import config from '../config';
 import crmExtensionAuth from '../middleware/crmExtensionAuth.middleware';
 import {
+  crmExtensionLeadCreateLimiter,
   crmExtensionLookupLimiter,
   crmExtensionNoteWriteLimiter,
   crmExtensionNotesLimiter,
@@ -16,6 +17,7 @@ import {
   aiPauseHandler,
   aiResumeHandler,
   aiStatusHandler,
+  createLeadHandler,
   createSessionHandler,
   deleteSessionHandler,
   exchangeSignInCodeHandler,
@@ -70,6 +72,7 @@ router.post('/session/exchange', crmExtensionSignInIpLimiter, exchangeSignInCode
 router.get('/session', crmExtensionAuth(), getSessionHandler);
 router.delete('/session', crmExtensionAuth(), deleteSessionHandler);
 router.post('/lookup', crmExtensionAuth(), crmExtensionLookupLimiter, lookupHandler);
+router.post('/leads', crmExtensionAuth(), crmExtensionLeadCreateLimiter, createLeadHandler);
 router.get('/leads/:id/notes', crmExtensionAuth(), crmExtensionNotesLimiter, notesHandler);
 router.post('/leads/:id/notes', crmExtensionAuth(), crmExtensionNoteWriteLimiter, addNoteHandler);
 router.get('/leads/:id/history', crmExtensionAuth(), crmExtensionNotesLimiter, historyHandler);
