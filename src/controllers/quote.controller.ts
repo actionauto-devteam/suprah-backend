@@ -28,6 +28,7 @@ import { notifyQuoteSalesperson } from '../services/leadSalesperson.service';
 import { quoteDeliveryContact } from '../services/quoteDeliveryContact';
 import { vehicleStateOf, type VehicleState } from '../services/vehicleAvailability';
 import { findVehicleShipping } from '../services/vehicleShipping.service';
+import { QUOTE_VEHICLE_NOT_IN_INVENTORY, ownDealershipVehicleFilter } from '../utils/quoteVehicle';
 import { emailStaffQuoteCustomer } from '../services/staffQuoteCustomerEmail';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 import { findPortalCustomerByEmail, findPortalCustomersByEmail, isStaffQuote, type PortalCustomer } from '../services/shipmentFollower';
@@ -233,7 +234,11 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         const normalizedVehicleId = String(vehicleId).trim();
 
         if (mongoose.Types.ObjectId.isValid(normalizedVehicleId)) {
-            const vehicle = await Vehicle.findById(normalizedVehicleId);
+            // Only a car from this dealership's own inventory can be linked.
+            const vehicle = await Vehicle.findOne(ownDealershipVehicleFilter(normalizedVehicleId, orgId));
+            if (!vehicle) {
+                throw new ApiError(400, QUOTE_VEHICLE_NOT_IN_INVENTORY);
+            }
 
             if (vehicle) {
                 vehicleData = {
