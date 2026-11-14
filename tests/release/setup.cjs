@@ -26,6 +26,7 @@ const defaults = {
   VAPID_SUBJECT: 'mailto:release-tests@example.test',
   GEMINI_API_KEY: 'release-validation-gemini-not-for-production',
   GROQ_API_KEY: 'release-validation-groq-not-for-production',
+  TELNYX_PHONE_NUMBER: '+18015550100',
 };
 for (const [key, value] of Object.entries(defaults)) {
   if (!process.env[key]) process.env[key] = value;

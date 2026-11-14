@@ -39,11 +39,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run isolated unit tests
-        run: node node_modules/jest/bin/jest.js --config jest.release-unit.config.cjs --runInBand --silent
-
       - name: Run isolated release integration tests
         run: node node_modules/jest/bin/jest.js --config jest.release-integration.config.cjs --runInBand --silent
+
+      - name: Run isolated unit tests
+        run: node node_modules/jest/bin/jest.js --config jest.release-unit.config.cjs --runInBand --silent
 
   build-and-push:
     needs: validate
