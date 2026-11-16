@@ -12,6 +12,7 @@ import {
   notifyOrgAdmins,
 } from "../utils/safeNotification";
 import { SavedVehicle } from "../models/SavedVehicle.model";
+import { ASSIGNED_STAFF_SUMMARY_STAGE, resolveVehicleAssignee } from "../utils/vehicleAssignee";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { IUser } from "../models/User.model";
 import cacheService from "../services/cache.service";
@@ -236,8 +237,14 @@ const createVehicle = asyncHandler(async (req: Request, res: Response) => {
       : undefined;
   const createdAt = new Date();
 
+  // Only an active staff member of this dealership, or nobody.
+  const assignee = await resolveVehicleAssignee(req.body, orgId);
+  const newVehicle = withoutServerManagedFields(req.body);
+  delete newVehicle.assignedTo;
+  if (assignee.kind === "set") newVehicle.assignedTo = assignee.id;
+
   const vehicle = await Vehicle.create({
-    ...withoutServerManagedFields(req.body),
+    ...newVehicle,
     organizationId: orgId,
     priceUpdatedAt:
       initialPrice !== undefined && Number.isFinite(initialPrice)
@@ -632,11 +639,11 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
         preserveNullAndEmptyArrays: true,
       },
     },
+    // Name and email only (2026-11-16): the rest of the account, including
+    // its sign-in and reset codes, must never reach the inventory list.
+    ASSIGNED_STAFF_SUMMARY_STAGE,
     {
       $project: {
-        "assignedTo.password": 0,
-        "assignedTo.otp": 0,
-        "assignedTo.otpExpires": 0,
         _leadData: 0,
         priceHistory: 0,
       },
@@ -772,6 +779,11 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   const updateData: Record<string, any> = withoutServerManagedFields(req.body);
   const oldStatus = existingVehicle.status;
 
+  // Only an active staff member of this dealership, or nobody.
+  const assignee = await resolveVehicleAssignee(req.body, orgId);
+  delete updateData.assignedTo;
+  if (assignee.kind === "set") updateData.assignedTo = assignee.id;
+
   const requestedPrice =
     updateData.price !== undefined && updateData.price !== null
       ? Number(updateData.price)
@@ -804,6 +816,9 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   const updateOperations: Record<string, any> = {
     $set: updateData,
   };
+  if (assignee.kind === "clear") {
+    updateOperations.$unset = { assignedTo: "" };
+  }
 
   if (priceChanged && priceChangedAt && requestedPrice !== undefined) {
     updateOperations.$push = {
