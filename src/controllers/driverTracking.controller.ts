@@ -39,6 +39,7 @@ import LoadTripPoint, { TRIP_HISTORY_RETENTION_DAYS } from "../models/LoadTripPo
 import storageService from "../services/storage.service";
 import { BucketType } from "../services/storage.service";
 import DriverPayout from "../models/DriverPayout.model";
+import { driverEarningsSummary } from "../services/driverEarnings.service";
 import logger from "../utils/logger";
 import { getSignedProofUrl } from "../utils/signedUrlCache";
 import {
@@ -3533,8 +3534,13 @@ const getMyLoads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   //   the Loads page's Active tab).
   // - ?view=history&page=&limit=&q=: delivered loads, newest first, a page at
   //   a time (the Loads page's Completed and All tabs).
-  // - no view: every load except cancelled ones, as before (Earnings).
+  // - ?view=earnings: the Earnings page's counts and unpaid delivered loads
+  //   (2026-11-16; see driverEarnings.service).
+  // - no view: every load except cancelled ones, as before.
   const view = String(req.query.view ?? "");
+  if (view === "earnings") {
+    return res.status(200).json(new ApiResponse(200, await driverEarningsSummary(user._id), "My earnings loads fetched"));
+  }
   const activeOnly = view === "active";
   const history = view === "history" ? driverLoadHistoryParams(req.query as Record<string, unknown>) : null;
 
