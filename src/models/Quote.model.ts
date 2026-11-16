@@ -71,6 +71,9 @@ export interface IQuote extends Document {
     portalShareOffAt?: Date;
     portalShareOffBy?: mongoose.Types.ObjectId;
 
+    // While a "Convert to load" is in progress (utils/quoteConversionClaim).
+    convertingUntil?: Date;
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -166,7 +169,8 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         declineReason: { type: String, trim: true, maxlength: 300 },
         portalShareOff: { type: Boolean, default: undefined },
         portalShareOffAt: { type: Date },
-        portalShareOffBy: { type: Schema.Types.ObjectId, ref: 'User' }
+        portalShareOffBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        convertingUntil: { type: Date }
     },
     {
         timestamps: true
