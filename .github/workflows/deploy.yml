@@ -43,6 +43,8 @@ jobs:
         run: node node_modules/jest/bin/jest.js --config jest.release-integration.config.cjs --runInBand --silent
 
       - name: Run isolated unit tests
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: node node_modules/jest/bin/jest.js --config jest.release-unit.config.cjs --runInBand --silent
 
   build-and-push:
