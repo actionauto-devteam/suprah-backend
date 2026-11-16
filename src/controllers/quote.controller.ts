@@ -8,6 +8,7 @@ import Organization from '../models/Organization.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { QUOTE_NOT_FOUND, SIGN_IN_AGAIN, describeValidationIssues } from '../utils/userMessages';
+import { quoteStatusCounts } from '../utils/quoteStatusCounts';
 import { QUOTE_BEING_CONVERTED, quoteConversionClaimFilter, quoteConversionClaimUntil } from '../utils/quoteConversionClaim';
 import type { IQuote } from '../models/Quote.model';
 import {
@@ -905,7 +906,7 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    const [total, quotes] = await Promise.all([
+    const [total, quotes, statusCounts] = await Promise.all([
         Quote.countDocuments(filter),
         Quote.find(filter)
             .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
@@ -914,6 +915,14 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit),
+        // The Quotes tab counts: every quote of the dealership, by status
+        // (first page only; the tabs read them from there).
+        page === 1
+            ? Quote.aggregate([
+                { $match: { organizationId: orgId } },
+                { $group: { _id: '$status', count: { $sum: 1 } } },
+            ]).then(quoteStatusCounts)
+            : Promise.resolve(undefined),
     ]);
 
     // Attach organization name to each quote
@@ -956,6 +965,7 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     const responseData = {
         quotes: quotesWithOrg,
         pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+        ...(statusCounts ? { statusCounts } : {}),
     };
 
     if (isCacheable) {
