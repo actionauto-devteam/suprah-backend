@@ -1,4 +1,4 @@
-import { Request, Response as ExpressResponse } from 'express';
+import { Request, Response as ExpressResponse, NextFunction } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -7,9 +7,37 @@ import AnalyticsAggregate from '../models/AnalyticsAggregate.model';
 import { UserBadge, BADGE_DEFINITIONS } from '../models/Badge.model';
 import CrmUser from '../models/CrmUser.model';
 import { ICrmUser } from '../models/CrmUser.model';
+import Organization from '../models/Organization.model';
 import { rebuildRanks } from '../services/activityLogger.service';
 import { evaluateBadges } from '../services/badge.service';
 import { getPeriodKey, getPeriodRange } from '../services/kpiEngine.service';
+import {
+  leaderboardViewer,
+  canViewLeaderboard,
+  requireLeaderboardAccess,
+  listLeaderboardStaff,
+  setLeaderboardAccess,
+  LeaderboardViewer,
+} from '../services/leaderboardAccess.service';
+import {
+  resolvePeriod,
+  previousPeriod,
+  cachedPeriodData,
+  buildEntries,
+  kpisByPerson,
+  teamTotals,
+  buildCheckpoints,
+  buildTrend,
+  buildByAction,
+  buildFeed,
+  buildRecords,
+  awardBadges,
+  badgesByKey,
+  ResolvedPeriod,
+  RANK_METRICS,
+  RankMetric,
+} from '../services/leaderboardStats.service';
+import { COMPANY_TZ, addDaysToDateStr, getCompanyDayRange, toCompanyDateStr } from '../utils/companyTimezone';
 import mongoose from 'mongoose';
 // @ts-ignore
 import { Parser } from 'json2csv';
@@ -31,73 +59,176 @@ function requireCrmUser(req: Request): ICrmUser {
   return actor;
 }
 
+async function viewerOf(req: Request): Promise<LeaderboardViewer> {
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
+  return leaderboardViewer(String(actor._id), orgId);
+}
+
+function rankMetricOf(value: unknown): RankMetric {
+  const metric = String(value || 'calls');
+  return (RANK_METRICS as readonly string[]).includes(metric) ? (metric as RankMetric) : 'calls';
+}
+
+function periodPayload(period: ResolvedPeriod) {
+  return {
+    preset: period.preset,
+    from: period.fromDate,
+    to: period.toDate,
+    label: period.label,
+    singleDay: period.singleDay,
+    start: period.start.toISOString(),
+    end: period.end.toISOString(),
+    timezone: COMPANY_TZ,
+  };
+}
+
+export const getAccess = asyncHandler(async (req: Request, res: ExpressResponse) => {
+  const viewer = await viewerOf(req);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(new ApiResponse(200, { canView: await canViewLeaderboard(viewer), isAdmin: viewer.admin }, 'Leaderboard access'));
+});
+
+export const requireAccess = asyncHandler(async (req: Request, _res: ExpressResponse, next: NextFunction) => {
+  const viewer = await viewerOf(req);
+  await requireLeaderboardAccess(viewer);
+  next();
+});
+
+export const getAccessStaff = asyncHandler(async (req: Request, res: ExpressResponse) => {
+  const viewer = await viewerOf(req);
+  if (!viewer.admin) throw new ApiError(403, 'Only admins can see who has Leaderboard access');
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(new ApiResponse(200, { staff: await listLeaderboardStaff(viewer.orgId) }, 'Leaderboard access list'));
+});
+
+export const saveAccess = asyncHandler(async (req: Request, res: ExpressResponse) => {
+  const viewer = await viewerOf(req);
+  const kind = req.body?.principalKind;
+  const principalKind = kind === 'main' || kind === 'crm' ? kind : null;
+  if (!principalKind || typeof req.body?.allowed !== 'boolean') {
+    throw new ApiError(400, 'Pick a team member and whether they can see the Leaderboard');
+  }
+  await setLeaderboardAccess({
+    admin: viewer,
+    principalId: String(req.body?.principalId || ''),
+    principalKind,
+    allowed: req.body.allowed,
+  });
+  res.json(new ApiResponse(200, { saved: true }, 'Leaderboard access saved'));
+});
 
 export const getLeaderboard = asyncHandler(async (req: Request, res: ExpressResponse) => {
-  const actor      = requireCrmUser(req);
-  const orgId      = requireOrgId(actor);
-  const periodType = (req.query.periodType as string) || 'weekly';
-  const periodKey  = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
-  const limit      = Math.min(parseInt(req.query.limit as string) || 20, 100);
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
+  const period = resolvePeriod(req.query);
+  const metric = rankMetricOf(req.query.rankBy);
+  const prev = previousPeriod(period);
 
-  if (!['daily', 'weekly', 'monthly'].includes(periodType)) {
-    throw new ApiError(400, 'periodType must be daily, weekly, or monthly');
+  await awardBadges(orgId).catch((err) => console.error('[LEADERBOARD] Badge check failed:', err));
+
+  const [data, prevData] = await Promise.all([
+    cachedPeriodData(orgId, period.start, period.end),
+    cachedPeriodData(orgId, prev.start, prev.end),
+  ]);
+  const entries = buildEntries(data, metric, prevData);
+  const badges = await badgesByKey(orgId, data.people);
+  for (const entry of entries) {
+    const key = data.people.idToKey.get(entry.user._id);
+    entry.badges = (key && badges.get(key)) || [];
   }
+  const actorId = String(actor._id);
+  const me = entries.find((entry) => entry.user.ids.includes(actorId)) || null;
 
-  if (actor.role === 'admin') {
-    await rebuildRanks(orgId, periodType as any, periodKey);
-  }
-
-  const query: any = {
-    organizationId: new mongoose.Types.ObjectId(orgId),
-    periodType,
-    periodKey,
-  };
-
-  if (actor.role === 'employee') {
-    query.userId = actor._id;
-  }
-
-  const docs = await AnalyticsAggregate.find(query)
-    .sort({ rank: 1, 'kpis.totalScore': -1 })
-    .limit(limit)
-    .lean();
-
-  const userIds = [...new Set(docs.map(d => d.userId.toString()))];
-  const users   = await CrmUser.find({
-    _id:            { $in: userIds },
-    organizationId: new mongoose.Types.ObjectId(orgId),
-  })
-    .select('fullName username avatar role')
-    .lean();
-
-  const userMap = Object.fromEntries(users.map(u => [u._id.toString(), u]));
-
-  const badges = await UserBadge.find({
-    organizationId: new mongoose.Types.ObjectId(orgId),
-    userId:         { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) },
-  }).lean();
-
-  const badgeMap: Record<string, string[]> = {};
-  for (const b of badges) {
-    const key = b.userId.toString();
-    if (!badgeMap[key]) badgeMap[key] = [];
-    badgeMap[key].push(b.badgeId);
-  }
-
-  const leaderboard = docs.map((doc, idx) => ({
-    rank:       doc.rank || idx + 1,
-    prevRank:   doc.prevRank,
-    rankChange: doc.prevRank ? doc.prevRank - (doc.rank || idx + 1) : null,
-    user:       userMap[doc.userId.toString()] || { fullName: 'Unknown', username: '-' },
-    kpis:       doc.kpis,
-    badges:     badgeMap[doc.userId.toString()] || [],
-    periodKey,
-    periodType,
-  }));
-
+  res.setHeader('Cache-Control', 'no-store');
   res.json(
-    new ApiResponse(200, { leaderboard, total: leaderboard.length, periodKey, periodType }, 'Leaderboard fetched')
+    new ApiResponse(200, {
+      leaderboard: entries,
+      total: entries.length,
+      rankBy: metric,
+      period: periodPayload(period),
+      totals: teamTotals(data, kpisByPerson(data)),
+      checkpoints: buildCheckpoints(data, period),
+      me,
+      updatedAt: new Date().toISOString(),
+    }, 'Leaderboard fetched')
   );
+});
+
+export const getAnalyticsOverview = asyncHandler(async (req: Request, res: ExpressResponse) => {
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
+  const period = resolvePeriod(req.query);
+  const today = toCompanyDateStr(new Date());
+  const trendFrom = addDaysToDateStr(today, -29);
+
+  const [data, trendData] = await Promise.all([
+    cachedPeriodData(orgId, period.start, period.end),
+    cachedPeriodData(orgId, getCompanyDayRange(trendFrom).start, getCompanyDayRange(today).end),
+  ]);
+  const totals = teamTotals(data, kpisByPerson(data));
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(
+    new ApiResponse(200, {
+      totals: {
+        activeUsers: totals.activeUsers,
+        totalLeadsCreated: totals.leadsCreated,
+        totalLeadsConverted: totals.leadsConverted,
+        totalAppointments: totals.appointmentsCompleted,
+        totalTransactions: totals.transactionsCompleted,
+        totalCalls: totals.callsMade,
+        totalCallsAll: totals.callsTotal,
+        totalCallsAnswered: totals.callsAnswered,
+        totalMissedCalls: totals.missedCalls,
+        totalTalkTimeSec: totals.talkTimeSec,
+        totalMessages: totals.messagesSent,
+        totalFollowUps: totals.followUpsSent,
+        totalOnboardings: totals.onboardingsCompleted,
+        avgConversionRate: totals.conversionRate,
+        avgResponseTime: totals.avgResponseTimeMin,
+      },
+      trend: buildTrend(trendData, trendFrom, 30),
+      byAction: buildByAction(data),
+      period: periodPayload(period),
+    }, 'Analytics overview fetched')
+  );
+});
+
+export const getActivityFeed = asyncHandler(async (req: Request, res: ExpressResponse) => {
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
+  const period = resolvePeriod(req.query);
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit || ''), 10) || 40, 1), 200);
+  const data = await cachedPeriodData(orgId, period.start, period.end);
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(
+    new ApiResponse(200, {
+      logs: buildFeed(data, limit),
+      total: data.events.length,
+      page: 1,
+      pages: 1,
+      period: periodPayload(period),
+    }, 'Activity feed fetched')
+  );
+});
+
+export const getRecords = asyncHandler(async (req: Request, res: ExpressResponse) => {
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
+  const period = resolvePeriod(req.query);
+  const scope = req.query.scope === 'full' ? 'full' : 'calls';
+  const [data, organization] = await Promise.all([
+    cachedPeriodData(orgId, period.start, period.end),
+    Organization.findById(orgId).select('name').lean(),
+  ]);
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(new ApiResponse(200, {
+    ...buildRecords(data, period, scope, rankMetricOf(req.query.rankBy)),
+    organizationName: String((organization as any)?.name || ''),
+  }, 'Leaderboard records'));
 });
 
 
@@ -143,153 +274,6 @@ export const getMyStats = asyncHandler(async (req: Request, res: ExpressResponse
 
   res.json(
     new ApiResponse(200, { stats, recentActivity, badges: enrichedBadges }, 'Personal stats fetched')
-  );
-});
-
-
-export const getAnalyticsOverview = asyncHandler(async (req: Request, res: ExpressResponse) => {
-  const actor = requireCrmUser(req);
-  const orgId = requireOrgId(actor);
-
-  if (actor.role === 'employee') {
-    throw new ApiError(403, 'Access denied. Managers and admins only.');
-  }
-
-  const periodType = (req.query.periodType as string) || 'weekly';
-  const periodKey  = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
-  const { start, end } = getPeriodRange(periodKey, periodType as any);
-
-  const orgTotals = await AnalyticsAggregate.aggregate([
-    {
-      $match: {
-        organizationId: new mongoose.Types.ObjectId(orgId),
-        periodType,
-        periodKey,
-      },
-    },
-    {
-      $group: {
-        _id:                   null,
-        totalLeadsCreated:     { $sum: '$kpis.leadsCreated' },
-        totalLeadsConverted:   { $sum: '$kpis.leadsConverted' },
-        totalAppointments:     { $sum: '$kpis.appointmentsCompleted' },
-        totalCalls:            { $sum: '$kpis.callsMade' },
-        totalMessages:         { $sum: '$kpis.messagesSent' },
-        totalFollowUps:        { $sum: '$kpis.followUpsSent' },
-        totalTransactions:     { $sum: '$kpis.transactionsCompleted' },
-        totalOnboardings:      { $sum: '$kpis.onboardingsCompleted' },
-        avgConversionRate:     { $avg: '$kpis.conversionRate' },
-        avgResponseTime:       { $avg: '$kpis.avgResponseTimeMin' },
-        activeUsers:           { $sum: 1 },
-      },
-    },
-  ]);
-
-  const trendStart = new Date();
-  trendStart.setDate(trendStart.getDate() - 30);
-
-  const trend = await ActivityLog.aggregate([
-    {
-      $match: {
-        organizationId: new mongoose.Types.ObjectId(orgId),
-        timestamp:      { $gte: trendStart },
-      },
-    },
-    {
-      $group: {
-        _id:   { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
-        count: { $sum: 1 },
-        score: { $sum: '$score' },
-      },
-    },
-    { $sort: { _id: 1 } },
-  ]);
-
-  const byAction = await ActivityLog.aggregate([
-    {
-      $match: {
-        organizationId: new mongoose.Types.ObjectId(orgId),
-        timestamp:      { $gte: start, $lt: end },
-      },
-    },
-    {
-      $group: {
-        _id:   '$actionType',
-        count: { $sum: 1 },
-        score: { $sum: '$score' },
-      },
-    },
-    { $sort: { count: -1 } },
-  ]);
-
-  res.json(
-    new ApiResponse(200, {
-      totals:  orgTotals[0] || {},
-      trend,
-      byAction,
-      period:  { type: periodType, key: periodKey, start, end },
-    }, 'Analytics overview fetched')
-  );
-});
-
-
-export const getActivityFeed = asyncHandler(async (req: Request, res: ExpressResponse) => {
-  const actor = requireCrmUser(req);
-  const orgId = requireOrgId(actor);
-
-  const page  = parseInt(req.query.page  as string) || 1;
-  const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-  const skip  = (page - 1) * limit;
-
-  const filter: any = {
-    organizationId: new mongoose.Types.ObjectId(orgId),
-  };
-
-  if (actor.role === 'employee') {
-    filter.userId = actor._id;
-  } else if (req.query.userId) {
-    filter.userId = new mongoose.Types.ObjectId(req.query.userId as string);
-  }
-
-  if (req.query.actionType) filter.actionType = req.query.actionType;
-
-  if (req.query.startDate) {
-    filter.timestamp = { $gte: new Date(req.query.startDate as string) };
-  }
-  if (req.query.endDate) {
-    filter.timestamp = {
-      ...filter.timestamp,
-      $lte: new Date(req.query.endDate as string),
-    };
-  }
-
-  const [logs, total] = await Promise.all([
-    ActivityLog.find(filter)
-      .sort({ timestamp: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    ActivityLog.countDocuments(filter),
-  ]);
-
-  const userIds = [...new Set(logs.map(l => l.userId.toString()))];
-  const users   = await CrmUser.find({
-    _id:            { $in: userIds },
-    organizationId: new mongoose.Types.ObjectId(orgId),
-  })
-    .select('fullName username avatar')
-    .lean();
-
-  const userMap  = Object.fromEntries(users.map(u => [u._id.toString(), u]));
-  const enriched = logs.map(l => ({ ...l, user: userMap[l.userId.toString()] }));
-
-  res.json(
-    new ApiResponse(200, {
-      logs:  enriched,
-      total,
-      page,
-      pages: Math.ceil(total / limit),
-    }, 'Activity feed fetched')
   );
 });
 
@@ -493,10 +477,15 @@ export const triggerBadgeEvaluation = asyncHandler(async (req: Request, res: Exp
 });
 
 export default {
+  getAccess,
+  requireAccess,
+  getAccessStaff,
+  saveAccess,
   getLeaderboard,
   getMyStats,
   getAnalyticsOverview,
   getActivityFeed,
+  getRecords,
   getUserStats,
   exportAnalytics,
   triggerBadgeEvaluation,
