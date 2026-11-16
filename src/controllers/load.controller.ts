@@ -21,6 +21,7 @@
       calculateETA,
     } from "../utils/calculations";
     import { storageService, BucketType } from "../services/storage.service";
+    import { INSPECTION_PHOTO_CHANGED, inspectionPhotoFilter } from "../utils/inspectionPhotoReplace";
     import { getSignedProofUrl } from "../utils/signedUrlCache";
     import {
       omitConditionReportsFromList,
@@ -1881,24 +1882,34 @@
         throw new ApiError(400, "That vehicle couldn't be found on this load. Refresh the page and try again.");
       }
 
-      const load = await Load.findOne({ _id: req.params.id, organizationId });
+      const load = await Load.findOne({ _id: req.params.id, organizationId })
+        .select("loadNumber vehicles")
+        .lean<{ _id: unknown; loadNumber?: string; vehicles?: Array<{ vin?: string; inspectionPhotoUrl?: string }> }>();
       if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
-      if (!load.vehicles?.[index]) {
+      const vehicle = load.vehicles?.[index];
+      if (!vehicle) {
         throw new ApiError(404, `That vehicle is no longer on load ${load.loadNumber}. Refresh the page and try again.`);
       }
 
-      const existing = (load.vehicles[index] as any).inspectionPhotoUrl;
-      if (existing) {
-        try { await storageService.delete(existing, BucketType.PRIVATE); } catch { /* non-fatal */ }
+      // New photo first; saved for this one car only if nothing changed
+      // meanwhile; the old photo is deleted only after that (2026-11-16).
+      const existing = vehicle.inspectionPhotoUrl || "";
+      const imageUrl = await storageService.upload(file, "load-inspection", BucketType.PRIVATE);
+      const updated = await Load.findOneAndUpdate(
+        inspectionPhotoFilter(load._id, organizationId, index, vehicle),
+        { $set: { [`vehicles.${index}.inspectionPhotoUrl`]: imageUrl } },
+        { new: true },
+      );
+      if (!updated) {
+        try { await storageService.delete(imageUrl, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
+        throw new ApiError(409, INSPECTION_PHOTO_CHANGED);
+      }
+      if (existing && existing !== imageUrl) {
+        try { await storageService.delete(existing, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
       }
 
-      const imageUrl = await storageService.upload(file, "load-inspection", BucketType.PRIVATE);
-      (load.vehicles[index] as any).inspectionPhotoUrl = imageUrl;
-      load.markModified("vehicles");
-      await load.save();
-
       const _io = getSocketIO();
-      if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId: load._id.toString() });
+      if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId: String(load._id) });
 
       const signed = await getSignedProofUrl(imageUrl);
       return res.status(200).json(new ApiResponse(200, { inspectionPhotoUrl: signed || imageUrl }, "Inspection photo uploaded"));
