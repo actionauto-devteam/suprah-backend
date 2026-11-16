@@ -7,6 +7,7 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import { SIGN_IN_AGAIN, VEHICLE_NOT_FOUND } from "../utils/userMessages";
 import { MARKETPLACE_VEHICLE_FILTER } from "../utils/marketplaceVehicle";
+import { vehicleLookupScope } from "../utils/vehicleLookupScope";
 import {
   safeCreateNotification,
   notifyOrgAdmins,
@@ -684,29 +685,26 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
 
 const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
-  const isStaff =
-    user &&
-    (user.role === "admin" ||
-      user.role === "super_admin" ||
-      (user as any).organizationRole === "employee");
-  const orgId = req.orgId as string;
+  // Staff see their own dealership's cars in every status (super admins any).
+  // Everyone else, customers and drivers included, sees only cars on the
+  // marketplace (decided 2026-11-02; drivers and employees 2026-11-16).
+  const scope = vehicleLookupScope(user, req.orgRole, req.orgId);
+  let isStaff = scope.staff;
 
-  let query: any = { _id: req.params.id, isDeleted: false };
+  const query: any = { _id: req.params.id, isDeleted: false, ...scope.filter };
 
-  // If staff, we usually restrict to their organization unless super_admin
-  if (isStaff && user.role !== "super_admin") {
-    query.organizationId = orgId;
-  }
-  // A customer sees only cars on the marketplace (decided 2026-11-02): not
-  // cars being prepared, already sold, archived, or otherwise not for sale.
-  if (user?.role === "customer") {
-    query.status = "Ready for Sale";
-    query.isArchived = { $ne: true };
-  }
-
-  const vehicle = await Vehicle.findOne(query)
+  let vehicle = await Vehicle.findOne(query)
     .select("-priceHistory")
     .populate("assignedTo", "email name");
+
+  // Another dealership's car that's for sale opens for staff the way it does
+  // for a customer (a shared car link), without its cost or notes.
+  if (!vehicle && isStaff && scope.filter.organizationId) {
+    vehicle = await Vehicle.findOne({ _id: req.params.id, isDeleted: false, ...MARKETPLACE_VEHICLE_FILTER })
+      .select("-priceHistory")
+      .populate("assignedTo", "email name");
+    isStaff = false;
+  }
 
   if (!vehicle) {
     throw new ApiError(404, VEHICLE_NOT_FOUND);
