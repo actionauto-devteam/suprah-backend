@@ -36,6 +36,8 @@ router.get('/stats', staffOnly, vehicleController.getStats);
 router.get('/dashboard/graphs', staffOnly, vehicleController.getDashboardGraphs);
 
 router.get('/dashboard', staffOnly, vehicleController.getDashboard);
+// Before /:id so it isn't read as a car's id.
+router.get('/inventory-version', staffOnly, vehicleController.getInventoryVersion);
 router.get('/export', staffOnly, vehicleController.exportVehicles);
 
 router.get('/search/autocomplete', staffOnly, vehicleController.autocomplete);

@@ -15,6 +15,7 @@ import {
   statusChangedMeanwhile,
 } from "../utils/vehicleStatusChange";
 import { findVehicleShipping } from "../services/vehicleShipping.service";
+import { inventoryVersion, newestChange } from "../utils/inventoryVersion";
 import {
   safeCreateNotification,
   notifyOrgAdmins,
@@ -686,8 +687,39 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     totalPages: fetchAll ? 1 : Math.max(1, Math.ceil(total / limitNum)),
   };
 
+  // The whole active or archived inventory, unfiltered: the stamp the
+  // Inventory page compares with /inventory-version before refreshing.
+  const isWholeInventory =
+    fetchAll &&
+    !search &&
+    Object.keys(filter).every((key) => key === "isDeleted" || key === "isArchived");
+  if (isWholeInventory && !returnMetricsOnly) {
+    responseData.inventoryVersion = inventoryVersion(total, newestChange(vehicles));
+  }
+
   setTiming(databaseMs, preparationStarted);
   res.json(new ApiResponse(200, responseData, "Vehicles fetched successfully"));
+});
+
+/**
+ * GET /api/vehicles/inventory-version?archived=true
+ * The "has anything changed?" stamp for the whole active (or archived)
+ * inventory; the same one the full list returns. Tiny, so the Inventory page
+ * can check it every couple of minutes instead of downloading every car.
+ */
+const getInventoryVersion = asyncHandler(async (req: Request, res: Response) => {
+  const [row] = await Vehicle.aggregate([
+    { $match: { organizationId: req.orgId, isDeleted: false, ...archivedScope(req.query.archived) } },
+    { $group: { _id: null, count: { $sum: 1 }, latest: { $max: "$updatedAt" } } },
+  ]);
+  res.set("Cache-Control", "private, no-store");
+  res.json(
+    new ApiResponse(
+      200,
+      { inventoryVersion: inventoryVersion(row?.count ?? 0, row?.latest ?? null) },
+      "Inventory version",
+    ),
+  );
 });
 
 const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
@@ -2050,6 +2082,7 @@ const getMarketplaceFilters = asyncHandler(
 export default {
   createVehicle,
   getVehicles,
+  getInventoryVersion,
   getVehicleById,
   updateVehicle,
   deleteVehicle,
