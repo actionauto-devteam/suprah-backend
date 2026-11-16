@@ -9,6 +9,13 @@ import { SIGN_IN_AGAIN, VEHICLE_NOT_FOUND } from "../utils/userMessages";
 import { MARKETPLACE_VEHICLE_FILTER } from "../utils/marketplaceVehicle";
 import { vehicleLookupScope } from "../utils/vehicleLookupScope";
 import {
+  VEHICLE_STATUS_CHANGED_TYPE,
+  carOnTheWayMessage,
+  loadOnTheWay,
+  statusChangedMeanwhile,
+} from "../utils/vehicleStatusChange";
+import { findVehicleShipping } from "../services/vehicleShipping.service";
+import {
   safeCreateNotification,
   notifyOrgAdmins,
 } from "../utils/safeNotification";
@@ -1449,13 +1456,35 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
 
 const updateVehicleStatus = asyncHandler(
   async (req: Request, res: Response) => {
-    const { status, currentStep } = req.body;
+    const { status, currentStep, expectedStatus } = req.body;
 
     if (!status) {
       throw new ApiError(400, "Choose a status for this vehicle before saving.");
     }
 
     const orgId = req.orgId as string;
+    const current = await Vehicle.findOne({ _id: req.params.id, organizationId: orgId, isDeleted: false })
+      .select("status vin")
+      .lean<{ status?: string; vin?: string }>();
+    if (!current) {
+      throw new ApiError(404, VEHICLE_NOT_FOUND);
+    }
+
+    // Someone else changed it since this person opened "Change status".
+    const changedMeanwhile = statusChangedMeanwhile(current.status, expectedStatus);
+    if (changedMeanwhile) {
+      throw new ApiError(409, changedMeanwhile, [{ type: VEHICLE_STATUS_CHANGED_TYPE, status: current.status ?? null }]);
+    }
+
+    // A car on a load that's on its way gets its status at delivery.
+    if (status !== current.status) {
+      const { loads } = await findVehicleShipping(orgId, { vehicleIds: [String(req.params.id)], vins: [current.vin] });
+      const onTheWay = loadOnTheWay(loads);
+      if (onTheWay) {
+        throw new ApiError(409, carOnTheWayMessage(onTheWay.loadNumber));
+      }
+    }
+
     const updateData: any = { status };
 
     if (currentStep) {
@@ -1465,14 +1494,24 @@ const updateVehicleStatus = asyncHandler(
 
     updateData.manualStatusLock = true;
 
+    // Saved only if the status is still the one just checked.
     const vehicle = await Vehicle.findOneAndUpdate(
-      { _id: req.params.id, organizationId: orgId, isDeleted: false },
+      { _id: req.params.id, organizationId: orgId, isDeleted: false, status: current.status ?? null },
       updateData,
       { new: true, runValidators: true },
     ).populate("assignedTo", "email name");
 
     if (!vehicle) {
-      throw new ApiError(404, VEHICLE_NOT_FOUND);
+      const latest = await Vehicle.findOne({ _id: req.params.id, organizationId: orgId, isDeleted: false })
+        .select("status")
+        .lean<{ status?: string }>();
+      if (!latest) throw new ApiError(404, VEHICLE_NOT_FOUND);
+      throw new ApiError(
+        409,
+        statusChangedMeanwhile(latest.status, current.status ?? "") ??
+          "Someone else changed this car while you were saving. Check its status now, then try again.",
+        [{ type: VEHICLE_STATUS_CHANGED_TYPE, status: latest.status ?? null }],
+      );
     }
 
     res.json(
