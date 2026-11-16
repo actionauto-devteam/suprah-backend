@@ -131,6 +131,7 @@ import {
   type SalespersonOptions,
 } from "../services/leadSalesperson.service";
 import { emailStaffQuoteCustomer, type StaffQuoteEmailEvent } from "../services/staffQuoteCustomerEmail";
+import { previewLoadIds } from "../utils/previewLoadIds";
 import {
   DRIVER_CURRENT_LOAD_STATUSES,
   driverLoadHistoryFilter,
@@ -3686,16 +3687,21 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: ExpressRequest, 
   const previewEntries: Array<{ key: string; load: any }> = [];
 
   if (Array.isArray(body.loads) && body.loads.length > 0) {
-    for (const entry of body.loads.slice(0, 50)) {
+    const entries = body.loads.slice(0, 50);
+    // One lookup for every saved load in the preview, this dealership's only.
+    const savedIds = previewLoadIds(entries);
+    const savedLoads = savedIds.length
+      ? await Load.find({ _id: { $in: savedIds }, organizationId }).lean()
+      : [];
+    const savedById = new Map((savedLoads as any[]).map((load) => [String(load._id), load]));
+
+    for (const entry of entries) {
       const key = String(entry?.key ?? "").trim();
       if (!key) continue;
 
       let previewLoad: any = entry?.load ?? null;
       if (entry?.loadId) {
-        previewLoad = await Load.findOne({
-          _id: entry.loadId,
-          organizationId,
-        }).lean();
+        previewLoad = savedById.get(String(entry.loadId).trim()) ?? null;
       }
       if (!previewLoad) continue;
       previewEntries.push({ key, load: await normalizePreviewLoad(previewLoad) });
