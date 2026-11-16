@@ -4,18 +4,30 @@
  * conversion. Models are stand-ins; no database is used.
  */
 const mockQuoteFindOne = jest.fn();
+const mockQuoteClaim = jest.fn();
+const mockQuoteRelease = jest.fn();
 const mockLoadFindOne = jest.fn();
 const mockLoadCreate = jest.fn();
 const mockFindVehicleShipping = jest.fn();
 
 jest.mock('../../src/models/Quote.model', () => ({
   __esModule: true,
-  default: { findOne: (filter: unknown) => Promise.resolve(mockQuoteFindOne(filter)) },
+  default: {
+    findOne: (filter: unknown) => Promise.resolve(mockQuoteFindOne(filter)),
+    findOneAndUpdate: (...args: unknown[]) => Promise.resolve(mockQuoteClaim(...args)),
+    updateOne: (...args: unknown[]) => Promise.resolve(mockQuoteRelease(...args)),
+  },
 }));
 jest.mock('../../src/models/Load.model', () => ({
   __esModule: true,
   default: {
-    findOne: (filter: unknown) => Promise.resolve(mockLoadFindOne(filter)),
+    findOne: (filter: unknown) => {
+      const result = mockLoadFindOne(filter);
+      const query: any = Promise.resolve(result);
+      query.select = () => query;
+      query.lean = () => Promise.resolve(result);
+      return query;
+    },
     create: (doc: unknown) => Promise.resolve(mockLoadCreate(doc)),
   },
 }));
@@ -75,6 +87,7 @@ beforeEach(() => {
     miles: 520,
     save: jest.fn(),
   });
+  mockQuoteClaim.mockReturnValue({ _id: QUOTE_ID });
   mockLoadFindOne.mockReturnValue(null);
   mockLoadCreate.mockImplementation((doc: any) => ({
     _id: 'load-new',
@@ -105,5 +118,50 @@ describe('converting a quote whose car is already on a load', () => {
     const { status, body } = await convert();
     expect(status).toBe(201);
     expect(body.data.sameVehicleLoads).toEqual([]);
+  });
+});
+
+describe('two people converting the same quote at once (2026-11-16)', () => {
+  beforeEach(() => {
+    mockFindVehicleShipping.mockResolvedValue({ loads: [], quotes: [] });
+  });
+
+  it('claims the quote, converts it, then releases the claim', async () => {
+    const { status } = await convert();
+    expect(status).toBe(201);
+    expect(mockQuoteClaim).toHaveBeenCalledTimes(1);
+    expect(mockQuoteClaim.mock.calls[0][0]).toMatchObject({ _id: QUOTE_ID, organizationId: 'org-1' });
+    expect(mockLoadCreate).toHaveBeenCalledTimes(1);
+    // Released right after the reply is sent.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockQuoteRelease).toHaveBeenCalledWith(
+      { _id: QUOTE_ID, organizationId: 'org-1' },
+      { $unset: { convertingUntil: '' } },
+      { timestamps: false },
+    );
+  });
+
+  it('refuses the second one while the first is converting, and creates nothing', async () => {
+    mockQuoteClaim.mockReturnValue(null);
+    const { status, error } = await convert();
+    expect(status).toBe(409);
+    expect(error.message).toBe('Someone else is turning this quote into a load right now. Wait a moment, then refresh to open the new load.');
+    expect(mockLoadCreate).not.toHaveBeenCalled();
+    expect(mockQuoteRelease).not.toHaveBeenCalled();
+  });
+
+  it('names the load when the first one already finished', async () => {
+    mockQuoteClaim.mockReturnValue(null);
+    mockLoadFindOne.mockReturnValue({ loadNumber: 'LD-7' });
+    const { status, error } = await convert();
+    expect(status).toBe(409);
+    expect(error.message).toBe('This quote was already converted into load LD-7. Open that load in Transportation instead.');
+  });
+
+  it('releases the claim when the conversion fails', async () => {
+    mockLoadCreate.mockImplementation(() => { throw new Error('database down'); });
+    const { error } = await convert();
+    expect(error).toBeTruthy();
+    expect(mockQuoteRelease).toHaveBeenCalledTimes(1);
   });
 });

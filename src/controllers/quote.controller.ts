@@ -8,6 +8,8 @@ import Organization from '../models/Organization.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { QUOTE_NOT_FOUND, SIGN_IN_AGAIN, describeValidationIssues } from '../utils/userMessages';
+import { QUOTE_BEING_CONVERTED, quoteConversionClaimFilter, quoteConversionClaimUntil } from '../utils/quoteConversionClaim';
+import type { IQuote } from '../models/Quote.model';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
@@ -1536,6 +1538,35 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'This quote was rejected, so it can\'t be converted into a load. If the customer still wants the shipment, create a new quote for them.');
     }
 
+    // One conversion at a time: claim the quote first (utils/quoteConversionClaim).
+    const now = new Date();
+    const claimed = await Quote.findOneAndUpdate(
+        quoteConversionClaimFilter(quote._id, orgId, now),
+        { $set: { convertingUntil: quoteConversionClaimUntil(now) } },
+        { new: true, timestamps: false },
+    );
+    if (!claimed) {
+        const converted = await Load.findOne({ quoteId: quote._id, organizationId: orgId, status: { $ne: 'Cancelled' } })
+            .select('loadNumber')
+            .lean<{ loadNumber?: string }>();
+        throw new ApiError(
+            409,
+            converted
+                ? `This quote was already converted into load ${converted.loadNumber}. Open that load in Transportation instead.`
+                : QUOTE_BEING_CONVERTED,
+        );
+    }
+
+    try {
+        return await convertClaimedQuote(req, res, quote, orgId, userId);
+    } finally {
+        await Quote.updateOne({ _id: quote._id, organizationId: orgId }, { $unset: { convertingUntil: '' } }, { timestamps: false })
+            .catch((err) => logger.warn({ err, quoteId: quote._id }, 'Could not release the quote conversion claim'));
+    }
+});
+
+/** Convert to load, once this request holds the quote's claim. */
+async function convertClaimedQuote(req: Request, res: Response, quote: IQuote, orgId: string, userId: string) {
     // One live load per quote. A quote still marked "booked" whose load was
     // deleted or cancelled has no live load anymore, so it may be converted
     // again (the cancelled load stays as its own record).
@@ -1943,7 +1974,7 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
             'Quote converted to load successfully'
         )
     );
-});
+}
 
 export default {
     createQuote,
