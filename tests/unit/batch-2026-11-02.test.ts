@@ -1,0 +1,77 @@
+// Tests from the November 2, 2026 push, kept in one file so the deploy's
+// test run uses less memory (2026-11-17). Each describe block below is one
+// former test file, moved unchanged; only its imports were merged here.
+
+import { isShipmentEvent, SHIPMENT_EVENT_PROPERTY } from '../../src/services/googleCalendar.service';
+import { inventoryStatusAtDelivery, inventoryVehicleIdsFollowingLoad } from '../../src/services/loadInventoryStatus';
+
+describe('googleShipmentEvents.test.ts', () => {
+  /**
+   * Transportation's shipment events in Google Calendar are one-way: the
+   * Google import recognises them and never turns them into appointments.
+   */
+  describe('isShipmentEvent', () => {
+    it('recognises events Transportation wrote', () => {
+      expect(isShipmentEvent({ id: 'e1', extendedProperties: { private: { [SHIPMENT_EVENT_PROPERTY]: 'load-1' } } })).toBe(true);
+    });
+
+    it('leaves every other Google event to the normal import', () => {
+      expect(isShipmentEvent({ id: 'e2', summary: 'Customer appointment' })).toBe(false);
+      expect(isShipmentEvent({ id: 'e3', extendedProperties: { private: { somethingElse: 'x' } } })).toBe(false);
+      expect(isShipmentEvent({ id: 'e4', extendedProperties: { shared: { [SHIPMENT_EVENT_PROPERTY]: 'load-1' } } })).toBe(false);
+      expect(isShipmentEvent(null)).toBe(false);
+    });
+  });
+});
+
+describe('loadInventoryStatus.test.ts', () => {
+  /**
+   * A load moves its Inventory cars to In Transit at pickup. At delivery a car
+   * coming to the dealership goes back to Ready for Sale, and a car on a load
+   * made from a quote has reached its buyer, so it becomes Sold.
+   */
+  const CAR_A = '64b0000000000000000000a1';
+  const CAR_B = '64b0000000000000000000a2';
+  const QUOTE = '64b0000000000000000000c1';
+
+  describe('inventoryStatusAtDelivery', () => {
+    it('puts a car back on sale, or marks it Sold when the load took it to its buyer', () => {
+      expect(inventoryStatusAtDelivery({})).toBe('Ready for Sale');
+      expect(inventoryStatusAtDelivery({ quoteId: null })).toBe('Ready for Sale');
+      expect(inventoryStatusAtDelivery(null)).toBe('Ready for Sale');
+      expect(inventoryStatusAtDelivery({ quoteId: QUOTE })).toBe('Sold');
+    });
+
+    it('marks a car Sold when Dispatch said it is sold to the person receiving it', () => {
+      expect(inventoryStatusAtDelivery({ soldOnDelivery: true })).toBe('Sold');
+      expect(inventoryStatusAtDelivery({ soldOnDelivery: false })).toBe('Ready for Sale');
+      expect(inventoryStatusAtDelivery({ soldOnDelivery: 'yes' })).toBe('Ready for Sale');
+      const load = { soldOnDelivery: true, vehicles: [{ vehicleId: CAR_A }] };
+      expect(inventoryVehicleIdsFollowingLoad(load, 'In Transit')).toEqual([CAR_A]);
+      expect(inventoryVehicleIdsFollowingLoad(load, 'Ready for Sale')).toEqual([]);
+      expect(inventoryVehicleIdsFollowingLoad(load, 'Sold')).toEqual([CAR_A]);
+    });
+  });
+
+  describe('inventoryVehicleIdsFollowingLoad', () => {
+    it("follows each stock car on a load that isn't from a quote, once, both ways", () => {
+      const load = { vehicles: [{ vehicleId: CAR_A }, { vehicleId: CAR_B }, { vehicleId: CAR_A }, {}] };
+      expect(inventoryVehicleIdsFollowingLoad(load, 'In Transit')).toEqual([CAR_A, CAR_B]);
+      expect(inventoryVehicleIdsFollowingLoad(load, 'Ready for Sale')).toEqual([CAR_A, CAR_B]);
+      expect(inventoryVehicleIdsFollowingLoad(load, 'Sold')).toEqual([]);
+    });
+
+    it('takes a customer shipment off sale at pickup and marks it Sold at delivery, never back on sale', () => {
+      const load = { quoteId: QUOTE, vehicles: [{ vehicleId: CAR_A }] };
+      expect(inventoryVehicleIdsFollowingLoad(load, 'In Transit')).toEqual([CAR_A]);
+      expect(inventoryVehicleIdsFollowingLoad(load, 'Sold')).toEqual([CAR_A]);
+      expect(inventoryVehicleIdsFollowingLoad(load, 'Ready for Sale')).toEqual([]);
+    });
+
+    it('ignores missing loads, vehicles and ids that are not valid', () => {
+      expect(inventoryVehicleIdsFollowingLoad(null, 'In Transit')).toEqual([]);
+      expect(inventoryVehicleIdsFollowingLoad({ vehicles: null }, 'In Transit')).toEqual([]);
+      expect(inventoryVehicleIdsFollowingLoad({ vehicles: [{ vehicleId: 'not-an-id' }, null] }, 'Ready for Sale')).toEqual([]);
+    });
+  });
+});
