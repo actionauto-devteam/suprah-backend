@@ -1109,7 +1109,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'parsedContent threadId messageId isRead isPending channel ' +
         'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
         'centralIngestion labels followUp statusHistory notes assignedTo assignedAt assignmentUnseenBy aiSummary aiSummaryGeneratedAt ' +
-        'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt'
+        'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt combinedInto'
       )
       .lean();
 
@@ -1609,6 +1609,7 @@ export const assignLead = async (req: Request, res: Response) => {
         metadata: {
           leadId: lead._id.toString(),
           customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+          route: `/crm/leads?leadId=${lead._id.toString()}`,
         },
       });
     }
