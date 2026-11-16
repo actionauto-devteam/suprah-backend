@@ -10,6 +10,12 @@ import { ApiError } from '../utils/ApiError';
 import { QUOTE_NOT_FOUND, SIGN_IN_AGAIN, describeValidationIssues } from '../utils/userMessages';
 import { QUOTE_BEING_CONVERTED, quoteConversionClaimFilter, quoteConversionClaimUntil } from '../utils/quoteConversionClaim';
 import type { IQuote } from '../models/Quote.model';
+import {
+    QUOTE_CHANGED_WHILE_EDITING,
+    QUOTE_STATUS_CHANGED_TYPE,
+    openedQuoteVersion,
+    quoteStatusChangedMeanwhile,
+} from '../utils/quoteEditConflict';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
@@ -1003,7 +1009,8 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         rate,
         miles,
         eta,
-        status
+        status,
+        expectedUpdatedAt
     } = req.body;
 
     const updateData: any = {};
@@ -1155,15 +1162,17 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         updateData.$unset = { closedReason: '', closedAt: '', declineReason: '' };
     }
 
+    // Saved only if nobody changed the quote since this staff member opened it.
     const quote = await Quote.findOneAndUpdate(
-        { _id: req.params.id, organizationId: orgId },
+        { _id: req.params.id, organizationId: orgId, ...openedQuoteVersion(expectedUpdatedAt) },
         updateData,
         { new: true, runValidators: true }
     ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
         .populate('leadId', 'firstName lastName');
 
     if (!quote) {
-        throw new ApiError(404, QUOTE_NOT_FOUND);
+        const stillThere = await Quote.exists({ _id: req.params.id, organizationId: orgId });
+        throw stillThere ? new ApiError(409, QUOTE_CHANGED_WHILE_EDITING) : new ApiError(404, QUOTE_NOT_FOUND);
     }
 
     // Create notification safely
@@ -1239,7 +1248,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
 const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
     const orgId = req.orgId as string;
-    const { status } = req.body;
+    const { status, expectedStatus } = req.body;
 
     const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
     if (!validStatuses.includes(status)) {
@@ -1258,6 +1267,15 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     const before = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
         .select('status source leadId email phone vehicleId vin')
         .lean<{ status?: string; source?: string; leadId?: unknown; email?: string; phone?: string; vehicleId?: unknown; vin?: string }>();
+    if (!before) {
+        throw new ApiError(404, QUOTE_NOT_FOUND);
+    }
+
+    // Someone else answered (or changed) it since this staff member looked.
+    const changedMeanwhile = quoteStatusChangedMeanwhile(before.status, expectedStatus);
+    if (changedMeanwhile) {
+        throw new ApiError(409, changedMeanwhile, [{ type: QUOTE_STATUS_CHANGED_TYPE, status: before.status ?? null }]);
+    }
 
     // A lead added to the CRM after the quote was made is linked when staff
     // accept or decline it. An existing link is never changed here.
@@ -1266,8 +1284,10 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         : undefined;
     const statusSet = { status, ...(lateLeadLink ?? {}) };
 
+    // Saved only if the status is still the one just checked, so two staff
+    // answering at the same moment can't both send the customer an answer.
     const quote = await Quote.findOneAndUpdate(
-        { _id: req.params.id, organizationId: orgId },
+        { _id: req.params.id, organizationId: orgId, status: before.status ?? null },
         // A request closed because its vehicle left the marketplace (or a
         // decline reason) stops applying once staff give it another status.
         status === 'rejected'
@@ -1280,7 +1300,15 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         .populate('leadId', 'firstName lastName');
 
     if (!quote) {
-        throw new ApiError(404, QUOTE_NOT_FOUND);
+        const latest = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
+            .select('status')
+            .lean<{ status?: string }>();
+        if (!latest) throw new ApiError(404, QUOTE_NOT_FOUND);
+        throw new ApiError(
+            409,
+            quoteStatusChangedMeanwhile(latest.status, before.status ?? '') ?? QUOTE_CHANGED_WHILE_EDITING,
+            [{ type: QUOTE_STATUS_CHANGED_TYPE, status: latest.status ?? null }],
+        );
     }
 
     // Create notification safely
