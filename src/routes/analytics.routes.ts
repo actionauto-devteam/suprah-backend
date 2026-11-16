@@ -6,7 +6,17 @@ const router = Router();
 
 router.use(crmAuth());
 
+router.get('/access',              analyticsController.getAccess);
+
+router.use(analyticsController.requireAccess);
+
+router.get('/access/staff',        analyticsController.getAccessStaff);
+
+router.put('/access',              analyticsController.saveAccess);
+
 router.get('/leaderboard',         analyticsController.getLeaderboard);
+
+router.get('/records',             analyticsController.getRecords);
 
 router.get('/my-stats',            analyticsController.getMyStats);
 
