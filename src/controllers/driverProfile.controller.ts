@@ -5,6 +5,7 @@ import { ApiError } from "../utils/ApiError";
 import { DOCUMENT_FILE_UNAVAILABLE, DOCUMENT_NOT_FOUND, SIGN_IN_AGAIN } from "../utils/userMessages";
 import DriverProfile, {
   REQUIRED_COMPLIANCE_DOCS,
+  isComplianceExpiredAt,
 } from "../models/DriverProfile.model";
 import { IUser } from "../models/User.model";
 import type { ActivityType } from "../models/UserActivity.model";
@@ -1167,12 +1168,12 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
 
   // Commit metadata removal first. If MongoDB fails, the existing file remains
   // available instead of leaving a broken document record.
-  profile.documents = profile.documents.filter(
+  const remainingDocuments = profile.documents.filter(
     (item: any) => item._id?.toString() !== documentId,
-  ) as any;
+  );
 
   const uploadedTypes = new Set(
-    profile.documents.map((item: any) => item.type),
+    remainingDocuments.map((item: any) => item.type),
   );
   const hasAllRequired = REQUIRED_COMPLIANCE_DOCS.every((type) =>
     uploadedTypes.has(type),
@@ -1180,11 +1181,27 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
 
   // A verified driver cannot remain verified after removing a required
   // compliance credential.
-  if (!hasAllRequired || REQUIRED_COMPLIANCE_DOCS.includes(deletedType)) {
-    profile.verificationStatus = "in_progress";
-  }
+  const needsReview = !hasAllRequired || REQUIRED_COMPLIANCE_DOCS.includes(deletedType);
 
-  await profile.save();
+  // Remove only this document, in one step (2026-11-17). Saving the whole
+  // list would undo a staff approval of another document made at the same
+  // moment. The compliance flag the profile's save step keeps current is set
+  // here too, for the documents that remain.
+  const updatedProfile = await DriverProfile.findOneAndUpdate(
+    { _id: profile._id, "documents._id": doc._id },
+    {
+      $pull: { documents: { _id: doc._id } },
+      $set: {
+        isComplianceExpired: isComplianceExpiredAt({
+          ...(typeof (profile as any).toObject === "function" ? (profile as any).toObject() : profile),
+          documents: remainingDocuments,
+        } as any),
+        ...(needsReview ? { verificationStatus: "in_progress" } : {}),
+      },
+    },
+    { new: true },
+  );
+  if (!updatedProfile) throw new ApiError(404, DOCUMENT_NOT_FOUND);
 
   if (documentStorageKey) {
     await storageService
@@ -1197,7 +1214,7 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
       });
   }
 
-  res.json(new ApiResponse(200, profile, "Document deleted"));
+  res.json(new ApiResponse(200, updatedProfile, "Document deleted"));
 
   logger.warn(
     { profileId: profile._id, documentId },
@@ -1206,7 +1223,7 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
 
   await safeCreateDriverProfileActivity({
     user,
-    profile,
+    profile: updatedProfile,
     title: "Document Deleted",
     description: `Driver ${user.name} removed a compliance document`,
     metadata: { profileId: profile._id.toString(), documentId },
