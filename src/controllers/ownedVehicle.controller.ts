@@ -7,6 +7,10 @@ import axios from "axios";
 import Vehicle from "../models/Vehicle.model";
 import storageService from "../services/storage.service";
 import { SUPPORT_EMAIL } from "../utils/userMessages";
+import { isStoredUpload } from "../utils/storedUpload";
+
+// Garage photos the upload below stores live in this folder (2026-11-17).
+const GARAGE_PHOTO_FOLDER = "vehicles";
 
 export const addOwnedVehicle = asyncHandler(
   async (req: Request, res: Response) => {
@@ -170,7 +174,10 @@ export const updateOwnedVehicle = asyncHandler(
     }
 
     const { id } = req.params;
-    const { color, licensePlate, trim, currentMileage, images } = req.body;
+    // Photos change only through the photo upload (2026-11-17): a photo
+    // list sent here is ignored, so it can't point the next upload's
+    // clean-up at someone else's file.
+    const { color, licensePlate, trim, currentMileage } = req.body;
 
     const vehicle = await OwnedVehicle.findOne({ _id: id, userId });
     if (!vehicle) {
@@ -186,8 +193,6 @@ export const updateOwnedVehicle = asyncHandler(
       }
       vehicle.currentMileage = currentMileage;
     }
-    if (images !== undefined) vehicle.images = images;
-
     await vehicle.save();
 
     res.status(200).json({
@@ -220,14 +225,19 @@ export const uploadOwnedVehicleImage = asyncHandler(
     }
 
     const previousImage = vehicle.images?.[0];
-    const imageUrl = await storageService.upload(file, "vehicles");
-
-    if (previousImage) {
-      await storageService.delete(previousImage);
-    }
-
+    const imageUrl = await storageService.upload(file, GARAGE_PHOTO_FOLDER);
     vehicle.images = [imageUrl, ...(vehicle.images || []).slice(1)];
     await vehicle.save();
+    // The old photo is removed only after the new one is saved, and only when
+    // it's a photo this upload stored for this car. A dealership's inventory
+    // photo copied into the Garage (Add to garage) is never deleted.
+    if (
+      previousImage &&
+      isStoredUpload(previousImage, GARAGE_PHOTO_FOLDER) &&
+      !(await OwnedVehicle.exists({ _id: { $ne: vehicle._id }, images: previousImage }))
+    ) {
+      await storageService.delete(previousImage).catch(() => undefined);
+    }
 
     res.status(200).json({
       success: true,

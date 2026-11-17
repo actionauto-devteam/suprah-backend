@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import auth from '../middleware/auth.middleware';
-import { uploadVehicleImage } from '../middleware/upload.middleware';
+import { uploadVehicleImage, validateUploadedImageContent } from '../middleware/upload.middleware';
 import {
     addOwnedVehicle,
     getOwnedVehicles,
@@ -20,7 +20,7 @@ router.get('/', getOwnedVehicles);
 router.get('/decode/:vin', decodeVin);
 router.patch('/:id/mileage', updateOwnedVehicleMileage);
 router.put('/:id', updateOwnedVehicle);
-router.post('/:id/image', uploadVehicleImage, uploadOwnedVehicleImage);
+router.post('/:id/image', uploadVehicleImage, validateUploadedImageContent, uploadOwnedVehicleImage);
 router.delete('/:id', deleteOwnedVehicle);
 
 export default router;
