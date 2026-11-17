@@ -53,6 +53,7 @@ export async function notifyLeadMessage(orgId: unknown, lead: any, channel: 'sms
     await notifyLeadPeople({
       organizationId: orgId,
       leadId: lead._id,
+      ownerIds: [lead.assignedTo],
       type: 'lead_message',
       title,
       message,
