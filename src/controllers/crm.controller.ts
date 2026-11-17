@@ -95,7 +95,7 @@ import {
   revokeUserTrayDevices,
 } from "../services/trayDevice.service";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
-import { findOpenShiftOnOtherIdentity } from "../utils/crossIdentityShift.util";
+import { findOpenShiftOnOtherIdentity, otherIdentityShiftMessage } from "../utils/crossIdentityShift.util";
 import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
 import { resolveNextEmployeeId } from "../utils/employeeId.util";
@@ -626,16 +626,7 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
       "CrmUser",
     );
     if (otherShift) {
-      const startedAtStr = otherShift.shiftStartedAt.toLocaleString("en-US", {
-        timeZone: "America/Denver",
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      });
-      throw new ApiError(
-        400,
-        `You're already clocked in on your other TimeProof account (since ${startedAtStr} MDT) — please clock out there first before starting a new shift here.`,
-      );
+      throw new ApiError(400, otherIdentityShiftMessage(otherShift.shiftStartedAt));
     }
   }
 

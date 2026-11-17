@@ -17,7 +17,7 @@ import { getSocketIO } from '../utils/socketEmitter';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
 import { buildBreakSessions } from '../utils/timeLogEngine';
-import { findOpenShiftOnOtherIdentity } from '../utils/crossIdentityShift.util';
+import { findOpenShiftOnOtherIdentity, otherIdentityShiftMessage } from '../utils/crossIdentityShift.util';
 import { isSeamlesslyResumableNote } from '../constants/autoClockoutNotes';
 import AuditLog from '../models/AuditLog.model';
 import logger from '../utils/logger';
@@ -198,10 +198,7 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === 'time-in' && actor.email) {
     const otherShift = await findOpenShiftOnOtherIdentity(actor.email, actor.model);
     if (otherShift) {
-      const startedAtStr = otherShift.shiftStartedAt.toLocaleString('en-US', {
-        timeZone: 'America/Denver', hour: 'numeric', minute: '2-digit', hour12: true,
-      });
-      throw new ApiError(400, `You're already clocked in on your other TimeProof account (since ${startedAtStr} MDT) — please clock out there first before starting a new shift here.`);
+      throw new ApiError(400, otherIdentityShiftMessage(otherShift.shiftStartedAt));
     }
   }
 

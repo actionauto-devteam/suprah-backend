@@ -56,3 +56,14 @@ export async function findOpenShiftOnOtherIdentity(
   const open = await getOpenShiftForUserId(crmUser._id.toString());
   return open ? { model: 'CrmUser', shiftStartedAt: open.shiftStartedAt } : null;
 }
+
+export function otherIdentityShiftMessage(shiftStartedAt: Date): string {
+  const startedAt = shiftStartedAt.toLocaleString('en-US', {
+    timeZone: 'America/Denver',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZoneName: 'short',
+  });
+  return `You're already clocked in on your other TimeProof account (since ${startedAt}) — please clock out there first before starting a new shift here.`;
+}
