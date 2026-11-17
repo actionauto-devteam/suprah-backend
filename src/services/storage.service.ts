@@ -7,6 +7,7 @@ import fs from 'fs/promises';
 import { existsSync, mkdirSync, createReadStream } from 'fs';
 import { sharedAwsHttpHandler } from '../config/awsHttpHandler';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
+import { isSafeStorageKey, localUploadPath } from '../utils/storageKeyGuard';
 
 export enum BucketType {
     PUBLIC = 'public',
@@ -164,12 +165,17 @@ export class StorageService {
      * @param type The bucket type where the file resides
      */
     async delete(pathOrUrl: string, type: BucketType = BucketType.PUBLIC): Promise<void> {
-        if (!pathOrUrl) return;
+        if (!pathOrUrl || typeof pathOrUrl !== 'string') return;
 
-        // 1. Handle Local Deletion
+        // 1. Handle Local Deletion. Only files inside the uploads folder; a
+        // path that climbs out of it ("/uploads/../...") is refused (2026-11-17).
         if (pathOrUrl.startsWith('/uploads/')) {
+            const fullPath = localUploadPath(pathOrUrl, path.join(__dirname, '../../'));
+            if (!fullPath) {
+                console.warn('[StorageService] Refused to delete a path outside the uploads folder');
+                return;
+            }
             try {
-                const fullPath = path.join(__dirname, '../../', pathOrUrl);
                 if (existsSync(fullPath)) {
                     await fs.unlink(fullPath);
                 }
@@ -196,6 +202,13 @@ export class StorageService {
                 // but usually we store keys for private files
                 return;
             }
+        }
+
+        // Only plain bucket keys ("folder/name"); never "..", absolute paths
+        // or backslashes (2026-11-17).
+        if (!isSafeStorageKey(key)) {
+            console.warn('[StorageService] Refused to delete an unsafe storage key');
+            return;
         }
 
         try {

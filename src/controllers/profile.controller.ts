@@ -23,7 +23,19 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
 
   const updateData: any = {};
   if (name !== undefined) updateData.name = name;
-  if (avatar !== undefined) updateData.avatar = avatar;
+  // The picture is changed with Upload photo and Remove photo (2026-11-17).
+  // Here it can only be cleared or sent back unchanged, so no one can point
+  // it at another file (which a later picture change would then delete).
+  if (avatar !== undefined) {
+    if (avatar === null || avatar === '') {
+      updateData.avatar = null;
+    } else {
+      const current = await User.findById(userId).select('avatar').lean<{ avatar?: string | null } | null>();
+      if (avatar !== current?.avatar) {
+        throw new ApiError(400, 'Change your profile picture with Upload photo, then try again.');
+      }
+    }
+  }
   if (theme !== undefined) updateData.theme = theme;
   if (onlineStatus !== undefined) updateData.onlineStatus = onlineStatus;
   if (customStatus !== undefined) updateData.customStatus = customStatus;

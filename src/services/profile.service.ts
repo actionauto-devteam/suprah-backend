@@ -15,6 +15,19 @@ import { NOTIFICATION_CATEGORIES } from '../models/Notification.model';
 const VALID_PREFERENCE_KEYS = new Set<string>([...NOTIFICATION_CATEGORIES, 'mutedTypes']);
 import { invalidateUserCache } from '../utils/cache.util';
 import { syncAccountPhoneToVerification } from './driverContactSync.service';
+import { isStoredUpload } from '../utils/storedUpload';
+
+/**
+ * A replaced or removed picture is deleted only when this server stored it as
+ * a profile picture and no other account uses it (2026-11-17). A sign-in
+ * provider's picture or any other address is left alone.
+ */
+const deleteOwnProfilePicture = async (userId: string, avatar: unknown) => {
+  if (!isStoredUpload(avatar, 'avatars')) return;
+  const sharedWithAnotherAccount = await User.exists({ _id: { $ne: userId }, avatar: avatar as string });
+  if (sharedWithAnotherAccount) return;
+  await storageService.delete(avatar as string);
+};
 
 const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: string) => {
   const existingUser = await User.findById(userId).select('avatar email');
@@ -25,7 +38,7 @@ const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: s
   const avatarUrl = await storageService.upload(file, 'avatars');
 
   if (existingUser.avatar) {
-    await storageService.delete(existingUser.avatar);
+    await deleteOwnProfilePicture(userId, existingUser.avatar);
   }
 
   const user = await User.findByIdAndUpdate(
@@ -292,7 +305,7 @@ const removeAvatar = async (userId: string, orgId?: string) => {
 
   // Delete from R2 or legacy local
   if (existingUser.avatar) {
-    await storageService.delete(existingUser.avatar);
+    await deleteOwnProfilePicture(userId, existingUser.avatar);
   }
 
   const user = await User.findByIdAndUpdate(

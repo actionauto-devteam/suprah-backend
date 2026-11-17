@@ -23,6 +23,7 @@ import MembershipPoints from "../models/MembershipPoints.model";
 import PointTransaction from "../models/PointTransaction.model";
 import { removeOwnDeviceLink } from "./driverTrackingDevice.service";
 import { BucketType, storageService } from "./storage.service";
+import { isStoredUpload } from "../utils/storedUpload";
 
 /*
  * Deleting your own account (decided 2026-11-11). Apple requires apps that let
@@ -220,7 +221,12 @@ export async function eraseAccount(
 
   // 2. Remove their personal data. Business records stay with the dealerships.
   const privateFiles: string[] = [];
-  const publicFiles: string[] = before?.avatar ? [String(before.avatar)] : [];
+  // Only a profile picture this server stored, used by no other account
+  // (2026-11-17), is deleted with the account.
+  const avatar = before?.avatar ? String(before.avatar) : "";
+  const avatarIsOurs = isStoredUpload(avatar, "avatars")
+    && !(await User.exists({ _id: { $ne: id }, avatar }));
+  const publicFiles: string[] = avatarIsOurs ? [avatar] : [];
   const steps: Array<Promise<unknown>> = [
     Notification.deleteMany({ userId: id }),
     WebAuthnCredential.deleteMany({ userId: id }),
