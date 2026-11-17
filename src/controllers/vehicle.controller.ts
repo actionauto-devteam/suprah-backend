@@ -4,6 +4,7 @@ import { asyncHandler } from "../utils/asyncHandler";
 import Vehicle from "../models/Vehicle.model";
 import Lead from "../models/lead.model";
 import { ApiResponse } from "../utils/ApiResponse";
+import { csvRow } from "../utils/csvCell";
 import { ApiError } from "../utils/ApiError";
 import { SIGN_IN_AGAIN, VEHICLE_NOT_FOUND } from "../utils/userMessages";
 import { MARKETPLACE_VEHICLE_FILTER } from "../utils/marketplaceVehicle";
@@ -1676,10 +1677,23 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
 
   const csvHeader =
     "VIN,Year,Make,Model,Trim,Color,Stock Number,Price,Mileage,Status,Location,Date Added\n";
+  // Each value is one safe spreadsheet cell (2026-11-17), see csvCell.
   const csvRows = vehicles
-    .map(
-      (v: any) =>
-        `"${v.vin}",${v.year},"${v.make}","${v.modelName}","${v.trim || ""}","${v.exteriorColor || ""}","${v.stockNumber || ""}",${v.price || 0},${v.mileage || 0},"${v.status}","${v.dealerCity}, ${v.dealerState}",${v.dateAdded ? new Date(v.dateAdded).toISOString().split("T")[0] : ""}`,
+    .map((v: any) =>
+      csvRow([
+        v.vin,
+        v.year,
+        v.make,
+        v.modelName,
+        v.trim || "",
+        v.exteriorColor || "",
+        v.stockNumber || "",
+        v.price || 0,
+        v.mileage || 0,
+        v.status,
+        [v.dealerCity, v.dealerState].filter(Boolean).join(", "),
+        v.dateAdded ? new Date(v.dateAdded).toISOString().split("T")[0] : "",
+      ]),
     )
     .join("\n");
 
