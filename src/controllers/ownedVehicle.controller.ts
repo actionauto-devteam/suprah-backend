@@ -11,6 +11,8 @@ import { isStoredUpload } from "../utils/storedUpload";
 
 // Garage photos the upload below stores live in this folder (2026-11-17).
 const GARAGE_PHOTO_FOLDER = "vehicles";
+// How long the VIN lookup waits for the public VIN service.
+const VIN_LOOKUP_TIMEOUT_MS = 8000;
 
 export const addOwnedVehicle = asyncHandler(
   async (req: Request, res: Response) => {
@@ -128,14 +130,18 @@ export const decodeVin = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const vin = (req.params.vin || "").toUpperCase().trim();
-  if (!vin || vin.length !== 17) {
+  // Letters and numbers only (2026-11-17), so the lookup address can't be changed.
+  if (!/^[A-Z0-9]{17}$/.test(vin)) {
     throw new ApiError(400, "A VIN has 17 letters and numbers. Check it and try again.");
   }
 
   try {
     const [response, matchedVehicle] = await Promise.all([
+      // The public VIN service gets 8 seconds; after that the customer is
+      // told to try again or type the details (2026-11-17).
       axios.get(
-        `https://vpic.nhtsa.dot.gov/api/vehicles/decodevinvalues/${vin}?format=json`,
+        `https://vpic.nhtsa.dot.gov/api/vehicles/decodevinvalues/${encodeURIComponent(vin)}?format=json`,
+        { timeout: VIN_LOOKUP_TIMEOUT_MS },
       ),
       Vehicle.findOne({ vin }).select("mileage exteriorColor").lean(),
     ]);
