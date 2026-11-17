@@ -238,17 +238,11 @@ export const setupSocket = (io: Server) => {
     });
     // ----------------------------
 
-    socket.on('join_shipment_tracking', (shipmentId: string) => {
-      if (shipmentId) {
-        socket.join(`shipment:${shipmentId}`);
-      }
-    });
-
-    socket.on('leave_shipment_tracking', (shipmentId: string) => {
-      if (shipmentId) {
-        socket.leave(`shipment:${shipmentId}`);
-      }
-    });
+    // The old Shipment tracking room (join/leave_shipment_tracking) was removed
+    // 2026-11-16: nothing has sent to it since Shipments became Loads, and it
+    // let any signed-in connection join any shipment's room. Staff get live
+    // GPS on their own connection (driverLocationAccess); customers' live map
+    // uses customerShipmentLive on theirs.
 
     socket.on('join_conversation', async (conversationId: string) => {
       try {
