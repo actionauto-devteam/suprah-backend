@@ -322,8 +322,16 @@ class OrgGmailService {
                     if (newLead) {
                         const customerName = [newLead.firstName, newLead.lastName].filter(Boolean).join(' ').trim() || newLead.email || 'A new customer';
                         const notice = notificationTemplates.new_lead({ customerName, source: newLead.sourceProvider || newLead.source });
-                        import('../utils/safeNotification')
-                            .then(({ notifyOrgAdmins }) => notifyOrgAdmins(orgId, 'new_lead', notice.title, notice.message, { leadId: String(newLead._id), customerName, source: newLead.source, channel: newLead.channel, route: `/crm/leads?leadId=${newLead._id}` }))
+                        import('./leadNoticeRouting.service')
+                            .then(({ notifyLeadPeople }) => notifyLeadPeople({
+                                organizationId: orgId,
+                                leadId: newLead._id,
+                                type: 'new_lead',
+                                title: notice.title,
+                                message: notice.message,
+                                metadata: { leadId: String(newLead._id), customerName, source: newLead.source, channel: newLead.channel, route: `/crm/leads?leadId=${newLead._id}` },
+                                topicText: newLead.comments,
+                            }))
                             .catch(() => undefined);
                         triggerAiReplyForNewInquiry(orgId, newLead, newLead.phone, newLead.comments).catch((err) => {
                             console.error('[OrgSync] triggerAiReplyForNewInquiry failed:', err);

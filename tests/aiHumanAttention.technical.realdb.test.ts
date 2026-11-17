@@ -31,6 +31,7 @@ import Notification from '../src/models/Notification.model';
 import AiTechnicalAlertState from '../src/models/AiTechnicalAlertState.model';
 import WebChatSession from '../src/models/WebChatSession.model';
 import WebChatMessage from '../src/models/WebChatMessage.model';
+import LeadHandlingEvent from '../src/models/LeadHandlingEvent.model';
 import { Conversation, CommunicationMessage } from '../src/models/communication.model';
 import { TECHNICAL_ATTENTION_REASONS, AttentionTechnicalCode } from '../src/models/aiHumanAttention';
 import { normalizeIdentityPhone, normalizeIdentityEmail } from '../src/utils/contactIdentity';
@@ -183,6 +184,7 @@ describe('Real-DB proof: technical attention failures never become customer requ
     await CommunicationMessage.collection.deleteMany({ orgId: { $in: ids } });
     await WebChatSession.collection.deleteMany({ organizationId: String(orgId) });
     await WebChatMessage.collection.deleteMany({ organizationId: String(orgId) });
+    await LeadHandlingEvent.collection.deleteMany({ organizationId: String(orgId) });
     await AiAgentTask.collection.deleteMany({ organizationId: { $in: ids } });
     await AiAgentLog.collection.deleteMany({ organizationId: { $in: ids } });
     await Notification.collection.deleteMany({ organizationId: { $in: ids } });

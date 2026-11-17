@@ -20,12 +20,13 @@ import { LeadIntakeDecision, decideLeadIntake } from './leadIntakeDecision';
 import { leadIntakeLockKeys, withLeadIntakeLock } from './leadIntakeLock.service';
 import { getLeadIntakeMode, onLeadIntakeResumed } from './leadIntakeControl.service';
 import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
-import { notifyOrgAdmins, notifyUsers } from '../utils/safeNotification';
+import { notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
 import logger from '../utils/logger';
 import { CONFIRM_KEYWORDS, RESCHEDULE_KEYWORDS, isSmsKeyword, normalizeSmsCommand } from '../utils/smsKeywords';
 import { leadDisplayName } from './leadMessageNotice.service';
+import { notifyLeadPeople } from './leadNoticeRouting.service';
 
 export const LEAD_INTAKE_MAX_ATTEMPTS = 5;
 
@@ -93,9 +94,13 @@ export async function submitLeadInquiry(request: LeadIntakeRequest): Promise<Lea
 
 export const CONVERSATION_ONLY_KINDS = ['email_reply', 'sms', 'call'];
 
-export async function findOpenLeadForContact(organizationId: string, contact: { phone?: string | null; email?: string | null }) {
+export async function findOpenLeadForContact(
+  organizationId: string,
+  contact: { phone?: string | null; email?: string | null },
+  options: { phoneVerified?: boolean } = {},
+) {
   const inputs = await loadLeadAssociationInputs({ organizationId, phone: contact.phone, email: contact.email });
-  const decision = decideLeadIntake({ ...inputs, policy: 'associate' });
+  const decision = decideLeadIntake({ ...inputs, policy: 'associate', phoneVerified: Boolean(options.phoneVerified) });
   if (decision.action !== 'append' || !decision.leadId) return null;
   return Lead.findOne({ _id: decision.leadId, organizationId, status: { $nin: LIFECYCLE_TERMINAL_STATUSES } });
 }
@@ -260,7 +265,11 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
         if (!done) throw new RetryableIntakeError('The intake lease expired before the review was saved');
         return { status: 'review', inquiryId, reason: 'reply_after_lead_closed' } as LeadIntakeResult;
       }
-      const decided = decideLeadIntake({ ...inputs, policy: event.intakePolicy === 'isolate' ? 'isolate' : 'associate' });
+      const decided = decideLeadIntake({
+        ...inputs,
+        policy: event.intakePolicy === 'isolate' ? 'isolate' : 'associate',
+        phoneVerified: event.contact?.assurance === 'carrier_verified',
+      });
       const decision = event.kind === 'email_reply' && decided.action === 'create'
         ? { ...decided, action: 'review' as const, reason: 'reply_without_open_lead' }
         : event.intentAssurance === 'unconfirmed' && decided.action === 'create' && decided.previousLeadIds.length
@@ -304,6 +313,12 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
           contextLeadId: event.association?.contextLeadId,
         });
         if (!done) throw new RetryableIntakeError('The intake lease expired before the association was saved');
+        if (decision.reason === 'phone_confirmed_chat') {
+          await Lead.updateOne({ _id: lead._id, organizationId, intakeIdentity: 'unverified' }, {
+            $unset: { intakeIdentity: 1 },
+            $set: { 'customerLink.status': 'pending', 'customerLink.nextRetryAt': new Date() },
+          });
+        }
         return { status: 'associated', inquiryId, leadId: String(lead._id), created: false, reason: decision.reason } as LeadIntakeResult;
       }
 
@@ -324,6 +339,9 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
       return { status: 'associated', inquiryId, leadId: String(lead._id), created: true, reason: decision.reason } as LeadIntakeResult;
     });
 
+    if (result.status === 'associated' && result.reason === 'phone_confirmed_chat') {
+      await linkConfirmedChatCustomer(organizationId, result.leadId);
+    }
     if (result.status !== 'dismissed') {
       await runInquirySideEffects(event._id).catch((err) =>
         logger.warn({ err, inquiryId }, '[LeadIntake] Side effects will be retried by the recovery sweep'));
@@ -334,6 +352,16 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
     logger.warn({ err, inquiryId, organizationId }, '[LeadIntake] Inquiry kept for retry');
     return { status: 'held', inquiryId };
   }
+}
+
+async function linkConfirmedChatCustomer(organizationId: string, leadId: string): Promise<void> {
+  try {
+    const { syncLeadCustomerSafely } = await import('./customerIdentity.service');
+    await syncLeadCustomerSafely(organizationId, leadId);
+  } catch (err) {
+    logger.warn({ err, leadId }, '[LeadIntake] Could not link the customer record for a chat confirmed by text or call');
+  }
+  emitToOrg(organizationId, 'lead:update', { leadId });
 }
 
 async function linkInquirySources(event: any): Promise<void> {
@@ -378,6 +406,10 @@ function vehicleLabelOf(event: any): string {
   return [event.vehicle?.year, event.vehicle?.make, event.vehicle?.model].filter(Boolean).join(' ');
 }
 
+function inquiryTextOf(event: any): string {
+  return [event.subject, event.comments].map((part) => String(part || '').trim()).filter(Boolean).join(' ');
+}
+
 async function sendIntakeNotification(event: any): Promise<void> {
   const organizationId = String(event.organizationId);
   const association = event.association || {};
@@ -401,7 +433,15 @@ async function sendIntakeNotification(event: any): Promise<void> {
       source: event.source,
       vehicleInterest: vehicleLabelOf(event) || undefined,
     } as any);
-    await notifyOrgAdmins(organizationId, 'new_lead', template.title, template.message, metadata);
+    await notifyLeadPeople({
+      organizationId,
+      leadId: lead._id,
+      type: 'new_lead',
+      title: template.title,
+      message: template.message,
+      metadata,
+      topicText: inquiryTextOf(event),
+    });
     emitToOrg(organizationId, 'lead:new', { _id: String(lead._id), leadId: String(lead._id) });
     return;
   }
@@ -412,11 +452,15 @@ async function sendIntakeNotification(event: any): Promise<void> {
         source: event.source || undefined,
         vehicleInterest: vehicleLabelOf(event) || undefined,
       });
-  if (lead.assignedTo) {
-    await notifyUsers([String(lead.assignedTo)], organizationId, 'lead_new_inquiry', template.title, template.message, metadata);
-  } else {
-    await notifyOrgAdmins(organizationId, 'lead_new_inquiry', template.title, template.message, metadata);
-  }
+  await notifyLeadPeople({
+    organizationId,
+    leadId: lead._id,
+    type: 'lead_new_inquiry',
+    title: template.title,
+    message: template.message,
+    metadata,
+    topicText: inquiryTextOf(event),
+  });
   emitToOrg(organizationId, 'lead:update', { _id: String(lead._id), leadId: String(lead._id) });
 }
 

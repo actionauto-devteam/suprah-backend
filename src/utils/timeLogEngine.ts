@@ -407,7 +407,8 @@ export interface IdlePeriod {
 export const buildIdleLog = (
   logs: TimeLogEntry[],
   activityIntervals: ActivityIntervalLike[],
-  tzOffsetMinutes: TzSpec = 0
+  tzOffsetMinutes: TzSpec = 0,
+  liveTrackingStartMs: number | null = null
 ): IdlePeriod[] => {
   const sessions = buildSessions(logs);
   const breaks = buildBreakSessions(logs);
@@ -427,6 +428,9 @@ export const buildIdleLog = (
       .map((ai) => ({ start: new Date(ai.startAt).getTime(), end: new Date(ai.endAt).getTime() }))
       .filter((ai) => ai.start < sessionEnd && ai.end > sessionStart);
     if (sessionIntervals.length === 0) continue; // no tray data for this session — skip, not "all idle"
+    if (!session.out && liveTrackingStartMs !== null && liveTrackingStartMs < sessionEnd) {
+      sessionIntervals.push({ start: liveTrackingStartMs, end: sessionEnd });
+    }
 
     const sessionBreaks = breaks
       .map((b) => ({ start: b.in.getTime(), end: b.out ? b.out.getTime() : Date.now() }))

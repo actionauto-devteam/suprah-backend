@@ -33,6 +33,7 @@ import SmsOptOut from '../src/models/SmsOptOut.model';
 import EmailOptOut from '../src/models/EmailOptOut.model';
 import WebChatSession from '../src/models/WebChatSession.model';
 import WebChatMessage from '../src/models/WebChatMessage.model';
+import LeadHandlingEvent from '../src/models/LeadHandlingEvent.model';
 import { Conversation, CommunicationMessage } from '../src/models/communication.model';
 import { normalizeIdentityPhone, normalizeIdentityEmail } from '../src/utils/contactIdentity';
 import { handleInboundSms } from '../src/services/communication.service';
@@ -210,6 +211,7 @@ describe('Real-DB proof: technical-incident hardening (local dev MongoDB only)',
     await CommunicationMessage.collection.deleteMany({ orgId: { $in: ids } });
     await WebChatSession.collection.deleteMany({ organizationId: { $in: ids.map(String) } });
     await WebChatMessage.collection.deleteMany({ organizationId: { $in: ids.map(String) } });
+    await LeadHandlingEvent.collection.deleteMany({ organizationId: { $in: ids.map(String) } });
     await AiAgentTask.collection.deleteMany({ organizationId: { $in: ids } });
     await AiAgentLog.collection.deleteMany({ organizationId: { $in: ids } });
     await AiTechnicalAlertState.collection.deleteMany({ organizationId: { $in: ids.map(String) } });

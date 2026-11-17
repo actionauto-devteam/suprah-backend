@@ -11,12 +11,26 @@ import { notifyLeadMessage, notifyLeadMessageUnlessHandoff, leadDisplayName } fr
 import Notification from '../src/models/Notification.model';
 import { notificationTemplates } from '../src/utils/notificationTemplates';
 import { NOTIFICATION_TYPES } from '../src/constants/notificationTypes';
+import User from '../src/models/User.model';
+import Lead from '../src/models/lead.model';
 
 const orgId = String(new mongoose.Types.ObjectId());
 const repId = String(new mongoose.Types.ObjectId());
 const old = new Date(Date.now() - 3 * 86400000);
 
+async function saved<T extends Record<string, any>>(lead: T): Promise<T> {
+  await Lead.collection.insertOne({ organizationId: new mongoose.Types.ObjectId(orgId), status: 'New', ...lead } as any);
+  return lead;
+}
+
 describe('Desktop and bell notices for customer texts and emails', () => {
+  beforeAll(async () => {
+    await User.collection.insertOne({ _id: new mongoose.Types.ObjectId(repId), organizationId: new mongoose.Types.ObjectId(orgId), name: 'Riley Rep', email: `riley-${repId}@notice.test`, role: 'employee', isActive: true } as any);
+  });
+  afterAll(async () => {
+    await User.collection.deleteMany({ organizationId: new mongoose.Types.ObjectId(orgId) });
+    await Lead.collection.deleteMany({ organizationId: new mongoose.Types.ObjectId(orgId) });
+  });
   beforeEach(() => jest.clearAllMocks());
 
   it('is a registered notification type with a plain title and a short preview', () => {
@@ -29,7 +43,7 @@ describe('Desktop and bell notices for customer texts and emails', () => {
   });
 
   it('goes to the rep assigned to the lead, and opens that lead', async () => {
-    const lead = { _id: new mongoose.Types.ObjectId(), firstName: 'Jordan', lastName: 'Lee', phone: '+18015550161', assignedTo: repId, createdAt: old };
+    const lead = await saved({ _id: new mongoose.Types.ObjectId(), firstName: 'Jordan', lastName: 'Lee', phone: '+18015550161', assignedTo: new mongoose.Types.ObjectId(repId), createdAt: old });
     expect(await notifyLeadMessage(orgId, lead, 'sms', 'Is the Tacoma still there?')).toBe(true);
     expect(mockNotifyUsers).toHaveBeenCalledWith([repId], orgId, 'lead_message', 'New text from Jordan Lee', 'Is the Tacoma still there?', expect.objectContaining({ route: `/crm/leads?leadId=${lead._id}`, pushTag: `lead-message-${lead._id}`, channel: 'sms' }));
     expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
@@ -56,7 +70,7 @@ describe('Desktop and bell notices for customer texts and emails', () => {
   });
 
   it('a text while the AI is paused for a human still notifies the rep, unless the customer-waiting notice for that lead just went out', async () => {
-    const lead = { _id: new mongoose.Types.ObjectId(), firstName: 'Casey', lastName: 'Park', assignedTo: repId, createdAt: old };
+    const lead = await saved({ _id: new mongoose.Types.ObjectId(), firstName: 'Casey', lastName: 'Park', assignedTo: new mongoose.Types.ObjectId(repId), createdAt: old });
     expect(await notifyLeadMessageUnlessHandoff(orgId, lead, 'sms', 'Hello? Anyone there?')).toBe(true);
     expect(mockNotifyUsers).toHaveBeenCalledWith([repId], orgId, 'lead_message', 'New text from Casey Park', 'Hello? Anyone there?', expect.any(Object));
     mockNotifyUsers.mockClear();
@@ -74,7 +88,7 @@ describe('Desktop and bell notices for customer texts and emails', () => {
 
   it('never breaks message handling when the notice fails', async () => {
     mockNotifyUsers.mockRejectedValueOnce(new Error('down'));
-    const lead = { _id: new mongoose.Types.ObjectId(), firstName: 'Jordan', assignedTo: repId, createdAt: old };
+    const lead = await saved({ _id: new mongoose.Types.ObjectId(), firstName: 'Jordan', assignedTo: new mongoose.Types.ObjectId(repId), createdAt: old });
     await expect(notifyLeadMessage(orgId, lead, 'sms', 'hi')).resolves.toBe(false);
   });
 });

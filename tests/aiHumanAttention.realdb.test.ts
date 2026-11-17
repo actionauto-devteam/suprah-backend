@@ -22,6 +22,7 @@ import AiAgentLog from '../src/models/AiAgentLog.model';
 import Notification from '../src/models/Notification.model';
 import WebChatSession from '../src/models/WebChatSession.model';
 import WebChatMessage from '../src/models/WebChatMessage.model';
+import LeadHandlingEvent from '../src/models/LeadHandlingEvent.model';
 import SmsOptOut from '../src/models/SmsOptOut.model';
 import Appointment from '../src/models/Appointment.model';
 import AiAgentCoachingRule from '../src/models/AiAgentCoachingRule.model';
@@ -121,7 +122,7 @@ afterAll(async () => {
   for (const model of [Organization, User, CrmUser, CrmLeadGroup, Lead] as any[]) {
     await model.collection.deleteMany(model === Organization ? { _id: { $in: [ids.org, ids.other] } } : { organizationId: { $in: orgs } });
   }
-  for (const model of [AiAgentTask, AiAgentLog, Notification, WebChatSession, WebChatMessage, SmsOptOut, Appointment, AiAgentCoachingRule, AiTechnicalAlertState] as any[]) {
+  for (const model of [AiAgentTask, AiAgentLog, Notification, WebChatSession, WebChatMessage, SmsOptOut, Appointment, AiAgentCoachingRule, AiTechnicalAlertState, LeadHandlingEvent] as any[]) {
     await model.collection.deleteMany({ organizationId: { $in: orgs } });
   }
   await Conversation.deleteMany({ orgId: { $in: orgs } });

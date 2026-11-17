@@ -14,6 +14,7 @@ export interface LeadIntakeDecisionInput {
   contextLead?: LeadAssociationCandidate | null;
   lookupComplete: boolean;
   policy: LeadIntakePolicy;
+  phoneVerified?: boolean;
 }
 
 export interface LeadIntakeDecision {
@@ -101,6 +102,10 @@ export function decideLeadIntake(input: LeadIntakeDecisionInput): LeadIntakeDeci
 
   if (open.length === 1) return append(open[0].leadId, 'single_active_lead');
   if (open.length > 1) return append([...open].sort(newestFirst)[0].leadId, 'newest_active_lead');
+  const confirmedChats = input.phoneVerified
+    ? separate.filter((candidate) => candidate.lifecycle === 'active' && candidate.matchedBy.includes('phone'))
+    : [];
+  if (confirmedChats.length) return append([...confirmedChats].sort(newestFirst)[0].leadId, 'phone_confirmed_chat');
   if (previous.length) return create('previous_lead_finished');
   if (separate.length) return create('contact_conflict_separate_lead');
   return create('no_matching_lead');

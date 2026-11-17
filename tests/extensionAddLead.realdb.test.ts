@@ -19,7 +19,7 @@ jest.mock('../src/services/activity.service', () => ({
 
 import mongoose from 'mongoose';
 import Lead from '../src/models/lead.model';
-import { notifyOrgAdmins } from '../src/utils/safeNotification';
+import { notifyOrgAdmins, notifyUsers } from '../src/utils/safeNotification';
 import activityService from '../src/services/activity.service';
 import { createExtensionLead, lookupLeadsByName, lookupLeadsByPhone, nameLookupConditions } from '../src/services/crmExtension.service';
 
@@ -66,6 +66,7 @@ describe('Real-DB: add a customer to Suprah CRM from the Chrome extension (local
   beforeEach(() => {
     emitted.length = 0;
     (notifyOrgAdmins as jest.Mock).mockClear();
+    (notifyUsers as jest.Mock).mockClear();
     (activityService.createActivity as jest.Mock).mockClear();
   });
 
@@ -106,11 +107,8 @@ describe('Real-DB: add a customer to Suprah CRM from the Chrome extension (local
     expect(await mongoose.connection.collection('communicationmessages').countDocuments({ orgId })).toBe(0);
     expect(result.lookup.total).toBe(1);
     expect(result.lookup.matches[0]).toMatchObject({ id: result.leadId, name: 'Madelyn Wahlen', assignedTo: 'Robin Tester', location: 'Lehi', vehicle: '2025 Honda Accord', noteCount: 1 });
-    expect(notifyOrgAdmins).toHaveBeenCalledTimes(1);
-    const [notifyOrg, type, , message, metadata, excluded] = (notifyOrgAdmins as jest.Mock).mock.calls[0];
-    expect([notifyOrg, type, excluded]).toEqual([ORG, 'new_lead', String(staffUserId)]);
-    expect(message).toContain('Madelyn Wahlen via the Chrome extension');
-    expect(metadata).toMatchObject({ leadId: result.leadId, source: 'Manual Entry' });
+    expect(notifyOrgAdmins).not.toHaveBeenCalled();
+    expect(notifyUsers).not.toHaveBeenCalled();
     expect(activityService.createActivity).toHaveBeenCalledWith(expect.objectContaining({ title: 'Lead added from the Chrome extension', metadata: expect.objectContaining({ site: 'actionauto.autodealerscloud.com' }) }));
     expect(emitted).toEqual([{ room: expect.stringContaining(ORG), event: 'lead:new' }]);
   });

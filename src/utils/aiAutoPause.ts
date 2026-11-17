@@ -1,6 +1,7 @@
 import { Conversation } from '../models/communication.model';
 import WebChatSession from '../models/WebChatSession.model';
 import { resolveAiAgentSettings } from '../services/aiAgent.service';
+import { recordLeadHandling } from '../services/leadHandling.service';
 import { emitToOrg } from './socketEmitter';
 import logger from './logger';
 
@@ -38,6 +39,15 @@ export async function recordHumanTakeover(input: RecordHumanTakeoverInput): Prom
           paused: true,
           pausedBy: pausedBy.name,
         });
+        if (input.pausedBy?.userId) {
+          await recordLeadHandling({
+            organizationId: input.organizationId,
+            leadId: input.leadId,
+            action: 'took_over',
+            channel: 'webchat',
+            actor: pausedBy,
+          });
+        }
       }
       return;
     }

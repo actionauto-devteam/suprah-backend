@@ -19,6 +19,7 @@ import type { KnowledgeAnswer } from './aiKnowledgeRuntime.service';
 import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import { isContactRestrictedError } from './contactRestriction.service';
 import { buildContextualFallback, FallbackKind, GENERIC_FALLBACK_MESSAGES } from '../utils/aiFallbackMessage';
+import { AI_HANDOFF_MARKER_TOPIC_LIST, AiHandoffTopic, normalizeAiHandoffTopic } from '../constants/aiHandoffTopics';
 import {
   buildClarifyingQuestion,
   lastAiMessageWasClarifyingQuestion,
@@ -102,12 +103,15 @@ function formatTranscript(agentName: string, transcript: AiAgentTranscriptEntry[
 const HANDOFF_MARKER_PATTERN = /\s*\[\[HANDOFF:\s*([^\]]*)\]\]\s*$/i;
 const MILESTONE_MARKER_PATTERN = /\s*\[\[MILESTONE:\s*([^\]]*)\]\]\s*$/i;
 
-function parseAlexMarkers(raw: string): { cleaned: string; handoffReason?: string; milestoneNote?: string } {
+function parseAlexMarkers(raw: string): { cleaned: string; handoffReason?: string; handoffTopic?: AiHandoffTopic; milestoneNote?: string } {
   const handoffMatch = raw.match(HANDOFF_MARKER_PATTERN);
   if (handoffMatch) {
     const cleaned = raw.slice(0, handoffMatch.index).trim();
-    const reason = handoffMatch[1].trim();
-    return { cleaned, handoffReason: reason || 'Needs human follow-up' };
+    const body = handoffMatch[1].trim();
+    const split = body.match(/^([a-z][a-z _-]{1,30}?)\s*\|\s*([\s\S]*)$/i);
+    const topic = split ? normalizeAiHandoffTopic(split[1]) : null;
+    const reason = topic && split ? split[2].trim() : body;
+    return { cleaned, handoffReason: reason || 'Needs human follow-up', ...(topic ? { handoffTopic: topic } : {}) };
   }
 
   const milestoneMatch = raw.match(MILESTONE_MARKER_PATTERN);
@@ -123,6 +127,7 @@ function parseAlexMarkers(raw: string): { cleaned: string; handoffReason?: strin
 export interface GenerateAlexReplyResult {
   text: string | null;
   handoffReason?: string;
+  handoffTopic?: AiHandoffTopic;
   milestoneNote?: string;
   error?: string;
 }
@@ -205,7 +210,8 @@ export async function generateAlexReply(opts: {
     ...(opts.draftFor ? [] : ['Do not fabricate a human identity or impersonate an employee. Identity concerns and requests for a human are escalated by the application without an assistant reply.']),
     ...disclosureLines,
     'Reply in the same language the customer is using (including Spanish) — this applies to your introduction too, when one is called for.',
-    'If the customer needs something you cannot resolve yourself — confirming a vehicle is physically on the lot right now, a walk-around video, a callback, financing or credit approval help, a price negotiation or approval, a shipping or delivery quote, coordinating an appointment that needs a specific person, booking something that needs a real person, or anything else you are unsure of — say warmly and specifically what you will confirm and that you will follow up, then on a new line at the very end write exactly: [[HANDOFF: <short reason>]]',
+    'If the customer needs something you cannot resolve yourself — confirming a vehicle is physically on the lot right now, a walk-around video, a callback, financing or credit approval help, a price negotiation or approval, a shipping or delivery quote, coordinating an appointment that needs a specific person, booking something that needs a real person, or anything else you are unsure of — say warmly and specifically what you will confirm and that you will follow up, then on a new line at the very end write exactly: [[HANDOFF: <topic> | <short reason>]]',
+    `For <topic>, write the one word that best fits what a person needs to handle: ${AI_HANDOFF_MARKER_TOPIC_LIST}.`,
     'Only include that [[HANDOFF: ...]] marker when a human genuinely needs to follow up — never include it for a normal, answerable message.',
     'When you just achieved a concrete positive outcome in this reply — booked an appointment/test drive, confirmed vehicle availability, or got the customer to agree to a specific next step — on a new line at the very end write exactly: [[MILESTONE: <short description>]]',
     'Only one of [[HANDOFF: ...]] or [[MILESTONE: ...]] should ever appear, never both, and never for routine replies.',
@@ -256,11 +262,11 @@ export async function generateAlexReply(opts: {
       return { text: null, error: `${opts.agentName} didn't write anything usable that time.` };
     }
 
-    const { cleaned, handoffReason, milestoneNote } = parseAlexMarkers(raw);
+    const { cleaned, handoffReason, handoffTopic, milestoneNote } = parseAlexMarkers(raw);
     if (!cleaned) {
-      return { text: null, handoffReason, error: `${opts.agentName} didn't write anything usable that time.` };
+      return { text: null, handoffReason, handoffTopic, error: `${opts.agentName} didn't write anything usable that time.` };
     }
-    return { text: cleaned, handoffReason, milestoneNote };
+    return { text: cleaned, handoffReason, handoffTopic, milestoneNote };
   } catch (err: any) {
     logger.error({ err }, '[AiAgent] Generation failed');
     return { text: null, error: describeGenerationErrorShared(err, opts.agentName) };
@@ -391,7 +397,8 @@ export async function generateAlexEmailReply(opts: {
     priceInstruction,
     'Never invent or quote monthly payments, financing/lease terms, discounts, incentives, or trade-in values, and never promise a specific vehicle is still physically on the lot — say you will confirm with the team instead.',
     ...approvedAmountLines(opts.approvedAmounts),
-    'If the customer needs something you cannot resolve yourself (a callback, financing approval, a walk-around video, confirming a vehicle is physically on the lot, a price negotiation, a shipping/delivery quote, appointment coordination needing a specific person, or anything else you are unsure of), end your reply on its own new line with [[HANDOFF: <short reason>]].',
+    'If the customer needs something you cannot resolve yourself (a callback, financing approval, a walk-around video, confirming a vehicle is physically on the lot, a price negotiation, a shipping/delivery quote, appointment coordination needing a specific person, or anything else you are unsure of), end your reply on its own new line with [[HANDOFF: <topic> | <short reason>]].',
+    `For <topic>, write the one word that best fits what a person needs to handle: ${AI_HANDOFF_MARKER_TOPIC_LIST}.`,
     'If this reply reflects a genuine milestone (the customer confirmed a test drive, confirmed they want to move forward, or gave a concrete next step), end your reply on its own new line with [[MILESTONE: <short description>]] instead. Never use both markers in the same reply.',
     ...(opts.draftFor
       ? []
@@ -444,7 +451,7 @@ export async function generateAlexEmailReply(opts: {
     }
 
     const parsed = parseAlexMarkers(raw);
-    return { text: parsed.cleaned, handoffReason: parsed.handoffReason, milestoneNote: parsed.milestoneNote };
+    return { text: parsed.cleaned, handoffReason: parsed.handoffReason, handoffTopic: parsed.handoffTopic, milestoneNote: parsed.milestoneNote };
   } catch (err: any) {
     logger.error({ err }, '[AiAgent] Email reply generation failed');
     return { text: null, error: describeGenerationErrorShared(err, opts.agentName) };
@@ -824,7 +831,8 @@ async function regenerateForCoaching(input: {
     'Never invent or quote prices, monthly payments, trade-in values, financing terms, discounts, or incentives, and never promise that a specific vehicle is still available; say you will confirm with the team instead.',
     ...approvedAmountLines(input.approvedAmounts),
     'Do not fabricate a human identity or impersonate an employee. Identity concerns and requests for a human are escalated by the application without an assistant reply.',
-    'If the customer asks for something you genuinely cannot resolve yourself, say warmly and specifically what you will confirm and that you will follow up, then on a new line at the very end write exactly: [[HANDOFF: <short reason>]]',
+    'If the customer asks for something you genuinely cannot resolve yourself, say warmly and specifically what you will confirm and that you will follow up, then on a new line at the very end write exactly: [[HANDOFF: <topic> | <short reason>]]',
+    `For <topic>, write the one word that best fits what a person needs to handle: ${AI_HANDOFF_MARKER_TOPIC_LIST}.`,
     'Relevant active dealership coaching for this situation:',
     ...input.appliedRules.map((rule, index) => `${index + 1}. ${rule.instruction}`),
     'Revise the draft so it follows the selected coaching. If coaching conflicts with hard safety rules, follow the hard safety rules.',
@@ -866,9 +874,9 @@ async function regenerateForCoaching(input: {
     if (!completion) return { text: null, error: `${input.agentName}'s revised reply took too long to generate.` };
     const raw = stripDraftArtifacts(completion?.choices?.[0]?.message?.content || '');
     if (!raw) return { text: null, error: `${input.agentName} didn't write a usable revised reply.` };
-    const { cleaned, handoffReason, milestoneNote } = parseAlexMarkers(raw);
-    if (!cleaned) return { text: null, handoffReason, error: `${input.agentName} didn't write a usable revised reply.` };
-    return { text: cleaned, handoffReason, milestoneNote };
+    const { cleaned, handoffReason, handoffTopic, milestoneNote } = parseAlexMarkers(raw);
+    if (!cleaned) return { text: null, handoffReason, handoffTopic, error: `${input.agentName} didn't write a usable revised reply.` };
+    return { text: cleaned, handoffReason, handoffTopic, milestoneNote };
   } catch (err: any) {
     logger.error({ err }, '[AiAgent] Coaching regeneration failed');
     return { text: null, error: describeGenerationErrorShared(err, input.agentName) };
@@ -963,7 +971,7 @@ export interface AiAgentTurnContext {
   isFirstReply?: boolean;
   phone?: string;
   send: (text: string) => Promise<AiAgentSendResult | void>;
-  notifyHandoff: (reason: string | undefined) => Promise<void>;
+  notifyHandoff: (reason: string | undefined, topic?: AiHandoffTopic) => Promise<void>;
   notifyMilestone?: (note: string) => Promise<void>;
   onCapExceeded: () => Promise<void>;
   isPausedNow?: () => Promise<boolean>;
@@ -1370,7 +1378,10 @@ export async function processAlexTurn(ctx: AiAgentTurnContext): Promise<void> {
   await markAiCoachingUsed(appliedCoachingRuleIds);
 
   if (finalGeneration.handoffReason) {
-    await ctx.notifyHandoff(finalGeneration.handoffReason).catch(() => undefined);
+    const handoff = finalGeneration.handoffTopic
+      ? ctx.notifyHandoff(finalGeneration.handoffReason, finalGeneration.handoffTopic)
+      : ctx.notifyHandoff(finalGeneration.handoffReason);
+    await handoff.catch(() => undefined);
   } else if (finalGeneration.milestoneNote) {
     await ctx.notifyMilestone?.(finalGeneration.milestoneNote).catch(() => undefined);
   }

@@ -17,6 +17,7 @@ import { getSocketIO } from '../utils/socketEmitter';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
 import { buildBreakSessions } from '../utils/timeLogEngine';
+import { getLiveTrackingStartMs, parseIntervalDate, saveActivityInterval } from '../utils/activityInterval.util';
 import { findOpenShiftOnOtherIdentity, otherIdentityShiftMessage } from '../utils/crossIdentityShift.util';
 import { isSeamlesslyResumableNote } from '../constants/autoClockoutNotes';
 import AuditLog from '../models/AuditLog.model';
@@ -631,7 +632,7 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
     endAt: { $gte: startDate },
   }).select('startAt endAt').lean();
 
-  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ);
+  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ, await getLiveTrackingStartMs(actor.id));
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
@@ -742,6 +743,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     isOnShift = false,
     currentIntervalStartAt,
     inputAgeSec,
+    unsentActivitySince,
   } = req.body;
 
   if (!(await checkTrayAccess({
@@ -770,6 +772,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       breakStartedAt: isOnBreak && !wasOnBreak ? new Date() : (isOnBreak ? (existing as any)?.breakStartedAt ?? null : null),
       lastBreakNotifiedAt,
       platform,
+      unsentActivitySince: parseIntervalDate(unsentActivitySince),
       lastSeenAt: new Date(),
       ...(currentIntervalStartAt !== undefined && {
         currentIntervalStartAt: currentIntervalStartAt ? new Date(currentIntervalStartAt) : null,
@@ -790,6 +793,9 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
   const { startAt, endAt } = req.body;
 
   if (!startAt || !endAt) throw new ApiError(400, 'startAt and endAt are required');
+  const start = parseIntervalDate(startAt);
+  const end = parseIntervalDate(endAt);
+  if (!start || !end) throw new ApiError(400, 'startAt and endAt must be valid dates');
   if (!(await checkTrayAccess({
     req,
     userId: actor.id,
@@ -801,8 +807,6 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
     return;
   }
 
-  const start = new Date(startAt);
-  const end = new Date(endAt);
   const durationSeconds = Math.round((end.getTime() - start.getTime()) / 1000);
 
   if (durationSeconds < 30) {
@@ -811,15 +815,12 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
 
   const shiftDate = toLocalDateStr(start, COMPANY_TZ);
 
-  await ActivityInterval.create({
-    userId: actor.id,
-    shiftDate,
-    startAt: start,
-    endAt: end,
-    durationSeconds,
-  });
+  const saved = await saveActivityInterval({ userId: actor.id, shiftDate, start, end });
+  if (saved.outcome === 'duplicate') {
+    return res.json(new ApiResponse(200, { durationSeconds: 0 }, 'Activity interval already saved'));
+  }
 
-  res.json(new ApiResponse(201, { durationSeconds }, 'Activity interval saved'));
+  res.json(new ApiResponse(201, { durationSeconds: saved.durationSeconds }, 'Activity interval saved'));
 });
 
 export default { getMe, timeClock, getShiftState, getMyTimeproof, getMyIdleLog, getResumableShift, resumeShift, postHeartbeat, postActivityInterval };

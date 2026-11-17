@@ -138,17 +138,15 @@ describe('Real-DB: Text Us website widget (local test DB only)', () => {
     expect(JSON.stringify(mockSms.mock.calls[0])).toContain('Mary Ann');
   });
 
-  it('3. first name, last name, a full mobile number and a dealership are required', async () => {
+  it('3. a name and a dealership are required, and a mobile number must be complete when given', async () => {
     const cases: [Record<string, unknown>, string][] = [
-      [{ firstName: '  ' }, 'Please add your first name'],
-      [{ lastName: '' }, 'Please add your last name'],
-      [{ phone: '' }, 'Please enter your mobile number with the area code'],
+      [{ firstName: '  ' }, 'Please add your name'],
       [{ phone: '555-1234' }, 'Please enter your mobile number with the area code'],
+      [{ phone: '', message: '' }, 'Please add your mobile number, your email, or a message'],
       [{ location: '' }, 'Please choose a dealership'],
       [{ location: 'Provo' }, 'Please choose a dealership'],
       [{ location: 'Salt Lake' }, 'Please choose a dealership'],
       [{ email: 'not-an-email' }, 'Please enter a valid email address'],
-      [{ message: '' }, 'Please type a message'],
       [{ message: 'x'.repeat(990), vehicleInterest: '2021 Toyota Tacoma' }, 'Messages are limited to 1000 characters'],
     ];
     for (const [body, message] of cases) {
@@ -186,5 +184,35 @@ describe('Real-DB: Text Us website widget (local test DB only)', () => {
     expect(lead).toMatchObject({ firstName: 'Rosa', lastName: 'Diaz Lopez', email: 'rosa@example.com', comments: 'Hi there' });
     expect(lead.location ?? null).toBeNull();
     expect(session.location ?? null).toBeNull();
+  });
+
+  it('6. the short form needs only a name plus a mobile number, an email or a message', async () => {
+    const phoneOnly = await textUs({ firstName: 'Jo', lastName: '', message: '', continueByText: true });
+    expect(phoneOnly.status).toBe(201);
+    expect(phoneOnly.body.data.continuedByText).toBe(true);
+    const phoneSession: any = await WebChatSession.findById(phoneOnly.body.data.sessionId).lean();
+    const phoneLead: any = await Lead.findById(phoneSession.leadId).lean();
+    expect(phoneLead).toMatchObject({ firstName: 'Jo', lastName: '', location: 'Lehi', channel: 'sms' });
+    const phoneFirst: any = await WebChatMessage.findOne({ sessionId: phoneSession._id }).lean();
+    expect(phoneFirst.body).toBe('Sent the Text Us form without a message.');
+    expect(mockSms).toHaveBeenCalledTimes(1);
+
+    mockSms.mockClear();
+    const messageOnly = await textUs({ firstName: 'Kim', lastName: '', phone: '', message: 'Do you finance?', continueByText: true });
+    expect(messageOnly.status).toBe(201);
+    expect(messageOnly.body.data.continuedByText).toBe(false);
+    const chatSession: any = await WebChatSession.findById(messageOnly.body.data.sessionId).lean();
+    const chatLead: any = await Lead.findById(chatSession.leadId).lean();
+    expect(chatLead).toMatchObject({ firstName: 'Kim', lastName: '', channel: 'webchat', comments: 'Do you finance?' });
+    expect(chatLead.phone ?? null).toBeNull();
+    expect(chatLead.email ?? null).toBeNull();
+
+    const emailOnly = await textUs({ firstName: 'Lee', lastName: '', phone: '', email: 'lee@example.com', message: '', continueByText: true });
+    expect(emailOnly.status).toBe(201);
+    expect(emailOnly.body.data.continuedByText).toBe(false);
+    const emailSession: any = await WebChatSession.findById(emailOnly.body.data.sessionId).lean();
+    const emailLead: any = await Lead.findById(emailSession.leadId).lean();
+    expect(emailLead).toMatchObject({ firstName: 'Lee', email: 'lee@example.com' });
+    expect(mockSms).not.toHaveBeenCalled();
   });
 });

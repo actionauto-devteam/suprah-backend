@@ -30,6 +30,60 @@ export interface ParsedADFLead {
   parsedContent: string;
   channel: 'email' | 'sms' | 'adf' | 'phone' | 'web';
   rawFields: Record<string, string>;
+  coApplicants?: ADFContact[];
+}
+
+export interface ADFContact {
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+}
+
+function toNodeList(value: any): any[] {
+  if (Array.isArray(value)) return value;
+  return value === undefined || value === null ? [] : [value];
+}
+
+function readContact(node: any): ADFContact {
+  let firstName = '';
+  let lastName = '';
+  const name = node?.name;
+  if (name) {
+    if (Array.isArray(name)) {
+      const first = name.find((n: any) => n?.part === 'first');
+      const last = name.find((n: any) => n?.part === 'last');
+      firstName = first?._ ? String(first._) : '';
+      lastName = last?._ ? String(last._) : '';
+      if (!firstName && !lastName) {
+        const parts = extractText(name).split(' ');
+        firstName = parts[0] || '';
+        lastName = parts.slice(1).join(' ');
+      }
+    } else if (name.part === 'first') {
+      firstName = extractText(name);
+    } else {
+      const parts = extractText(name).split(' ');
+      firstName = parts[0] || '';
+      lastName = parts.slice(1).join(' ');
+    }
+  }
+
+  let email = '';
+  if (node?.email) email = extractText(Array.isArray(node.email) ? node.email[0] : node.email);
+
+  let phone = '';
+  if (node?.phone) {
+    phone = Array.isArray(node.phone)
+      ? extractText(node.phone.find((p: any) => p?.type === 'phone') || node.phone[0])
+      : extractText(node.phone);
+  }
+
+  return { firstName, lastName, email, phone };
+}
+
+function hasContactDetails(contact: ADFContact): boolean {
+  return Boolean(contact.firstName || contact.lastName || contact.email || contact.phone);
 }
 
 function extractProspectInquiryId(node: any): { value: string; source: string } | null {
@@ -266,7 +320,25 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
     const prospect = result?.adf?.prospect || result?.prospect;
     if (!prospect) return null;
 
-    const customer = prospect.customer?.contact || prospect.customer;
+    const customerNodes = toNodeList(prospect.customer);
+    const contacts = customerNodes.flatMap((node: any) => {
+      const inner = toNodeList(node?.contact);
+      return inner.length ? inner : [node];
+    });
+    const marked = contacts.findIndex((node: any) => String(node?.primarycontact ?? '').trim() === '1');
+    const filled = contacts.findIndex((node: any) => hasContactDetails(readContact(node)));
+    const primaryIndex = marked >= 0 ? marked : Math.max(filled, 0);
+    const customer = contacts[primaryIndex];
+    const coApplicants = contacts
+      .filter((_: any, index: number) => index !== primaryIndex)
+      .map(readContact)
+      .filter(hasContactDetails)
+      .map((person: ADFContact) => ({
+        firstName: cleanString(decodeHtmlEntities(person.firstName)),
+        lastName: cleanString(decodeHtmlEntities(person.lastName)),
+        email: cleanString(person.email),
+        phone: cleanString(person.phone),
+      }));
     /*
      * FIX: <vehicle> may be an ARRAY (multi-vehicle ADF from Autotrader /
      * Cars.com). Previously an array here silently broke every vehicle
@@ -281,48 +353,11 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
     const vendor = prospect.vendor;
     const provider = prospect.provider;
 
-    // --- Extract name ---
-    let firstName = 'Unknown';
-    let lastName = '';
-    if (customer?.name) {
-      if (Array.isArray(customer.name)) {
-        firstName = customer.name.find((n: any) => n.part === 'first')?._ ||
-                    customer.name.find((n: any) => n.part === 'first') || firstName;
-        lastName = customer.name.find((n: any) => n.part === 'last')?._ ||
-                   customer.name.find((n: any) => n.part === 'last') || '';
-      } else if (customer.name.part === 'full') {
-        const parts = extractText(customer.name).split(' ');
-        firstName = parts[0] || firstName;
-        lastName = parts.slice(1).join(' ');
-      } else if (customer.name.part === 'first') {
-        firstName = extractText(customer.name);
-      } else {
-        const fullName = extractText(customer.name);
-        const parts = fullName.split(' ');
-        firstName = parts[0] || firstName;
-        lastName = parts.slice(1).join(' ');
-      }
-    }
-
-    // --- Extract contact info ---
-    let email = '';
-    let phone = '';
-
-    if (customer?.email) {
-      email = Array.isArray(customer.email)
-        ? extractText(customer.email[0])
-        : extractText(customer.email);
-    }
-
-    if (customer?.phone) {
-      if (Array.isArray(customer.phone)) {
-        // Prefer 'phone' type, fall back to first
-        const preferredPhone = customer.phone.find((p: any) => p.type === 'phone') || customer.phone[0];
-        phone = extractText(preferredPhone);
-      } else {
-        phone = extractText(customer.phone);
-      }
-    }
+    const primary = readContact(customer);
+    const firstName = primary.firstName || 'Unknown';
+    const lastName = primary.lastName;
+    const email = primary.email;
+    const phone = primary.phone;
 
     // --- Extract vehicle info ---
     const vehicleInfo = {
@@ -356,8 +391,8 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
      */
     let comments = '';
     const commentCandidates: any[] = [
-      prospect.customer?.comments,
-      prospect.customer?.contact?.comments,
+      customerNodes[0]?.comments,
+      customer?.comments,
       prospect.comments,
       ...vehicles.map((v: any) => v?.comments),
     ];
@@ -397,7 +432,7 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
 
     // --- Build clean, human-readable content ---
     const parsedContent = buildReadableContent({
-      firstName, lastName, email, phone,
+      firstName, lastName, email, phone, coApplicants,
       vehicle: vehicleInfo, comments,
       source: sourceName, vendor: vendorName,
       requestDate, rawFields,
@@ -420,6 +455,7 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
       parsedContent,
       channel: 'adf',
       rawFields,
+      ...(coApplicants.length ? { coApplicants } : {}),
     };
   } catch (err) {
     logger.error({ err, xmlData }, '[ADF Parser] Failed to parse ADF XML');
@@ -435,6 +471,7 @@ function buildReadableContent(data: {
   lastName: string;
   email: string;
   phone: string;
+  coApplicants?: ADFContact[];
   vehicle: ParsedADFLead['vehicle'];
   comments: string;
   source: string;
@@ -467,6 +504,15 @@ function buildReadableContent(data: {
   }
   lines.push('');
 
+  for (const person of data.coApplicants || []) {
+    lines.push('— Co-applicant —');
+    const name = `${person.firstName} ${person.lastName}`.trim();
+    if (name) lines.push(`Name: ${name}`);
+    if (person.email) lines.push(`Email: ${person.email}`);
+    if (person.phone) lines.push(`Phone: ${person.phone}`);
+    lines.push('');
+  }
+
   // Vehicle
   const vehicleDesc = [v.year, v.make, v.model, v.trim].filter(Boolean).join(' ');
   if (vehicleDesc) {
@@ -496,7 +542,7 @@ function buildReadableContent(data: {
     if (data.requestDate) {
       try {
         const d = new Date(data.requestDate);
-        lines.push(`Request Date: ${d.toLocaleString()}`);
+        lines.push(`Request Date: ${d.toLocaleString('en-US', { timeZone: 'America/Denver' })}`);
       } catch {
         lines.push(`Request Date: ${data.requestDate}`);
       }

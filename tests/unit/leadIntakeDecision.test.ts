@@ -125,4 +125,26 @@ describe('decideLeadIntake', () => {
     expect(decision).toMatchObject({ action: 'append', leadId: 'real' });
     expect(decide([lead('chat', { unverified: true })])).toMatchObject({ action: 'create' });
   });
+
+  it('lets a text or call from the same phone join the open chat lead when there is no confirmed lead', () => {
+    const chat = lead('chat', { unverified: true, matchedBy: ['phone'] });
+    expect(decide([chat], { phoneVerified: true })).toMatchObject({ action: 'append', leadId: 'chat', reason: 'phone_confirmed_chat' });
+    expect(decide([chat])).toMatchObject({ action: 'create' });
+  });
+
+  it('still prefers the confirmed open lead over the chat lead', () => {
+    const decision = decide([lead('chat', { unverified: true, matchedBy: ['phone'] }), lead('real')], { phoneVerified: true });
+    expect(decision).toMatchObject({ action: 'append', leadId: 'real', reason: 'single_active_lead' });
+  });
+
+  it('never uses a closed chat lead or one that only shares the email', () => {
+    expect(decide([closed('chat', { unverified: true, matchedBy: ['phone'] })], { phoneVerified: true })).toMatchObject({ action: 'create' });
+    expect(decide([lead('chat', { unverified: true, matchedBy: ['email'] })], { phoneVerified: true })).toMatchObject({ action: 'create' });
+  });
+
+  it('joins the newest open chat lead when the phone has several', () => {
+    const older = lead('older', { unverified: true, matchedBy: ['phone'], createdAt: new Date('2026-11-01T00:00:00Z') });
+    const newer = lead('newer', { unverified: true, matchedBy: ['phone'], createdAt: new Date('2026-11-10T00:00:00Z') });
+    expect(decide([older, newer], { phoneVerified: true })).toMatchObject({ action: 'append', leadId: 'newer', reason: 'phone_confirmed_chat' });
+  });
 });

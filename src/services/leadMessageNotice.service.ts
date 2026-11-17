@@ -1,7 +1,8 @@
-import mongoose from 'mongoose';
 import Notification from '../models/Notification.model';
-import { notifyOrgAdmins, notifyUsers } from '../utils/safeNotification';
+import type { LeadNoticeInput } from './leadNoticeRouting.service';
 import { notificationTemplates } from '../utils/notificationTemplates';
+
+const notifyLeadPeople = async (input: LeadNoticeInput) => (await import('./leadNoticeRouting.service')).notifyLeadPeople(input);
 
 const NEW_LEAD_WINDOW_MS = 60_000;
 const HANDOFF_NOTICE_WINDOW_MS = 2 * 60_000;
@@ -49,9 +50,16 @@ export async function notifyLeadMessage(orgId: unknown, lead: any, channel: 'sms
       route: `/crm/leads?leadId=${lead._id}`,
       pushTag: `lead-message-${lead._id}`,
     };
-    const assigned = lead.assignedTo && mongoose.isValidObjectId(String(lead.assignedTo)) ? String(lead.assignedTo) : '';
-    if (assigned) await notifyUsers([assigned], String(orgId), 'lead_message', title, message, metadata);
-    else await notifyOrgAdmins(String(orgId), 'lead_message', title, message, metadata);
+    await notifyLeadPeople({
+      organizationId: orgId,
+      leadId: lead._id,
+      type: 'lead_message',
+      title,
+      message,
+      metadata,
+      topicText: preview,
+      tagText: title,
+    });
     return true;
   } catch (error) {
     console.error('[comm] Customer message notification failed', error);

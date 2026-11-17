@@ -45,6 +45,7 @@ import notificationService from '../services/notification.service';
 import sharp from 'sharp';
 import logger from '../utils/logger';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
+import { getLiveTrackingStartMs, looksLikeWrongClientClock, parseIntervalDate, saveActivityInterval } from '../utils/activityInterval.util';
 
 const BREAK_LIMIT_SECONDS = 3600;
 const BREAK_ADMIN_NOTIFY_SECONDS = BREAK_LIMIT_SECONDS + 5 * 60;
@@ -225,7 +226,7 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
   }).select('startAt endAt').lean();
 
   const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
-  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ);
+  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ, await getLiveTrackingStartMs(user._id));
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
@@ -580,7 +581,7 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
   }).select('startAt endAt').lean();
 
   const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
-  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ);
+  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ, await getLiveTrackingStartMs(targetUser._id));
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
@@ -642,7 +643,7 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
   ]);
 
   const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
-  const idlePeriods = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ);
+  const idlePeriods = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ, await getLiveTrackingStartMs(targetUser._id));
   const idleDetected = idleExempt
     ? []
     : diagnosticLogs.filter((l) => l.event === 'idle_detected').map((l) => ({ at: l.timestamp }));
@@ -947,6 +948,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     screenRecordingGranted = null,
     appVersion = null,
     inputAgeSec,
+    unsentActivitySince,
   } = req.body;
 
   if (!(await checkTrayAccess({
@@ -1048,6 +1050,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       screenRecordingGranted,
       lastScreenRecordingNotifiedAt,
       appVersion,
+      unsentActivitySince: parseIntervalDate(unsentActivitySince),
       lastSeenAt: new Date(),
       ...(currentIntervalStartAt !== undefined && {
         currentIntervalStartAt: currentIntervalStartAt ? new Date(currentIntervalStartAt) : null,
@@ -2587,9 +2590,12 @@ export const nudgeEnableNotifications = asyncHandler(async (req: Request, res: R
  */
 export const postActivityInterval = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  const { startAt, endAt } = req.body;
+  const { startAt, endAt, resent } = req.body;
 
   if (!startAt || !endAt) throw new ApiError(400, 'startAt and endAt are required');
+  const start = parseIntervalDate(startAt);
+  const end = parseIntervalDate(endAt);
+  if (!start || !end) throw new ApiError(400, 'startAt and endAt must be valid dates');
   if (!(await checkTrayAccess({
     req,
     userId: user._id,
@@ -2601,28 +2607,22 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
     return;
   }
 
-  const start = new Date(startAt);
-  const end = new Date(endAt);
   const durationSeconds = Math.round((end.getTime() - start.getTime()) / 1000);
 
   if (durationSeconds < 30) {
     return res.json(new ApiResponse(200, { durationSeconds: 0 }, 'Interval too short, skipped'));
   }
 
-  const CLOCK_DRIFT_TOLERANCE_MS = 60 * 60 * 1000;
   const serverNow = new Date();
-  const clientClockLooksWrong = Math.abs(serverNow.getTime() - end.getTime()) > CLOCK_DRIFT_TOLERANCE_MS;
+  const clientClockLooksWrong = looksLikeWrongClientClock(end, serverNow, resent === true);
   const shiftDate = toLocalDateStr(clientClockLooksWrong ? serverNow : start, COMPANY_TZ);
 
-  await ActivityInterval.create({
-    userId: user._id,
-    shiftDate,
-    startAt: start,
-    endAt: end,
-    durationSeconds,
-  });
+  const saved = await saveActivityInterval({ userId: user._id, shiftDate, start, end });
+  if (saved.outcome === 'duplicate') {
+    return res.json(new ApiResponse(200, { durationSeconds: 0 }, 'Activity interval already saved'));
+  }
 
-  res.json(new ApiResponse(201, { durationSeconds }, 'Activity interval saved'));
+  res.json(new ApiResponse(201, { durationSeconds: saved.durationSeconds }, 'Activity interval saved'));
 });
 
 /**

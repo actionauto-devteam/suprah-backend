@@ -32,6 +32,7 @@ export interface IAgentHeartbeat extends Document {
   activeTrayId: string | null;
   activeTraySegmentId: string | null;
   standbyAlertKey: string | null;
+  unsentActivitySince: Date | null;
   lastSeenAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -112,6 +113,10 @@ const AgentHeartbeatSchema = new Schema<IAgentHeartbeat>(
     },
     standbyAlertKey: {
       type: String,
+      default: null,
+    },
+    unsentActivitySince: {
+      type: Date,
       default: null,
     },
     lastSeenAt: {

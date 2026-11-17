@@ -2,6 +2,12 @@ const mockConvUpdate = jest.fn();
 const mockSessionUpdate = jest.fn();
 const mockResolveSettings = jest.fn();
 const mockEmit = jest.fn();
+const mockRecordHandling = jest.fn();
+
+jest.mock('../../src/services/leadHandling.service', () => ({
+  __esModule: true,
+  recordLeadHandling: mockRecordHandling,
+}));
 
 jest.mock('../../src/models/communication.model', () => ({
   __esModule: true,
@@ -81,6 +87,20 @@ describe('recordHumanTakeover', () => {
     expect(update.$set.aiAutoPausedUntil).toBeUndefined();
     expect(update.$unset).toEqual({ aiAutoPausedUntil: '' });
     expect(update.$inc).toEqual({ aiResponseVersion: 1 });
+    expect(mockRecordHandling).toHaveBeenCalledWith({
+      organizationId: 'org-1',
+      leadId: 'lead-1',
+      action: 'took_over',
+      channel: 'webchat',
+      actor: { userId: 'staff-1', name: 'Sam' },
+    });
+  });
+
+  it('keeps no take-over record when the web chat was already paused or nobody is named', async () => {
+    mockSessionUpdate.mockResolvedValueOnce({ modifiedCount: 0 });
+    await recordHumanTakeover({ kind: 'webchat', organizationId: 'org-1', sessionId: 'sess-1', leadId: 'lead-1', pausedBy: { userId: 'staff-1', name: 'Sam' } });
+    await recordHumanTakeover({ kind: 'webchat', organizationId: 'org-1', sessionId: 'sess-1', leadId: 'lead-1' });
+    expect(mockRecordHandling).not.toHaveBeenCalled();
   });
 
   it('records the web chat takeover even when Alex is currently turned off, so it never auto-resumes later', async () => {

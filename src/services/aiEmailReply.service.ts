@@ -17,8 +17,9 @@ import {
   screenAiHumanAttention,
   claimAiGeneration,
 } from './aiHumanAttention.service';
-import { createAiAgentTaskAndNotify } from '../utils/aiAgentTask';
-import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from '../utils/leadNote';
+import { addLeadNoteAndNotify } from '../utils/leadNote';
+import { writeAiHandoff } from './aiHandoffRouting.service';
+import { guessAiHandoffTopic } from '../constants/aiHandoffTopics';
 import { sendLeadReplyEmail, fetchGmailThreadMessages } from '../controllers/lead.controller';
 import { resolveCurrentVehicleAndPrice } from './aiReplyContext.service';
 import { describeVehicleInterest } from './vehicleInterest.service';
@@ -171,36 +172,16 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
           beforeDispatch: emailDispatchGuard(orgId, lead._id),
           requireVerifiedRecipient: true,
         });
-        const taskResult = await createAiAgentTaskAndNotify({
+        await writeAiHandoff({
           organizationId: String(orgId),
           leadId: String(lead._id),
           channel: 'email',
-          question: reason,
+          reason,
+          topic: guessAiHandoffTopic(text),
           agentName,
           customerName,
-          assignedTo: lead.assignedTo ? String(lead.assignedTo) : null,
-        }).catch(() => null);
-        try {
-          const mentionedUserIds = lead.assignedTo ? [String(lead.assignedTo)] : [];
-          let mentionedGroupIds: string[] = [];
-          if (!lead.assignedTo) {
-            const orgMeta = await Organization.findById(orgId).select('metadata').lean();
-            const fallbackGroupId = (orgMeta?.metadata as any)?.aiHandoffFallbackGroupId;
-            if (fallbackGroupId) mentionedGroupIds = [String(fallbackGroupId)];
-          }
-          await addLeadNoteAndNotify({
-            organizationId: String(orgId),
-            leadId: String(lead._id),
-            text: reason,
-            authorType: 'ai',
-            authorName: agentName,
-            mentionedUserIds,
-            mentionedGroupIds,
-            suppressNotification: shouldSuppressHandoffNoteNotification(lead.assignedTo, Boolean((taskResult as any)?.notified)),
-          });
-        } catch (err) {
-          logger.error({ err, leadId: lead._id }, '[AiEmailReply] fallback handoff note failed');
-        }
+          assignedTo: lead.assignedTo,
+        }).catch((err) => logger.error({ err, leadId: lead._id }, '[AiEmailReply] fallback handoff failed'));
       };
 
       if (!generation.text) {
@@ -228,37 +209,16 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
       });
 
       if (generation.handoffReason) {
-        const taskResult = await createAiAgentTaskAndNotify({
+        await writeAiHandoff({
           organizationId: String(orgId),
           leadId: String(lead._id),
           channel: 'email',
-          question: generation.handoffReason,
+          reason: generation.handoffReason,
+          topic: generation.handoffTopic,
           agentName,
           customerName,
-          assignedTo: lead.assignedTo ? String(lead.assignedTo) : null,
-        }).catch(() => null);
-
-        try {
-          const mentionedUserIds = lead.assignedTo ? [String(lead.assignedTo)] : [];
-          let mentionedGroupIds: string[] = [];
-          if (!lead.assignedTo) {
-            const orgMeta = await Organization.findById(orgId).select('metadata').lean();
-            const fallbackGroupId = (orgMeta?.metadata as any)?.aiHandoffFallbackGroupId;
-            if (fallbackGroupId) mentionedGroupIds = [String(fallbackGroupId)];
-          }
-          await addLeadNoteAndNotify({
-            organizationId: String(orgId),
-            leadId: String(lead._id),
-            text: generation.handoffReason || 'Needs human follow-up',
-            authorType: 'ai',
-            authorName: agentName,
-            mentionedUserIds,
-            mentionedGroupIds,
-            suppressNotification: shouldSuppressHandoffNoteNotification(lead.assignedTo, Boolean((taskResult as any)?.notified)),
-          });
-        } catch (err) {
-          logger.error({ err, leadId: lead._id }, '[AiEmailReply] handoff note failed');
-        }
+          assignedTo: lead.assignedTo,
+        }).catch((err) => logger.error({ err, leadId: lead._id }, '[AiEmailReply] handoff failed'));
       } else if (generation.milestoneNote) {
         await addLeadNoteAndNotify({
           organizationId: String(orgId),

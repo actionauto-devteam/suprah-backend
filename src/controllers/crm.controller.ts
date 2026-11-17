@@ -100,6 +100,8 @@ import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
 import { resolveNextEmployeeId } from "../utils/employeeId.util";
 import { invalidateUserCache } from "../utils/cache.util";
+import CrmLeadGroup from "../models/CrmLeadGroup.model";
+import { cleanAiHandoffTopicTeams } from "../constants/aiHandoffTopics";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -403,6 +405,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const aiAgentIdentity = identityFromMetadata(metadata);
   const aiAgentName = aiAgentIdentity.name || "";
   const aiHandoffFallbackGroupId = metadata.aiHandoffFallbackGroupId || "";
+  const aiHandoffTopicTeams = cleanAiHandoffTopicTeams(metadata.aiHandoffTopicTeams);
   const FOLLOWUP_INTERVAL_OPTIONS_HOURS = [24, 48, 72];
   const parsedFollowUpInterval = parseInt(metadata.aiFollowUpIntervalHours, 10);
   const aiFollowUpIntervalHours = FOLLOWUP_INTERVAL_OPTIONS_HOURS.includes(
@@ -427,6 +430,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
         aiAgentEnabled,
         aiAgentName,
         aiHandoffFallbackGroupId,
+        aiHandoffTopicTeams,
         aiFollowUpIntervalHours,
         physicalMailingAddress,
         extensionMessagingEnabled,
@@ -459,6 +463,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     aiAgentEnabled,
     aiAgentName,
     aiHandoffFallbackGroupId,
+    aiHandoffTopicTeams,
     aiFollowUpIntervalHours,
     physicalMailingAddress,
     extensionMessagingEnabled,
@@ -517,6 +522,19 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
       aiHandoffFallbackGroupId || "",
     ).trim();
   }
+  if (aiHandoffTopicTeams !== undefined) {
+    const requested = cleanAiHandoffTopicTeams(aiHandoffTopicTeams);
+    const groupIds = Array.from(new Set(Object.values(requested)));
+    const activeGroups = groupIds.length
+      ? await CrmLeadGroup.find({ _id: { $in: groupIds }, organizationId: orgId, isActive: true }).select("_id").lean()
+      : [];
+    const activeIds = new Set(activeGroups.map((group: any) => String(group._id)));
+    const unknown = groupIds.filter((id) => !activeIds.has(id));
+    if (unknown.length) {
+      throw new ApiError(400, "One of the chosen teams is no longer active. Refresh the page and pick again.");
+    }
+    metadata.aiHandoffTopicTeams = requested;
+  }
   if (aiFollowUpIntervalHours !== undefined) {
     const parsed = parseInt(aiFollowUpIntervalHours, 10);
     metadata.aiFollowUpIntervalHours = [24, 48, 72].includes(parsed)
@@ -547,6 +565,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
         aiAgentEnabled: org.metadata.aiAgentEnabled,
         aiAgentName: org.metadata.aiAgentName,
         aiHandoffFallbackGroupId: org.metadata.aiHandoffFallbackGroupId,
+        aiHandoffTopicTeams: cleanAiHandoffTopicTeams(org.metadata.aiHandoffTopicTeams),
         aiFollowUpIntervalHours: org.metadata.aiFollowUpIntervalHours,
         physicalMailingAddress: org.metadata.physicalMailingAddress,
         extensionMessagingEnabled: org.metadata.extensionMessagingEnabled === true,

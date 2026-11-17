@@ -20,7 +20,7 @@ import { LEAD_SOURCE } from '../constants/leadSource';
 import { firstContactForStaffLead } from '../utils/leadType';
 import { resolveLeadStore } from '../utils/leadStore';
 import { resolveCrmStaff } from '../utils/crmStaff';
-import { notifyOrgAdmins } from '../utils/safeNotification';
+import { notifyLeadPeople } from './leadNoticeRouting.service';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { getSocketIO } from '../utils/socketEmitter';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
@@ -437,13 +437,21 @@ export async function createExtensionLead(orgId: string, crmUser: any, input: Ex
   const customerName = `${firstName} ${lastName}`.trim();
   const vehicleInterest = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ');
   const { title, message } = notificationTemplates.new_lead({ customerName, source: 'the Chrome extension', vehicleInterest: vehicleInterest || undefined });
-  await notifyOrgAdmins(orgId, 'new_lead', title, message, {
+  await notifyLeadPeople({
+    organizationId: orgId,
     leadId,
-    customerName,
-    email: normalizedEmail || undefined,
-    source: LEAD_SOURCE.MANUAL_ENTRY,
-    channel,
-  }, staff.userId || undefined).catch(() => undefined);
+    type: 'new_lead',
+    title,
+    message,
+    metadata: {
+      leadId,
+      customerName,
+      email: normalizedEmail || undefined,
+      source: LEAD_SOURCE.MANUAL_ENTRY,
+      channel,
+    },
+    excludeUserId: staff.userId || undefined,
+  }).catch(() => undefined);
   await activityService.createActivity({
     userId: String(crmUser._id),
     organizationId: orgId,
