@@ -23,11 +23,12 @@ import LeadInquiry from '../models/LeadInquiry.model';
 import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
 import { assertLeadOpenForManualSend } from '../utils/closedLeadGuard';
 import { sessionControlToCarry } from '../utils/conversationOwnership';
+import { recordLeadHandling } from '../services/leadHandling.service';
 import { emitToOrg } from '../utils/socketEmitter';
-import { notifyOrgAdmins } from '../utils/safeNotification';
+import { notifyLeadPeople } from '../services/leadNoticeRouting.service';
 import { notificationTemplates } from '../utils/notificationTemplates';
-import { createAiAgentTaskAndNotify } from '../utils/aiAgentTask';
-import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from '../utils/leadNote';
+import { addLeadNoteAndNotify } from '../utils/leadNote';
+import { writeAiHandoff } from '../services/aiHandoffRouting.service';
 import { recordHumanTakeover } from '../utils/aiAutoPause';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import logger from '../utils/logger';
@@ -146,6 +147,7 @@ function isOrgWebchatEnabled(metadata: any): boolean {
 
 const MAX_NAME_PART_LENGTH = 40;
 const MAX_VEHICLE_INTEREST_LENGTH = 80;
+const TEXT_US_NO_MESSAGE = 'Sent the Text Us form without a message.';
 
 async function activeChatLocations(orgId: any): Promise<{ name: string; keys: string[] }[]> {
   const rows = await CrmLocation.find({ organizationId: String(orgId), status: 'active' })
@@ -406,40 +408,18 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
           });
           return { messageId: String(message._id) };
         },
-        notifyHandoff: async (reason) => {
-          const assignedTo = (lead as any)?.assignedTo;
-          const taskResult = await createAiAgentTaskAndNotify({
+        notifyHandoff: async (reason, topic) => {
+          await writeAiHandoff({
             organizationId: String(session.organizationId),
             leadId: String(session.leadId),
             channel: 'webchat',
-            question: reason,
+            reason,
+            topic,
             agentName,
             customerName: session.visitorName || 'A customer',
-            assignedTo: assignedTo ? String(assignedTo) : null,
+            assignedTo: (lead as any)?.assignedTo,
+            noteSuffix: restrictedSession ? DNC_WEBCHAT_HANDOFF_SUFFIX : undefined,
           });
-          try {
-            const mentionedUserIds = assignedTo ? [String(assignedTo)] : [];
-            let mentionedGroupIds: string[] = [];
-            if (!assignedTo) {
-              const org = await Organization.findById(session.organizationId).select('metadata').lean();
-              const fallbackGroupId = (org?.metadata as any)?.aiHandoffFallbackGroupId;
-              if (fallbackGroupId) mentionedGroupIds = [String(fallbackGroupId)];
-            }
-            await addLeadNoteAndNotify({
-              organizationId: String(session.organizationId),
-              leadId: String(session.leadId),
-              text: restrictedSession
-                ? `${reason || 'Needs human follow-up'} ${DNC_WEBCHAT_HANDOFF_SUFFIX}`
-                : reason || 'Needs human follow-up',
-              authorType: 'ai',
-              authorName: agentName,
-              mentionedUserIds,
-              mentionedGroupIds,
-              suppressNotification: shouldSuppressHandoffNoteNotification(assignedTo, Boolean(taskResult?.notified)),
-            });
-          } catch (err) {
-            logger.error({ err }, '[AiAgent] Failed to write handoff note');
-          }
         },
         notifyMilestone: async (note) => {
           try {
@@ -671,11 +651,19 @@ async function createWebchatConversation(input: WebchatConversationInput) {
       source: LEAD_SOURCE.WEBSITE_CHAT,
       vehicleInterest,
     });
-    notifyOrgAdmins(String(input.orgId), 'new_lead', title, notificationMessage, {
-      leadId: String(lead._id),
-      customerName: input.visitorName,
-      source: LEAD_SOURCE.WEBSITE_CHAT,
-      channel: 'webchat',
+    notifyLeadPeople({
+      organizationId: input.orgId,
+      leadId: lead._id,
+      type: 'new_lead',
+      title,
+      message: notificationMessage,
+      metadata: {
+        leadId: String(lead._id),
+        customerName: input.visitorName,
+        source: LEAD_SOURCE.WEBSITE_CHAT,
+        channel: 'webchat',
+      },
+      topicText: input.firstMessage,
     }).catch(() => undefined);
   }
 
@@ -805,15 +793,18 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
   const visitorEmail = String(email || '').trim().toLowerCase().slice(0, 120);
   const visitorPhone = String(phone || '').trim().slice(0, 30);
 
+  const textUsMessage = textUsForm ? String(message || '').trim() : '';
   if (textUsForm) {
-    if (!visitorFirstName) throw new ApiError(400, 'Please add your first name');
-    if (!visitorLastName) throw new ApiError(400, 'Please add your last name');
-    if (visitorPhone.replace(/\D/g, '').length < 10) {
+    if (!visitorFirstName) throw new ApiError(400, 'Please add your name');
+    if (visitorPhone && visitorPhone.replace(/\D/g, '').length < 10) {
       throw new ApiError(400, 'Please enter your mobile number with the area code');
+    }
+    if (!visitorPhone && !visitorEmail && !textUsMessage) {
+      throw new ApiError(400, 'Please add your mobile number, your email, or a message');
     }
   }
   if (!visitorName) throw new ApiError(400, 'Please tell us your name');
-  if (!visitorEmail && !visitorPhone) {
+  if (!textUsForm && !visitorEmail && !visitorPhone) {
     throw new ApiError(400, 'Please add a phone number or email so we can reach you');
   }
   if (visitorEmail && !EMAIL_PATTERN.test(visitorEmail)) {
@@ -822,7 +813,7 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
   if (visitorPhone && visitorPhone.replace(/\D/g, '').length < 7) {
     throw new ApiError(400, 'Please enter a valid phone number');
   }
-  const typedMessage = validateMessageBody(message);
+  const typedMessage = textUsForm && !textUsMessage ? TEXT_US_NO_MESSAGE : validateMessageBody(message);
   const firstMessage = vehicleInterest ? `${typedMessage}\n\nVehicle interest: ${vehicleInterest}` : typedMessage;
   if (firstMessage.length > MAX_MESSAGE_LENGTH) {
     throw new ApiError(400, `Messages are limited to ${MAX_MESSAGE_LENGTH} characters`);
@@ -1162,6 +1153,7 @@ export const pauseWebchatAi = asyncHandler(async (req: Request, res: Response) =
     { new: true },
   );
   if (!session) throw new ApiError(404, 'No web chat found for this lead');
+  await recordLeadHandling({ organizationId: orgId, leadId, action: 'took_over', channel: 'webchat', actor: staff });
 
   emitToOrg(orgId, 'webchat:ai_paused', { leadId: String(leadId), paused: true, pausedBy: staff.name });
   res.json(new ApiResponse(200, { paused: true }, 'AI agent paused for this conversation'));
@@ -1171,7 +1163,8 @@ export const resumeWebchatAi = asyncHandler(async (req: Request, res: Response) 
   const orgId = String((req as any).orgId);
   const { leadId } = req.params;
   if (!mongoose.isValidObjectId(leadId)) throw new ApiError(404, 'Lead not found');
-  if (!actor(req).userId) throw new ApiError(401, 'Please authenticate');
+  const staff = actor(req);
+  if (!staff.userId) throw new ApiError(401, 'Please authenticate');
 
   const session = await WebChatSession.findOneAndUpdate(
     { leadId, organizationId: orgId },
@@ -1180,6 +1173,7 @@ export const resumeWebchatAi = asyncHandler(async (req: Request, res: Response) 
     { new: true },
   );
   if (!session) throw new ApiError(404, 'No web chat found for this lead');
+  await recordLeadHandling({ organizationId: orgId, leadId, action: 'resumed', channel: 'webchat', actor: staff });
 
   emitToOrg(orgId, 'webchat:ai_paused', { leadId: String(leadId), paused: false });
   res.json(new ApiResponse(200, { paused: false }, 'AI agent resumed for this conversation'));

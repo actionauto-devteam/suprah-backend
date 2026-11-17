@@ -39,6 +39,7 @@ import * as recording from '../services/callRecording.service';
 import { recordingPrincipal } from '../services/callRecordingAccess.service';
 import { attentionOrgIds } from '../services/aiHumanAttention.service';
 import { loadPhoneLeads, classifyInquiryScope } from '../services/vehicleInquiryContext.service';
+import { leadHandlingTimeline, recordLeadHandling } from '../services/leadHandling.service';
 
 /** crmAuth() attaches req.user or req.crmUser plus req.orgId (same pattern
  *  as lead.controller). */
@@ -166,6 +167,7 @@ export const pauseSmsAi = asyncHandler(async (req: Request, res: Response) => {
     { new: true },
   );
   if (!conversation) throw new ApiError(404, "No SMS conversation found for this lead");
+  await recordLeadHandling({ organizationId: orgId, leadId, action: "took_over", channel: "sms", actor: staff });
 
   emitToOrg(String(orgId), "comm:ai_paused", {
     conversationId: String(conversation._id),
@@ -179,7 +181,8 @@ export const pauseSmsAi = asyncHandler(async (req: Request, res: Response) => {
 export const resumeSmsAi = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
   const { leadId } = req.params;
-  if (!actor(req).userId) throw new ApiError(401, 'Please authenticate');
+  const staff = actor(req);
+  if (!staff.userId) throw new ApiError(401, 'Please authenticate');
 
   const conversation = await Conversation.findOneAndUpdate(
     { orgId: { $in: attentionOrgIds(String(orgId)) }, leadId },
@@ -188,6 +191,7 @@ export const resumeSmsAi = asyncHandler(async (req: Request, res: Response) => {
     { new: true },
   );
   if (!conversation) throw new ApiError(404, "No SMS conversation found for this lead");
+  await recordLeadHandling({ organizationId: orgId, leadId, action: "resumed", channel: "sms", actor: staff });
 
   emitToOrg(String(orgId), "comm:ai_paused", {
     conversationId: String(conversation._id),
@@ -416,9 +420,10 @@ export async function buildLeadTimeline(
   const beforeDate = cursor?.occurredAt || null;
 
   const lead: any = await Lead.findOne({ _id: leadId, organizationId: orgId })
-    .select("firstName lastName email phone vehicle channel source subject body parsedContent comments notes statusHistory createdAt updatedAt")
+    .select("firstName lastName email phone vehicle channel source subject body parsedContent comments notes statusHistory assignmentHistory createdAt updatedAt")
     .lean();
   if (!lead) throw new ApiError(404, "Lead not found");
+  const handling = await leadHandlingTimeline(orgId, lead).catch(() => null);
 
   const phone = lead.phone ? comm.normalizePhone(String(lead.phone)) : null;
   const conversationQuery: any = { orgId, $or: [{ leadId }] };
@@ -547,6 +552,7 @@ export async function buildLeadTimeline(
   for (const call of calls as any[]) {
     const actor = call.direction === "inbound" ? `${lead.firstName} ${lead.lastName || ""}`.trim() : call.placedBy?.name || "Team member";
     const scope = scopeOf({ leadId: call.leadId });
+    const answeredBy = call.direction === "inbound" && call.answeredBy?.name ? String(call.answeredBy.name) : null;
     items.push({
       id: `call:${call._id}`,
       channel: "call",
@@ -556,7 +562,9 @@ export async function buildLeadTimeline(
       status: call.status,
       actor,
       occurredAt: call.createdAt,
-      metadata: call.hangupCause || scope ? { ...(call.hangupCause ? { hangupCause: call.hangupCause } : {}), ...(scope || {}) } : undefined,
+      metadata: call.hangupCause || scope || answeredBy
+        ? { ...(call.hangupCause ? { hangupCause: call.hangupCause } : {}), ...(scope || {}), ...(answeredBy ? { answeredBy } : {}) }
+        : undefined,
     });
   }
 
@@ -581,7 +589,7 @@ export async function buildLeadTimeline(
       title: message.direction === "inbound" ? "Email received" : "Email sent",
       body: message.bodyText,
       status: message.status,
-      actor: message.direction === "inbound" ? message.fromName || message.fromEmail : "Team member",
+      actor: message.direction === "inbound" ? message.fromName || message.fromEmail : message.fromName || "Team member",
       occurredAt: message.sentAt || message.createdAt,
       metadata: message.errorMessage ? { error: message.errorMessage } : undefined,
     });
@@ -694,8 +702,21 @@ export async function buildLeadTimeline(
       title: `Lead moved to ${history.to}`,
       body: history.reason,
       status: history.to,
-      actor: "Team member",
+      actor: handling ? handling.statusActorOf(history) : "Team member",
       occurredAt: history.changedAt,
+    });
+  }
+
+  for (const entry of handling?.entries || []) {
+    if (beforeDate && entry.occurredAt > beforeDate) continue;
+    items.push({
+      id: entry.id,
+      channel: entry.channel,
+      direction: entry.channel === "email" ? "outbound" : "system",
+      title: entry.title,
+      body: entry.body,
+      actor: entry.actor,
+      occurredAt: entry.occurredAt,
     });
   }
 

@@ -140,6 +140,29 @@ describe('generateAlexReply — handoff marker parsing', () => {
     const result = await generateAlexReply(baseOpts);
     expect(result.text).toBe("I'm not 100% sure if that trim is still on the lot, let me check.");
     expect(result.handoffReason).toBe('confirm trim availability');
+    expect(result.handoffTopic).toBeUndefined();
+  });
+
+  it('reads the topic in front of the handoff reason, and ignores a topic it does not know', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'Let me make sure it is still here.\n[[HANDOFF: availability | Customer wants to confirm the 2021 Tacoma is still on the lot]]' } }],
+    });
+    const known = await generateAlexReply(baseOpts);
+    expect(known.text).toBe('Let me make sure it is still here.');
+    expect(known.handoffReason).toBe('Customer wants to confirm the 2021 Tacoma is still on the lot');
+    expect(known.handoffTopic).toBe('availability');
+
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'I will check.\n[[HANDOFF: Trade-In | wants a payoff quote]]' } }],
+    });
+    expect(await generateAlexReply(baseOpts)).toMatchObject({ handoffReason: 'wants a payoff quote', handoffTopic: 'trade_in' });
+
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: 'I will check.\n[[HANDOFF: weather | is it raining there]]' } }],
+    });
+    const unknown = await generateAlexReply(baseOpts);
+    expect(unknown.handoffReason).toBe('weather | is it raining there');
+    expect(unknown.handoffTopic).toBeUndefined();
   });
 
   it('is not fooled by an unterminated or malformed marker (treats it as plain text)', async () => {
@@ -465,6 +488,19 @@ describe('processAlexTurn — mid-generation human-takeover check', () => {
 
     expect(ctx.notifyHandoff).toHaveBeenCalledTimes(1);
     expect(ctx.notifyHandoff).toHaveBeenCalledWith('confirm trim availability');
+  });
+
+  it('passes the handoff topic along when the reply names one', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: "Let me check on that.\n[[HANDOFF: financing | needs credit approval help]]" } }],
+    });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
+    const ctx = buildCtx({ isPausedNow: jest.fn().mockResolvedValue(false) });
+
+    await processAlexTurn(ctx);
+
+    expect(ctx.notifyHandoff).toHaveBeenCalledTimes(1);
+    expect(ctx.notifyHandoff).toHaveBeenCalledWith('needs credit approval help', 'financing');
   });
 
   it('selects generic relevant coaching and applies only those rules', async () => {

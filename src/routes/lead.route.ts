@@ -27,6 +27,7 @@ import {
   addLeadNote,
   pauseEmailAi,
   resumeEmailAi,
+  getLeadHandlersHandler,
 } from "../controllers/lead.controller";
 import { getLeadAiSummary, regenerateLeadAiSummary } from "../controllers/leadAiSummary.controller";
 import { getLeadConversation, getLeadEarlierConversation } from "../controllers/leadConversation.controller";
@@ -89,6 +90,7 @@ router.patch("/:id/read", markAsRead);
 router.patch("/:id/pending", markAsPending);
 router.post("/:id/appointment", setAppointmentForLead);
 router.get("/:id/appointments", getAppointmentsForLead);
+router.get("/:id/handlers", getLeadHandlersHandler);
 
 router.post(
   "/:id/reply",

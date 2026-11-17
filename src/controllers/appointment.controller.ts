@@ -16,9 +16,10 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
-import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
+import { safeCreateNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
+import { notifyLeadPeople } from '../services/leadNoticeRouting.service';
 import { triggerAiReplyForNewInquiry } from '../services/communication.service';
 import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
 import { submitLeadInquiry } from '../services/leadIntake.service';
@@ -26,6 +27,29 @@ import { startNewLeadAutomations } from '../services/leadIntakeIntegration';
 import { startDrivingSessionForAppointment, endDrivingSessionForAppointment } from './locator.controller';
 import { recordAppointmentHistory } from '../services/appointmentHistory.service';
 import { activeLeadStores, storeForStock } from '../utils/leadStore';
+
+async function notifyAppointmentPeople(
+    orgId: string,
+    appointment: any,
+    actorId: string,
+    type: string,
+    title: string,
+    message: string,
+    tagText: string,
+) {
+    await notifyLeadPeople({
+        organizationId: orgId,
+        leadId: appointment?.leadId,
+        ownerIds: [appointment?.salesperson?.userId],
+        excludeUserId: actorId,
+        type,
+        title,
+        message,
+        metadata: { appointmentId: appointment?._id?.toString() },
+        topicText: 'appointment',
+        tagText,
+    });
+}
 
 const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
@@ -100,9 +124,8 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
             title: appointment.title || 'Untitled',
             startTime: appointment.startTime ? new Date(appointment.startTime).toLocaleString('en-US', { timeZone: CALENDAR_TZ }) : undefined,
         });
-        await notifyOrgAdmins(orgId, 'appointment_created', title, message, {
-            appointmentId: appointment._id?.toString(),
-        }, userId);
+        await notifyAppointmentPeople(orgId, appointment, userId, 'appointment_created', title, message,
+            `New appointment "${appointment.title || 'Untitled'}"`);
     }
 
     await activityService.createActivity({
@@ -323,9 +346,8 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
         const { title, message } = notificationTemplates.appointment_updated({
             title: appointment.title || 'Untitled',
         });
-        await notifyOrgAdmins(orgId, 'appointment_updated', title, message, {
-            appointmentId: appointment._id?.toString(),
-        }, userId);
+        await notifyAppointmentPeople(orgId, appointment, userId, 'appointment_updated', title, message,
+            `Appointment "${appointment.title || 'Untitled'}" was changed`);
     }
 
     await activityService.createActivity({
@@ -358,9 +380,8 @@ const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
         const { title, message } = notificationTemplates.appointment_cancelled({
             title: appointment.title || 'Untitled',
         });
-        await notifyOrgAdmins(orgId, 'appointment_cancelled', title, message, {
-            appointmentId: appointment._id?.toString(),
-        }, userId);
+        await notifyAppointmentPeople(orgId, appointment, userId, 'appointment_cancelled', title, message,
+            `Appointment "${appointment.title || 'Untitled'}" was cancelled`);
     }
 
     await activityService.createActivity({
@@ -387,15 +408,17 @@ const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const orgId = req.orgId as string;
+    const removed: any = orgId
+        ? await Appointment.findOne({ _id: id, organizationId: orgId }).select('leadId salesperson').lean().catch(() => null)
+        : null;
     await appointmentService.deleteAppointment(id, orgId, userId);
 
     if (orgId) {
         const { title, message } = notificationTemplates.appointment_cancelled({
             title: 'Appointment',
         });
-        await notifyOrgAdmins(orgId, 'appointment_cancelled', title, message, {
-            appointmentId: id,
-        }, userId);
+        await notifyAppointmentPeople(orgId, { ...(removed || {}), _id: id }, userId, 'appointment_cancelled', title, message,
+            'An appointment was removed');
     }
 
     await activityService.createActivity({

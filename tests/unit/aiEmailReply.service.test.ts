@@ -26,6 +26,7 @@ const mockFinishAiAttentionCheck = jest.fn().mockResolvedValue(undefined);
 const mockScreenAiHumanAttention = jest.fn();
 const mockClaimAiGeneration = jest.fn();
 const mockCreateAiAgentTaskAndNotify = jest.fn();
+const mockWriteAiHandoff = jest.fn();
 const mockAddLeadNoteAndNotify = jest.fn();
 const mockShouldSuppressHandoffNoteNotification = jest.fn().mockReturnValue(false);
 const mockSendLeadReplyEmail = jest.fn();
@@ -70,6 +71,9 @@ jest.mock('../../src/services/aiHumanAttention.service', () => ({
   finishAiAttentionCheck: mockFinishAiAttentionCheck,
   screenAiHumanAttention: mockScreenAiHumanAttention,
   claimAiGeneration: mockClaimAiGeneration,
+}));
+jest.mock('../../src/services/aiHandoffRouting.service', () => ({
+  writeAiHandoff: mockWriteAiHandoff,
 }));
 jest.mock('../../src/utils/aiAgentTask', () => ({
   createAiAgentTaskAndNotify: mockCreateAiAgentTaskAndNotify,
@@ -198,6 +202,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     mockClassifyAlexEmailReplySafety.mockResolvedValue('SAFE');
     mockSendLeadReplyEmail.mockResolvedValue(undefined);
     mockCreateAiAgentTaskAndNotify.mockResolvedValue({ notified: true });
+    mockWriteAiHandoff.mockResolvedValue(null);
     mockAddLeadNoteAndNotify.mockResolvedValue(undefined);
   });
 
@@ -273,7 +278,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     mockSendLeadReplyEmail.mockRejectedValueOnce(new AiReplySuppressedError());
     await expect(triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo')).resolves.toBeUndefined();
     expect(mockSendLeadReplyEmail).toHaveBeenCalledTimes(1);
-    expect(mockCreateAiAgentTaskAndNotify).not.toHaveBeenCalled();
+    expect(mockWriteAiHandoff).not.toHaveBeenCalled();
     expect(mockFinishAiAttentionCheck).toHaveBeenCalled();
   });
 
@@ -298,7 +303,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     mockSendLeadReplyEmail.mockRejectedValueOnce(new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-1'], onThisLead: true }));
     await expect(triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo')).resolves.toBeUndefined();
     expect(mockSendLeadReplyEmail).toHaveBeenCalledTimes(1);
-    expect(mockCreateAiAgentTaskAndNotify).not.toHaveBeenCalled();
+    expect(mockWriteAiHandoff).not.toHaveBeenCalled();
     expect(mockFinishAiAttentionCheck).toHaveBeenCalled();
     expect(mockAiAgentLogCreate).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email', status: 'skipped' }));
   });
@@ -333,7 +338,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     expect(mockClassifyAlexEmailReplySafety).toHaveBeenCalledWith(draft, undefined, expect.objectContaining({ keys: ['usd:299'] }));
     expect(mockSendLeadReplyEmail).toHaveBeenCalledTimes(1);
     expect(mockSendLeadReplyEmail.mock.calls[0][1]).toBe(draft);
-    expect(mockCreateAiAgentTaskAndNotify).not.toHaveBeenCalled();
+    expect(mockWriteAiHandoff).not.toHaveBeenCalled();
   });
 
   it('without a fitting Knowledge Base answer, an amount in the email is still blocked and a safe fallback goes out', async () => {
@@ -378,8 +383,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
       'actionautoutah.dev@gmail.com',
       { beforeDispatch: expect.any(Function), requireVerifiedRecipient: true },
     );
-    expect(mockCreateAiAgentTaskAndNotify).toHaveBeenCalled();
-    expect(mockAddLeadNoteAndNotify).toHaveBeenCalled();
+    expect(mockWriteAiHandoff).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email', leadId: 'lead-1', topic: 'other' }));
   });
 
   it('sends a safe fallback (never the blocked draft) when the email safety classifier returns UNSAFE', async () => {
@@ -394,8 +398,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
       'actionautoutah.dev@gmail.com',
       { beforeDispatch: expect.any(Function), requireVerifiedRecipient: true },
     );
-    expect(mockCreateAiAgentTaskAndNotify).toHaveBeenCalled();
-    expect(mockAddLeadNoteAndNotify).toHaveBeenCalled();
+    expect(mockWriteAiHandoff).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email', leadId: 'lead-1', topic: 'other' }));
   });
 
   it('acknowledges a specific test-drive request in the email fallback, naming this inquiry\'s vehicle only', async () => {
@@ -448,27 +451,23 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     expect(mockGenerateAlexEmailReply.mock.calls[0][0].vehicleContextNote).toBeUndefined();
   });
 
-  it('on a handoff marker, creates an AI agent task and a mentioning note, and still sends the reply', async () => {
-    mockGenerateAlexEmailReply.mockResolvedValue({ text: 'Let me check on that for you.', handoffReason: 'Confirm vehicle is on the lot' });
+  it('on a handoff marker, hands the lead to the team and rep for the topic, and still sends the reply', async () => {
+    mockGenerateAlexEmailReply.mockResolvedValue({ text: 'Let me check on that for you.', handoffReason: 'Confirm vehicle is on the lot', handoffTopic: 'availability' });
     await triggerAiEmailReplyForNewInquiry('org-1', { ...lead, assignedTo: 'rep-1' }, 'Is it still on the lot?');
 
     expect(mockSendLeadReplyEmail).toHaveBeenCalled();
-    expect(mockCreateAiAgentTaskAndNotify).toHaveBeenCalledWith(
-      expect.objectContaining({ channel: 'email', question: 'Confirm vehicle is on the lot', assignedTo: 'rep-1' }),
-    );
-    expect(mockAddLeadNoteAndNotify).toHaveBeenCalledWith(
-      expect.objectContaining({ mentionedUserIds: ['rep-1'], authorType: 'ai' }),
+    expect(mockWriteAiHandoff).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'email', leadId: 'lead-1', reason: 'Confirm vehicle is on the lot', topic: 'availability', assignedTo: 'rep-1', agentName: 'Alex' }),
     );
   });
 
-  it('on a handoff with no assignee, falls back to the org-configured fallback group for the note mention', async () => {
+  it('on a handoff with no assignee and no topic from the AI, still hands it off so the routing can use the fallback team', async () => {
     mockGenerateAlexEmailReply.mockResolvedValue({ text: 'Let me check on that for you.', handoffReason: 'Confirm vehicle is on the lot' });
-    mockOrganizationFindById.mockReturnValue({ select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ name: 'Action Auto', metadata: { aiHandoffFallbackGroupId: 'group-1' } }) }) });
 
     await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Is it still on the lot?');
 
-    expect(mockAddLeadNoteAndNotify).toHaveBeenCalledWith(
-      expect.objectContaining({ mentionedUserIds: [], mentionedGroupIds: ['group-1'] }),
+    expect(mockWriteAiHandoff).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'email', reason: 'Confirm vehicle is on the lot', topic: undefined, assignedTo: undefined }),
     );
   });
 
@@ -476,7 +475,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     mockGenerateAlexEmailReply.mockResolvedValue({ text: 'Great, see you Saturday!', milestoneNote: 'Customer confirmed a test drive' });
     await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Lets do Saturday');
 
-    expect(mockCreateAiAgentTaskAndNotify).not.toHaveBeenCalled();
+    expect(mockWriteAiHandoff).not.toHaveBeenCalled();
     expect(mockAddLeadNoteAndNotify).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'Customer confirmed a test drive', milestone: true }),
     );

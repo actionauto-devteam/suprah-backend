@@ -326,7 +326,7 @@ describe('Real-DB: calls ring the number\'s team, and missed calls notify people
     expect(incomingEmits()[0][0]).toBe(`org:${ORG}:crm-staff`);
   });
 
-  test('when nobody on the team answers: missed call, missed-call message, text back, and the team, the lead\'s rep and admins are notified', async () => {
+  test('when nobody on the team answers: missed call, missed-call message, text back, and only the lead\'s rep is notified', async () => {
     const from = nextPhone();
     const { call, controlId } = await incoming(from, SERVICE);
     await Lead.updateOne({ _id: call.leadId }, { $set: { assignedTo: ids.repUser } });
@@ -339,15 +339,24 @@ describe('Real-DB: calls ring the number\'s team, and missed calls notify people
     await until(async () => mockTelnyx.sendSms.mock.calls.length, (count) => count > 0);
     expect(mockTelnyx.sendSms.mock.calls[0][0]).toBe(from);
     expect(mockTelnyx.sendSms.mock.calls[0][2]).toBe(SERVICE);
-    await until(async () => mockNotifyOrgAdmins.mock.calls.length, (count) => count > 0);
-    const [userIds, notifyOrg, type, title, message, metadata] = mockNotifyUsers.mock.calls[0];
-    expect(new Set(userIds)).toEqual(new Set([String(ids.techUser), String(ids.techCrm), String(ids.repUser), String(ids.repCrm)]));
+    const missedNotice = await until<any[] | undefined>(async () => mockNotifyUsers.mock.calls.find((args: any[]) => args[2] === 'missed_call'), Boolean);
+    const [userIds, notifyOrg, type, title, message, metadata] = missedNotice!;
+    expect(userIds).toEqual([String(ids.repCrm)]);
     expect(notifyOrg).toBe(ORG);
     expect(type).toBe('missed_call');
     expect(title).toBe('Missed call');
     expect(message).toMatch(/^Missed call from \(801\) 555-\d{4} to Service Department\./);
     expect(metadata).toMatchObject({ callId: String(call._id), leadId: String(call.leadId), route: `/crm/leads?leadId=${call.leadId}` });
-    expect(mockNotifyOrgAdmins).toHaveBeenCalledWith(ORG, 'missed_call', 'Missed call', message, expect.objectContaining({ callId: String(call._id) }));
+    expect(mockNotifyOrgAdmins.mock.calls.some((args: any[]) => args[1] === 'missed_call')).toBe(false);
+  });
+
+  test('a missed call on a lead nobody owns goes to the team the line rang for, not to every admin', async () => {
+    const { call } = await incoming(nextPhone(), SERVICE);
+    await ringTimers[0].fn();
+    const missedNotice = await until<any[] | undefined>(async () => mockNotifyUsers.mock.calls.find((args: any[]) => args[2] === 'missed_call'), Boolean);
+    expect(new Set(missedNotice![0])).toEqual(new Set([String(ids.techCrm), String(ids.adminCrm)]));
+    expect(missedNotice![5]).toMatchObject({ callId: String(call._id) });
+    expect(mockNotifyOrgAdmins.mock.calls.some((args: any[]) => args[1] === 'missed_call')).toBe(false);
   });
 
   test('a missed call to the main number notifies the admins', async () => {

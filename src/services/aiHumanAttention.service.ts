@@ -13,13 +13,14 @@ import Organization from '../models/Organization.model';
 import {
   AiHumanAttention, AttentionClassifierSource, AttentionTechnicalCode, TECHNICAL_ATTENTION_REASONS, attentionKindOf,
 } from '../models/aiHumanAttention';
-import CrmLeadGroup from '../models/CrmLeadGroup.model';
 import {
   createCompletionWithFallback, createGeminiClient, hasGeminiApiKey, isGeminiQaModeActive, isLocalUiAcceptanceMode, withTimeout,
 } from '../utils/aiOutboundSafety';
 import { classifyWithMock, isAttentionMockClassifierActive } from '../utils/attentionMockClassifier';
 import { isDemoPhone } from '../utils/demoPhone';
 import { resolveGroupMemberIds, addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from '../utils/leadNote';
+import { crmNotificationRecipients } from '../utils/crmNotificationRecipients';
+import { AiHandoffRouting, resolveAiHandoffRouting } from './aiHandoffRouting.service';
 import logger from '../utils/logger';
 import notificationService from './notification.service';
 import { emitToOrg } from '../utils/socketEmitter';
@@ -240,16 +241,6 @@ async function recipients(organizationId: string, assignedTo?: any): Promise<str
   return [...new Set([...main, ...crm].map(user => String(user._id)))];
 }
 
-async function notificationRecipients(organizationId: string, userIds: string[]): Promise<string[]> {
-  const mainUsers = await User.find({ _id: { $in: userIds }, organizationId, isActive: true }).select('_id email').lean();
-  const emails = mainUsers.map(user => user.email?.toLowerCase()).filter(Boolean);
-  const linked = await CrmUser.find({ organizationId, isActive: true, isOffboarded: { $ne: true },
-    email: { $in: emails } }).select('_id email').lean();
-  const replacements = new Map(mainUsers.map(user => [String(user._id),
-    linked.find(crm => crm.email?.toLowerCase() === user.email?.toLowerCase())?._id]));
-  return [...new Set(userIds.map(id => String(replacements.get(id) || id)))];
-}
-
 const TECHNICAL_DETAILS: Record<AttentionTechnicalCode, string> = {
   local_qa_blocked: 'the AI check is turned off in local QA mode',
   missing_api_key: "the AI check isn't configured",
@@ -286,6 +277,7 @@ async function ensureHandoffNote(
   agentName: string,
   taskNotified: boolean,
   quiet = false,
+  routing: AiHandoffRouting | null = null,
 ): Promise<void> {
   const alreadyWritten = await Lead.exists({
     _id: leadId, organizationId: input.organizationId, 'notes.sourceTaskId': attention.taskId,
@@ -309,37 +301,17 @@ async function ensureHandoffNote(
   if (!claimed) return;
 
   try {
-    let mentionedUserIds: string[] = [];
-    let mentionedGroupIds: string[] = [];
-    let mentionLabel: string | null = null;
-
-    if (!quiet && lead.assignedTo) {
-      const filter = { _id: lead.assignedTo, organizationId: input.organizationId };
-      const assignee = (await User.findOne(filter).select('fullName name').lean())
-        || (await CrmUser.findOne(filter).select('fullName name').lean());
-      if (assignee) {
-        mentionedUserIds = [String(lead.assignedTo)];
-        mentionLabel = `@${(assignee as any).fullName || (assignee as any).name}`;
-      }
-    } else if (!quiet) {
-      const org = await Organization.findById(input.organizationId).select('metadata').lean();
-      const fallbackGroupId = (org?.metadata as any)?.aiHandoffFallbackGroupId;
-      if (fallbackGroupId && mongoose.isValidObjectId(fallbackGroupId)) {
-        const group = await CrmLeadGroup.findOne({ _id: fallbackGroupId, organizationId: input.organizationId, isActive: true })
-          .select('name').lean();
-        if (group) {
-          mentionedGroupIds = [String(fallbackGroupId)];
-          mentionLabel = `@${(group as any).name}`;
-        }
-      }
-    }
+    const tags = !quiet && routing ? routing : null;
+    const mentionedUserIds = tags?.mentionedUserIds || [];
+    const mentionedGroupIds = tags?.mentionedGroupIds || [];
 
     const customerName = [lead.firstName, lead.lastName].filter(Boolean).join(' ');
     const summary = describeAttentionReason(attention, customerName, agentName);
+    const topic = tags?.topicLabel ? ` Topic: ${tags.topicLabel}.` : '';
     const status = attentionKindOf(attention) === 'technical'
       ? ` ${agentName} is paused until someone resumes it.${quiet ? ' Training mode: logged under Technical in AI Tasks; no staff were notified.' : ''}`
       : ` ${agentName} is paused — a human needs to respond.`;
-    const text = `${summary}.${status}${mockLabel(attention)}${mentionLabel ? ` ${mentionLabel}` : ''}`;
+    const text = `${tags?.mentionPrefix || ''}${summary}.${topic}${status}${mockLabel(attention)}`;
 
     await addLeadNoteAndNotify({
       organizationId: input.organizationId,
@@ -350,7 +322,9 @@ async function ensureHandoffNote(
       mentionedUserIds,
       mentionedGroupIds,
       sourceTaskId: String(attention.taskId),
-      suppressNotification: quiet || shouldSuppressHandoffNoteNotification(mentionedUserIds[0], taskNotified),
+      suppressNotification: quiet
+        || shouldSuppressHandoffNoteNotification(mentionedUserIds[0], taskNotified)
+        || (taskNotified && Boolean(tags?.assigneeIds.length)),
     });
 
     await AiAgentTask.updateOne(
@@ -369,7 +343,19 @@ async function ensureHandoff(input: AttentionCheck, attention: AiHumanAttention,
   if (!lead) throw new Error('Human-attention lead is not in this organization');
   const kind = attentionKindOf(attention);
   const quiet = kind === 'technical' && (await resolveAiChannelMode(input.organizationId, input.channel)).mode === 'training';
-  const assigneeIds = await recipients(input.organizationId, lead.assignedTo);
+  const routing = quiet
+    ? null
+    : await resolveAiHandoffRouting({
+      organizationId: input.organizationId,
+      assignedTo: lead.assignedTo,
+      topic: kind === 'technical' ? null : 'person',
+    }).catch((err: any) => {
+      logger.warn({ organizationId: input.organizationId, errorName: err?.name }, '[AiHumanAttention] Could not work out who to tag');
+      return null;
+    });
+  const assigneeIds = routing?.assigneeIds.length
+    ? routing.assigneeIds
+    : await recipients(input.organizationId, lead.assignedTo);
   await AiAgentTask.findOneAndUpdate({ _id: attention.taskId, organizationId: input.organizationId }, {
     $setOnInsert: {
       organizationId: input.organizationId, leadId, channel: input.channel,
@@ -397,7 +383,7 @@ async function ensureHandoff(input: AttentionCheck, attention: AiHumanAttention,
       try {
         if (!assigneeIds.length) throw new Error('No active human-attention recipient is configured');
         const customerName = [lead.firstName, lead.lastName].filter(Boolean).join(' ');
-        const notificationIds = await notificationRecipients(input.organizationId, assigneeIds);
+        const notificationIds = await crmNotificationRecipients(input.organizationId, assigneeIds);
         await Promise.all(notificationIds.map(userId => notificationService.createNotification({
           userId, organizationId: input.organizationId, type: 'ai_agent_handoff_needed',
           title: `${attention.reason} - customer waiting`,
@@ -432,7 +418,7 @@ async function ensureHandoff(input: AttentionCheck, attention: AiHumanAttention,
     }
   }
 
-  await ensureHandoffNote(input, attention, lead, leadId, agentName, taskNotified, quiet);
+  await ensureHandoffNote(input, attention, lead, leadId, agentName, taskNotified, quiet, routing);
 }
 
 export async function screenAiHumanAttention(input: AttentionCheck & { leadId: string; body: string; agentName: string; phone?: string }): Promise<boolean> {

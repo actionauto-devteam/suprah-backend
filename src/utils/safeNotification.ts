@@ -15,6 +15,10 @@ interface CreateNotificationParams {
   groupWindowMinutes?: number;
 }
 
+function excludedIdList(value?: string | string[]): string[] {
+  return (Array.isArray(value) ? value : [value]).filter(Boolean).map(String);
+}
+
 interface BroadcastParams {
   organizationId: string;
   roles: string[];
@@ -22,7 +26,7 @@ interface BroadcastParams {
   title: string;
   message: string;
   metadata?: any;
-  excludeUserId?: string;
+  excludeUserId?: string | string[];
   // Per-recipient dedupeKey is derived as `${dedupeKeyPrefix}:${recipientUserId}`
   // so repeat events about the same subject compile into one evolving
   // notification per admin instead of one row per occurrence.
@@ -84,7 +88,7 @@ export async function safeBroadcastNotification(params: BroadcastParams) {
     // Create notifications for each user (excluding the triggering user if specified)
     const notifications = await Promise.all(
       users
-        .filter(user => !excludeUserId || user._id.toString() !== excludeUserId)
+        .filter(user => !excludedIdList(excludeUserId).includes(user._id.toString()))
         .map(user =>
           safeCreateNotification({
             userId: user._id.toString(),
@@ -123,9 +127,10 @@ export async function notifyOrgAdmins(
   title: string,
   message: string,
   metadata?: any,
-  excludeUserId?: string,
+  excludeUserId?: string | string[],
   grouping?: { dedupeKeyPrefix: string; groupWindowMinutes?: number }
 ) {
+  const excludedIds = excludedIdList(excludeUserId);
   const userResult = await safeBroadcastNotification({
     organizationId,
     roles: ['admin', 'super_admin'],
@@ -142,7 +147,7 @@ export async function notifyOrgAdmins(
       organizationId,
       role: { $in: ['admin', 'manager'] },
       isActive: true,
-      _id: { $ne: excludeUserId },
+      ...(excludedIds.length ? { _id: { $nin: excludedIds } } : {}),
     }).select('_id');
 
     await Promise.all(

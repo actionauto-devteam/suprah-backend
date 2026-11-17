@@ -11,8 +11,10 @@ import { asyncHandler } from '../utils/asyncHandler';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { ApiResponse } from '../utils/ApiResponse';
-import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
+import { safeCreateNotification, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
+import { notifyLeadPeople } from '../services/leadNoticeRouting.service';
+import { crmNotificationRecipients } from '../utils/crmNotificationRecipients';
 import {
   parseADF,
   parseEmailBody,
@@ -77,6 +79,7 @@ import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { LeadReplyRecipientError, resolveLeadReplyRecipient } from '../utils/leadReplyRecipient';
 import { cleanEmailSubject, encodeEmailHeader, resolveLeadEmailSubject } from '../utils/leadEmailSubject';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
+import { getLeadHandlers, leadIdsHandledBy, recordLeadHandling } from '../services/leadHandling.service';
 import {
   COMPOSER_MESSAGES,
   SEND_UNCERTAIN_CODE,
@@ -697,19 +700,21 @@ export const receiveADF = async (req: Request, res: Response) => {
       vehicleInterest: vehicleInterest || undefined,
     });
 
-    await notifyOrgAdmins(
-      orgId as string,
-      'new_lead',
+    await notifyLeadPeople({
+      organizationId: orgId,
+      leadId: newLead._id,
+      type: 'new_lead',
       title,
       message,
-      {
+      metadata: {
         leadId: newLead._id.toString(),
         customerName: `${adfData.firstName} ${adfData.lastName}`.trim(),
         email: adfData.email,
         source: 'ADF Email',
         channel: 'adf',
-      }
-    );
+      },
+      topicText: newLead.comments,
+    });
 
     await activityService.createActivity({
       userId: systemUserId,
@@ -790,6 +795,11 @@ export const getAllLeads = async (req: Request, res: Response) => {
 
     if (assignedTo) {
       query.assignedTo = assignedTo;
+    }
+
+    const handledBy = typeof req.query.handledBy === 'string' ? req.query.handledBy.trim() : '';
+    if (handledBy) {
+      appendLeadCondition(query, { _id: { $in: await leadIdsHandledBy(String(orgId), handledBy) } });
     }
 
     if (location && location !== 'All') {
@@ -1600,8 +1610,10 @@ export const assignLead = async (req: Request, res: Response) => {
         assignedTo: assigneeUser.name || assigneeUser.email,
       });
 
+      const assigneeId = assigneeUser._id.toString();
+      const [assigneeRecipient] = await crmNotificationRecipients(String(orgId), [assigneeId]).catch(() => [assigneeId]);
       await safeCreateNotification({
-        userId: assigneeUser._id.toString(),
+        userId: assigneeRecipient || assigneeId,
         organizationId: orgId,
         type: 'lead_assigned',
         title,
@@ -1836,19 +1848,22 @@ export const createInquiry = async (req: Request, res: Response) => {
         vehicleInterest: vehicleInterest || undefined,
       });
 
-      await notifyOrgAdmins(
-        req.orgId as string,
-        'new_lead',
+      await notifyLeadPeople({
+        organizationId: req.orgId,
+        leadId: savedLead._id,
+        type: 'new_lead',
         title,
         message,
-        {
+        metadata: {
           leadId: savedLead._id.toString(),
           customerName: `${firstName} ${lastName || ''}`.trim(),
           email,
           source: source || LEAD_SOURCE.MANUAL_ENTRY,
           channel: detectedChannel,
-        }
-      );
+        },
+        excludeUserId: userId,
+        topicText: savedLead.comments,
+      });
     }
 
     await activityService.createActivity({
@@ -2057,6 +2072,13 @@ export const pauseEmailAi = async (req: Request, res: Response) => {
     { new: true },
   );
   if (!lead) throw new ApiError(404, 'Lead not found');
+  await recordLeadHandling({
+    organizationId: orgId,
+    leadId: lead._id,
+    action: 'took_over',
+    channel: 'email',
+    actor: { userId: String(user._id), name: (user as any).fullName || (user as any).name },
+  });
 
   const io = getSocketIO();
   if (io) {
@@ -2084,6 +2106,13 @@ export const resumeEmailAi = async (req: Request, res: Response) => {
     { new: true },
   );
   if (!lead) throw new ApiError(404, 'Lead not found');
+  await recordLeadHandling({
+    organizationId: orgId,
+    leadId: lead._id,
+    action: 'resumed',
+    channel: 'email',
+    actor: { userId: String(user._id), name: (user as any).fullName || (user as any).name },
+  });
 
   const io = getSocketIO();
   if (io) {
@@ -2094,6 +2123,13 @@ export const resumeEmailAi = async (req: Request, res: Response) => {
   }
   res.json(new ApiResponse(200, { paused: false }, 'AI agent resumed for this lead'));
 };
+
+export const getLeadHandlersHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId;
+  if (!orgId) throw new ApiError(400, 'Organization context missing');
+  const result = await getLeadHandlers(String(orgId), String(req.params.id || ''));
+  res.json(new ApiResponse(200, result, 'Who handled this lead'));
+});
 
 export type LeadEmailReplyOutcome = { status: number; body: any };
 
@@ -2237,6 +2273,8 @@ export async function sendLeadEmailReply(input: {
         'The reply could not be sent through Gmail',
     } };
   }
+
+  await recordLeadHandling({ organizationId: orgId, leadId: lead._id, action: 'email_sent', channel: 'email', actor: { userId } });
 
   const previousStatus = lead.status;
   const repliedAt = new Date();
@@ -2420,6 +2458,13 @@ export const bulkReplyToInquiries = async (req: Request, res: Response) => {
         if (!contactedLead) throw new Error(CONTACT_RESTRICTION_MESSAGES.statusChanged);
 
         await sendLeadReplyEmail(contactedLead, message, userId, orgId as string, [], undefined, { requireVerifiedRecipient: true });
+        await recordLeadHandling({
+          organizationId: orgId,
+          leadId: lead._id,
+          action: 'email_sent',
+          channel: 'email',
+          actor: { userId, name: (user as any).fullName || (user as any).name },
+        });
 
         await activityService.createActivity({
           userId: userId.toString(),

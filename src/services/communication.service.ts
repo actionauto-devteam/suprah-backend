@@ -17,10 +17,9 @@ import { orgEventRoom } from "../utils/crmStaffRoom";
 import { ApiError } from "../utils/ApiError";
 import Organization from "../models/Organization.model";
 import Appointment from "../models/Appointment.model";
-import { notifyOrgAdmins, notifyUsers } from "../utils/safeNotification";
 import User from "../models/User.model";
-import { createAiAgentTaskAndNotify } from "../utils/aiAgentTask";
-import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from "../utils/leadNote";
+import { addLeadNoteAndNotify } from "../utils/leadNote";
+import { writeAiHandoff } from "./aiHandoffRouting.service";
 import { describeSmsFailure } from "../utils/smsFailure";
 import { assertSmsDestination, isSmsDestinationError, resolveSmsDestination, SmsDestinationPolicy } from "../utils/smsDestination";
 import { recordAppointmentSmsDelivery } from "../utils/appointmentSmsNotice";
@@ -68,12 +67,14 @@ import {
 
 const lifecycleIntake = () => import("./leadIntake.service");
 const inquiryRecords = () => import("./leadInquiry.service");
+const notifyLeadPeople = async (input: LeadNoticeInput) => (await import("./leadNoticeRouting.service")).notifyLeadPeople(input);
 import { getInboundRoutingConfig, getConfiguredInboundOrganization, routingGroupRecipients } from './callRoutingConfig.service';
 import { handleStaffPhoneVerifyAnswered, handleStaffPhoneVerifyGather } from './staffCallPhone.service';
 import StaffCallPhone from "../models/StaffCallPhone.model";
 import CrmUser from "../models/CrmUser.model";
 import UnifiedPushService from "./unifiedPush.service";
 import { leadDisplayName, notifyLeadMessage, notifyLeadMessageUnlessHandoff } from "./leadMessageNotice.service";
+import type { LeadNoticeInput } from "./leadNoticeRouting.service";
 import { loadReplyKnowledge } from "./aiKnowledgeRuntime.service";
 import { DealershipLine, findDealershipLine, leadFieldsForLine, resolveOutboundNumber } from './dealershipPhoneNumber.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
@@ -493,8 +494,15 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string,
         customerName,
         appointmentTitle: appointment.title,
       });
-      await notifyOrgAdmins(String(orgId), "appointment_confirmed_via_sms", title, message, {
-        appointmentId: appointment._id.toString(),
+      await notifyLeadPeople({
+        organizationId: orgId,
+        leadId: appointment.leadId,
+        ownerIds: [appointment.salesperson?.userId],
+        type: "appointment_confirmed_via_sms",
+        title,
+        message,
+        metadata: { appointmentId: appointment._id.toString() },
+        topicText: "appointment",
       });
     } else {
       await Appointment.updateOne(
@@ -513,8 +521,15 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string,
         customerName,
         appointmentTitle: appointment.title,
       });
-      await notifyOrgAdmins(String(orgId), "appointment_reschedule_requested", title, message, {
-        appointmentId: appointment._id.toString(),
+      await notifyLeadPeople({
+        organizationId: orgId,
+        leadId: appointment.leadId,
+        ownerIds: [appointment.salesperson?.userId],
+        type: "appointment_reschedule_requested",
+        title,
+        message,
+        metadata: { appointmentId: appointment._id.toString() },
+        topicText: "appointment",
       });
     }
   } catch (err) {
@@ -583,8 +598,15 @@ async function captureRescheduleReply(orgId: any, from: string, body: string, co
       appointmentTitle: appointment.title,
       preference: trimmedBody,
     });
-    await notifyOrgAdmins(String(orgId), "appointment_reschedule_preference_received", title, message, {
-      appointmentId: appointment._id.toString(),
+    await notifyLeadPeople({
+      organizationId: orgId,
+      leadId: appointment.leadId,
+      ownerIds: [appointment.salesperson?.userId],
+      type: "appointment_reschedule_preference_received",
+      title,
+      message,
+      metadata: { appointmentId: appointment._id.toString() },
+      topicText: "appointment",
     });
   } catch (err) {
     console.error("[comm] reschedule reply capture failed:", err);
@@ -611,8 +633,13 @@ async function handleSmsOptCommand(orgId: any, from: string, body: string): Prom
   const customerName =
     [lead?.firstName, lead?.lastName].filter(Boolean).join(" ").trim() || normalizePhone(from);
   const { title, message } = notificationTemplates.sms_opt_out({ customerName, keyword: command });
-  await notifyOrgAdmins(String(orgId), "sms_opt_out", title, message, {
-    leadId: lead?._id ? String(lead._id) : undefined,
+  await notifyLeadPeople({
+    organizationId: orgId,
+    leadId: lead?._id,
+    type: "sms_opt_out",
+    title,
+    message,
+    metadata: { leadId: lead?._id ? String(lead._id) : undefined },
   });
 
   return true;
@@ -1467,39 +1494,19 @@ export async function triggerSmsAiReply(
           if (!result) throw new AiReplySuppressedError();
           return { messageId: String(result.message._id) };
         },
-        notifyHandoff: async (reason) => {
+        notifyHandoff: async (reason, topic) => {
           const customerName =
             [replyLead.firstName, replyLead.lastName].filter(Boolean).join(" ").trim() || "A customer";
-          const taskResult = await createAiAgentTaskAndNotify({
+          await writeAiHandoff({
             organizationId: String(orgId),
             leadId: String(replyLead._id),
             channel: "sms",
-            question: reason,
+            reason,
+            topic,
             agentName,
             customerName,
-            assignedTo: replyLead.assignedTo ? String(replyLead.assignedTo) : null,
+            assignedTo: replyLead.assignedTo,
           });
-          try {
-            const mentionedUserIds = replyLead.assignedTo ? [String(replyLead.assignedTo)] : [];
-            let mentionedGroupIds: string[] = [];
-            if (!replyLead.assignedTo) {
-              const org = await Organization.findById(orgId).select("metadata").lean();
-              const fallbackGroupId = (org?.metadata as any)?.aiHandoffFallbackGroupId;
-              if (fallbackGroupId) mentionedGroupIds = [String(fallbackGroupId)];
-            }
-            await addLeadNoteAndNotify({
-              organizationId: String(orgId),
-              leadId: String(replyLead._id),
-              text: reason || "Needs human follow-up",
-              authorType: "ai",
-              authorName: agentName,
-              mentionedUserIds,
-              mentionedGroupIds,
-              suppressNotification: shouldSuppressHandoffNoteNotification(replyLead.assignedTo, Boolean(taskResult?.notified)),
-            });
-          } catch (err) {
-            console.error("[comm] Alex handoff note failed:", err);
-          }
         },
         notifyMilestone: async (note) => {
           try {
@@ -1795,7 +1802,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
 
   const customer = await findCustomerByPhone(orgId, from);
   let lead = lifecycle
-    ? lifecycleMode === "active" ? await (await lifecycleIntake()).findOpenLeadForContact(String(orgId), { phone: from }).catch(() => null) : null
+    ? lifecycleMode === "active" ? await (await lifecycleIntake()).findOpenLeadForContact(String(orgId), { phone: from }, { phoneVerified: true }).catch(() => null) : null
     : await findLeadByPhone(orgId, from);
   const earlyOwnerId = lifecycle && lead?._id ? String(lead._id) : null;
   const conversation = await getOrCreateConversation({
@@ -1940,11 +1947,19 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
             customerName: customerNameForNotice,
             source: LEAD_SOURCE.INBOUND_SMS,
           });
-          notifyOrgAdmins(String(orgId), "new_lead", title, notificationMessage, {
-            leadId: String(lead._id),
-            customerName: customerNameForNotice,
-            source: LEAD_SOURCE.INBOUND_SMS,
-            channel: "sms",
+          notifyLeadPeople({
+            organizationId: orgId,
+            leadId: lead._id,
+            type: "new_lead",
+            title,
+            message: notificationMessage,
+            metadata: {
+              leadId: String(lead._id),
+              customerName: customerNameForNotice,
+              source: LEAD_SOURCE.INBOUND_SMS,
+              channel: "sms",
+            },
+            topicText: body,
           }).catch(() => undefined);
         }
       }
@@ -2291,39 +2306,27 @@ function prettyPhone(value: string): string {
 async function notifyMissedCall(call: any): Promise<void> {
   try {
     const orgId = String(call.orgId);
-    const { title, message } = notificationTemplates.missed_call({
-      caller: call.customerName || prettyPhone(call.from),
-      line: call.lineLabel || "",
-    });
+    const caller = call.customerName || prettyPhone(call.from);
+    const line = call.lineLabel || "";
+    const { title, message } = notificationTemplates.missed_call({ caller, line });
     const metadata = {
       callId: String(call._id),
       ...(call.leadId ? { leadId: String(call.leadId), route: `/crm/leads?leadId=${call.leadId}` } : { route: "/crm/leads" }),
     };
-    const recipients = new Set<string>();
     const groupId = call.ringGroupId || call.routing?.targetGroupId || null;
-    if (groupId && mongoose.isValidObjectId(String(groupId))) {
-      (await routingGroupRecipients(orgId, String(groupId)).catch(() => [] as string[])).forEach((id) => recipients.add(id));
-    }
-    if (call.leadId) {
-      const lead: any = await mongoose.model("Lead").findOne({ _id: call.leadId, organizationId: orgId }).select("assignedTo").lean().catch(() => null);
-      if (lead?.assignedTo && mongoose.isValidObjectId(String(lead.assignedTo))) {
-        recipients.add(String(lead.assignedTo));
-        const assignee: any = await User.findOne({ _id: lead.assignedTo, organizationId: orgId }).select("email").lean();
-        const linked: any = assignee?.email
-          ? await CrmUser.findOne({ organizationId: orgId, email: String(assignee.email).toLowerCase(), isActive: true }).select("_id").lean()
-          : null;
-        if (linked) recipients.add(String(linked._id));
-      }
-    }
-    if (recipients.size) {
-      const [admins, crmAdmins] = await Promise.all([
-        User.find({ organizationId: orgId, role: { $in: ["admin", "super_admin"] } }).select("_id").lean(),
-        CrmUser.find({ organizationId: orgId, role: { $in: ["admin", "manager"] }, isActive: true }).select("_id").lean(),
-      ]);
-      [...admins, ...crmAdmins].forEach((admin: any) => recipients.delete(String(admin._id)));
-    }
-    if (recipients.size) await notifyUsers([...recipients], orgId, "missed_call", title, message, metadata);
-    await notifyOrgAdmins(orgId, "missed_call", title, message, metadata);
+    const ringTeamIds = groupId && mongoose.isValidObjectId(String(groupId))
+      ? await routingGroupRecipients(orgId, String(groupId)).catch(() => [] as string[])
+      : [];
+    await notifyLeadPeople({
+      organizationId: orgId,
+      leadId: call.leadId,
+      type: "missed_call",
+      title,
+      message,
+      metadata,
+      ringTeamIds,
+      tagText: `Missed call from ${caller}${line ? ` to ${line}` : ""}`,
+    });
   } catch (error) {
     console.error("[comm] missed call notification failed", error);
   }
@@ -2511,7 +2514,7 @@ export async function handleCallInitiated(payload: any) {
     callInquiryId = recorded ? String(recorded.event._id) : null;
   }
   let lead = lifecycle
-    ? intakeMode === "active" ? await (await lifecycleIntake()).findOpenLeadForContact(String(orgId), { phone: from }).catch(() => null) : null
+    ? intakeMode === "active" ? await (await lifecycleIntake()).findOpenLeadForContact(String(orgId), { phone: from }, { phoneVerified: true }).catch(() => null) : null
     : await findLeadByPhone(orgId, from);
   const earlyCallOwnerId = lifecycle && lead?._id ? String(lead._id) : null;
   const displayName =
@@ -2544,8 +2547,13 @@ export async function handleCallInitiated(payload: any) {
       emitToOrg(orgId, "lead:new", lead.toObject ? lead.toObject() : lead);
       const customerNameForNotice = leadDisplayName({ ...(lead.toObject ? lead.toObject() : lead), phone: lead.phone || from });
       const { title, message: notificationMessage } = notificationTemplates.new_lead({ customerName: customerNameForNotice, source: LEAD_SOURCE.INBOUND_CALL });
-      notifyOrgAdmins(String(orgId), "new_lead", title, notificationMessage, {
-        leadId: String(lead._id), customerName: customerNameForNotice, source: LEAD_SOURCE.INBOUND_CALL, channel: "phone", route: `/crm/leads?leadId=${lead._id}`,
+      notifyLeadPeople({
+        organizationId: orgId,
+        leadId: lead._id,
+        type: "new_lead",
+        title,
+        message: notificationMessage,
+        metadata: { leadId: String(lead._id), customerName: customerNameForNotice, source: LEAD_SOURCE.INBOUND_CALL, channel: "phone", route: `/crm/leads?leadId=${lead._id}` },
       }).catch(() => undefined);
     }
   }

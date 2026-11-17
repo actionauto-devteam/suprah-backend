@@ -16,9 +16,12 @@ export async function createAiAgentTaskAndNotify(opts: {
   agentName: string;
   customerName: string;
   assignedTo?: string | null;
+  assigneeIds?: string[];
+  notifyUserIds?: string[];
 }): Promise<{ notified: boolean }> {
   const question = opts.question || 'Needs human follow-up';
-  const assigneeIds = opts.assignedTo ? [opts.assignedTo] : [];
+  const assigneeIds = opts.assigneeIds ?? (opts.assignedTo ? [opts.assignedTo] : []);
+  const notifyIds = opts.notifyUserIds ?? assigneeIds;
 
   try {
     await AiAgentTask.create({
@@ -42,8 +45,8 @@ export async function createAiAgentTaskAndNotify(opts: {
   const metadata = { leadId: opts.leadId, route: `/crm/leads?leadId=${opts.leadId}` };
 
   const result =
-    assigneeIds.length > 0
-      ? await notifyUsers(assigneeIds, opts.organizationId, 'ai_agent_handoff_needed', title, message, metadata)
+    notifyIds.length > 0
+      ? await notifyUsers(notifyIds, opts.organizationId, 'ai_agent_handoff_needed', title, message, metadata)
       : await notifyOrgAdmins(opts.organizationId, 'ai_agent_handoff_needed', title, message, metadata);
 
   return { notified: Boolean(result && result.successful > 0) };
