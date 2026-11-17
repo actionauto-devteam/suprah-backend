@@ -20,6 +20,15 @@ const cleanText = (value: unknown): string => {
   return typeof text === "string" ? text.trim().slice(0, MAX_TEXT_LENGTH) : "";
 };
 
+/**
+ * One plain-text value from a query (the first when a link repeats it),
+ * trimmed and capped. Staff Inventory and Create Load filters use it too
+ * (2026-11-17).
+ */
+export function queryText(value: unknown): string {
+  return cleanText(value);
+}
+
 /** A case-insensitive exact match for a dropdown value (make, model, city), or null. */
 export function exactText(value: unknown): RegExp | null {
   const text = cleanText(value);

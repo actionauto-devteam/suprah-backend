@@ -35,6 +35,7 @@ import {
   marketplaceSearchClause,
   marketplaceSort,
   queryNumber,
+  queryText,
 } from "../services/marketplaceQuery";
 
 const VEH_CACHE_TTL = 60 * 60;
@@ -373,26 +374,31 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
   // Archive/Sold view passes archived=true.
   const filter: any = { isDeleted: false, ...archivedScope(archived) };
 
-  if (status && status !== "all") {
-    filter.status = status;
+  // Filter text is matched literally (2026-11-17), see marketplaceQuery.
+  const statusText = queryText(status);
+  if (statusText && statusText !== "all") {
+    filter.status = statusText;
   }
 
-  if (make) {
-    filter.make = { $regex: make, $options: "i" };
+  const makeMatch = containsText(make);
+  if (makeMatch) {
+    filter.make = makeMatch;
   }
 
-  if (model) {
-    filter.modelName = { $regex: model, $options: "i" };
+  const modelMatch = containsText(model);
+  if (modelMatch) {
+    filter.modelName = modelMatch;
   }
 
   if (year) {
     filter.year = Number(year);
   }
 
-  if (location) {
+  const locationMatch = containsText(location);
+  if (locationMatch) {
     filter.$or = [
-      { dealerCity: { $regex: location, $options: "i" } },
-      { dealerState: { $regex: location, $options: "i" } },
+      { dealerCity: locationMatch },
+      { dealerState: locationMatch },
     ];
   }
 
@@ -408,12 +414,14 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     if (maxMileage) filter.mileage.$lte = Number(maxMileage);
   }
 
-  if (req.query.bodyStyle) {
-    filter.bodyStyle = { $regex: req.query.bodyStyle, $options: "i" };
+  const bodyStyleMatch = containsText(req.query.bodyStyle);
+  if (bodyStyleMatch) {
+    filter.bodyStyle = bodyStyleMatch;
   }
 
-  if (req.query.driveTrain) {
-    filter.driveTrain = { $regex: req.query.driveTrain, $options: "i" };
+  const driveTrainMatch = containsText(req.query.driveTrain);
+  if (driveTrainMatch) {
+    filter.driveTrain = driveTrainMatch;
   }
 
   if (req.query.minDaysOnLot || req.query.maxDaysOnLot) {
@@ -1576,21 +1584,26 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
   // explicitly requested (archived=true exports the Archive/Sold view).
   const filter: any = { ...archivedScope(archived) };
 
-  if (status) {
-    if (status !== "all") {
-      filter.status = status;
+  // Filter text is matched literally (2026-11-17), see marketplaceQuery.
+  const statusText = queryText(status);
+  if (statusText) {
+    if (statusText !== "all") {
+      filter.status = statusText;
     }
   } else {
     filter.status = "Ready for Sale";
   }
 
-  if (make) filter.make = { $regex: make, $options: "i" };
-  if (model) filter.modelName = { $regex: model, $options: "i" };
+  const makeMatch = containsText(make);
+  const modelMatch = containsText(model);
+  const locationMatch = containsText(location);
+  if (makeMatch) filter.make = makeMatch;
+  if (modelMatch) filter.modelName = modelMatch;
   if (year) filter.year = Number(year);
-  if (location) {
+  if (locationMatch) {
     filter.$or = [
-      { dealerCity: { $regex: location, $options: "i" } },
-      { dealerState: { $regex: location, $options: "i" } },
+      { dealerCity: locationMatch },
+      { dealerState: locationMatch },
     ];
   }
 
@@ -1741,13 +1754,14 @@ const getDashboard = asyncHandler(async (req: Request, res: Response) => {
 
 const autocomplete = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
-  const { q } = req.query;
+  const q = queryText(req.query.q);
 
-  if (!q || (q as string).length < 2) {
+  if (q.length < 2) {
     return res.json(new ApiResponse(200, [], "Query too short"));
   }
 
-  const regex = { $regex: q, $options: "i" };
+  // Matched literally (2026-11-17), see marketplaceQuery.
+  const regex = containsText(q)!;
   const query = {
     organizationId: orgId,
     isDeleted: false,

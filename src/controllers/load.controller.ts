@@ -22,6 +22,7 @@
     } from "../utils/calculations";
     import { storageService, BucketType } from "../services/storage.service";
     import { INSPECTION_PHOTO_CHANGED, inspectionPhotoFilter } from "../utils/inspectionPhotoReplace";
+    import { containsText, queryText } from "../services/marketplaceQuery";
     import { getSignedProofUrl } from "../utils/signedUrlCache";
     import {
       omitConditionReportsFromList,
@@ -597,14 +598,16 @@
 
     const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) => {
       const organizationId = req.orgId as string;
-      const q = (req.query.q as string | undefined)?.trim().toUpperCase();
+      // Matched literally (2026-11-17): one value, trimmed and capped, so a
+      // repeated "q" or a bracket in a model name can't break the picker.
+      const match = containsText(queryText(req.query.q).toUpperCase());
 
       const filter: Record<string, unknown> = { organizationId, isDeleted: false };
-      if (q) {
+      if (match) {
         filter.$or = [
-          { vin: { $regex: q, $options: "i" } },
-          { make: { $regex: q, $options: "i" } },
-          { modelName: { $regex: q, $options: "i" } },
+          { vin: match },
+          { make: match },
+          { modelName: match },
         ];
       }
 
