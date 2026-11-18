@@ -29,6 +29,7 @@ import {
   refundUpdate,
   remainingRefundable,
 } from '../../src/utils/paymentRefund';
+import { payoutAccountStatus, payoutFailedNotice } from '../../src/utils/driverPayoutAccount';
 
 describe('payments are staff-only', () => {
   const app = express();
@@ -141,5 +142,56 @@ describe('refunds', () => {
       $max: { refundedAmount: 100 },
       $set: { refundedAt: at, status: 'refunded' },
     });
+  });
+});
+
+describe('driver payout account status', () => {
+  const account = (overrides: Record<string, unknown> = {}) =>
+    ({
+      id: 'acct_1',
+      details_submitted: true,
+      charges_enabled: false,
+      payouts_enabled: true,
+      capabilities: { transfers: 'active' },
+      requirements: { currently_due: [], past_due: [] },
+      ...overrides,
+    }) as any;
+
+  it('shows a finished transfers-only account as ready, even though card charges stay off', () => {
+    expect(payoutAccountStatus(account())).toEqual({
+      connected: true,
+      accountId: 'acct_1',
+      detailsSubmitted: true,
+      chargesEnabled: false,
+      payoutsEnabled: true,
+      transfersActive: true,
+      ready: true,
+      needsMoreInfo: false,
+    });
+  });
+
+  it.each([
+    ['details not sent yet', { details_submitted: false }],
+    ['bank payouts not on yet', { payouts_enabled: false }],
+    ['transfers still being checked', { capabilities: { transfers: 'pending' } }],
+    ['no transfers at all', { capabilities: {} }],
+  ])('is not ready when %s', (_label, overrides) => {
+    expect(payoutAccountStatus(account(overrides)).ready).toBe(false);
+  });
+
+  it('says when Stripe is waiting on the driver', () => {
+    expect(payoutAccountStatus(account({ requirements: { currently_due: ['external_account'] } })).needsMoreInfo).toBe(true);
+    expect(payoutAccountStatus(account({ requirements: { past_due: ['individual.dob.day'] } })).needsMoreInfo).toBe(true);
+    expect(payoutAccountStatus(account({ requirements: undefined })).needsMoreInfo).toBe(false);
+  });
+
+  it('tells the driver a payout failed and what to do next', () => {
+    expect(payoutFailedNotice('LD-1042', 350)).toEqual({
+      title: "Payout couldn't be sent",
+      message:
+        "Your payout of $350.00 for load LD-1042 couldn't be sent to your payout account. " +
+        'Open Settings and finish your Stripe payout account, then let your dispatcher know so they can send it again.',
+    });
+    expect(payoutFailedNotice(undefined, 12.5).message).toContain('for a delivered load');
   });
 });

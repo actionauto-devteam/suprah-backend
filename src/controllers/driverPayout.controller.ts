@@ -11,6 +11,7 @@ import activityService from '../services/activity.service';
 import config from '../config';
 import logger from '../utils/logger';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
+import { payoutAccountStatus, payoutFailedNotice } from '../utils/driverPayoutAccount';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: "2026-02-25.clover",
@@ -269,6 +270,14 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
     payout.status = "failed";
     payout.failureReason = stripeError?.message || "Stripe transfer failed";
     await payout.save();
+    // The driver is told too, so they can fix their payout account.
+    safeCreateNotification({
+      userId: driverId,
+      organizationId: orgId,
+      type: 'driver_payout',
+      ...payoutFailedNotice(load.loadNumber, numericAmount),
+      metadata: { loadId, amount: numericAmount, payoutId: payout._id.toString(), route: '/driver/settings' },
+    });
     throw new ApiError(402, 'The payout could not be sent. Check that the driver\'s payout account is fully set up, then try again. The failure was recorded on the payout.');
   }
   } finally {
@@ -429,10 +438,7 @@ const getDriverConnectStatus = asyncHandler(async (req: Request, res: Response) 
 
   try {
     const account = await stripe.accounts.retrieve(user.stripeConnectAccountId);
-    res.json(new ApiResponse(200, {
-      connected: true, accountId: account.id, detailsSubmitted: account.details_submitted,
-      chargesEnabled: account.charges_enabled, payoutsEnabled: account.payouts_enabled,
-    }, 'Status retrieved'));
+    res.json(new ApiResponse(200, payoutAccountStatus(account), 'Status retrieved'));
   } catch (err: any) {
     if (err?.code === 'resource_missing') {
       user.stripeConnectAccountId = undefined; await user.save();
