@@ -175,6 +175,15 @@ describe('orgGmail.service syncLeadsForOrg — atomic messageId dedup', () => {
     mockLeadFindOneAndUpdate.mockResolvedValue({ lastErrorObject: { updatedExisting: false }, value: { _id: 'adf-lead' } });
     await orgGmailService.syncLeadsForOrg('org-1');
     expect(mockLeadFindOneAndUpdate.mock.calls[0][1].$setOnInsert).toMatchObject({ email: '', phone: '8015550123' });
+    expect(mockLeadFindOneAndUpdate.mock.calls[0][1].$setOnInsert.address).toBe('');
+  });
+  it('ADF with a postal address saves it on the lead as one address line', async () => {
+    (parseEmailBody as jest.Mock).mockResolvedValueOnce({ parsedContent: 'With address', channel: 'adf', adfData: { firstName: 'Customer', phone: '8015550124', vehicle: {}, rawFields: { street: '12 Test Way', city: 'Orem', state: 'UT', zip: '84057', vin: '1HG' } } });
+    mockGmailList.mockResolvedValue({ data: { messages: [{ id: 'adf-address' }] } });
+    mockGmailGet.mockResolvedValue({ data: { id: 'adf-address', payload: { headers: [{ name: 'From', value: 'vendor@example.com' }], ...textPart('With address') } } });
+    mockLeadFindOneAndUpdate.mockResolvedValue({ lastErrorObject: { updatedExisting: false }, value: { _id: 'adf-address-lead' } });
+    await orgGmailService.syncLeadsForOrg('org-1');
+    expect(mockLeadFindOneAndUpdate.mock.calls[0][1].$setOnInsert.address).toBe('12 Test Way, Orem, UT, 84057');
   });
 });
 

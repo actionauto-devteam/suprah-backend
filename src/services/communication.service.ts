@@ -62,6 +62,7 @@ import {
   OPT_IN_KEYWORDS,
   OPT_OUT_KEYWORDS,
   RESCHEDULE_KEYWORDS,
+  isSmsKeyword,
   normalizeSmsCommand,
 } from "../utils/smsKeywords";
 
@@ -69,6 +70,7 @@ const lifecycleIntake = () => import("./leadIntake.service");
 const inquiryRecords = () => import("./leadInquiry.service");
 const notifyLeadPeople = async (input: LeadNoticeInput) => (await import("./leadNoticeRouting.service")).notifyLeadPeople(input);
 import { getInboundRoutingConfig, getConfiguredInboundOrganization, routingGroupRecipients } from './callRoutingConfig.service';
+import { allLocationsRing } from './allLocationsRing.service';
 import { handleStaffPhoneVerifyAnswered, handleStaffPhoneVerifyGather } from './staffCallPhone.service';
 import StaffCallPhone from "../models/StaffCallPhone.model";
 import CrmUser from "../models/CrmUser.model";
@@ -83,7 +85,7 @@ import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAi
   attentionOrgIds, recoverAiHumanAttention } from './aiHumanAttention.service';
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode, AiWorkflow } from './aiOperatingMode.service';
 import { customerNumberOf, dealershipNumberOf, LIVE_CALL_STATUSES, liveCallCutoff } from "../utils/callActivity";
-import { touchLeadActivity } from "../utils/leadActivity";
+import { markLeadAwaitingReply, recordLeadAnswered, touchLeadActivity } from "../utils/leadActivity";
 import { initializeIvr, handleIvrGather, handleIvrCustomerAnswered, emitIvrCall, clearIvrTimer, canReceiveIvrCall, ivrAgentFailed, recoverIvrCalls, startHoldAudio, stopHoldAudio } from './ivr.service';
 
 const AI_AGENT_ACTOR_ID = "ai-agent";
@@ -233,6 +235,7 @@ export async function sendAutomatedSms(opts: {
   const { aiWorkflow, senderName, ...rest } = opts;
   await sendSmsFromUser({
     ...rest,
+    answersCustomer: aiWorkflow === "sms_reply",
     user: senderName ? { userId: "system", name: senderName } : await automatedActor(opts.orgId),
     beforeDispatch: aiWorkflow ? aiSmsDispatchGuard(opts.orgId, aiWorkflow, opts.toPhone, opts.leadId) : undefined,
   });
@@ -286,6 +289,7 @@ export async function sendStaffAttributedSms(opts: {
   return sendSmsFromUser({
     ...rest,
     user: actor,
+    answersCustomer: aiWorkflow === "sms_reply",
     beforeDispatch: aiGuard || beforeDispatch
       ? async () => {
           await beforeDispatch?.();
@@ -579,6 +583,7 @@ async function captureRescheduleReply(orgId: any, from: string, body: string, co
         $unset: { rescheduleAwaitingReplyAt: "" },
       },
     );
+    await markLeadAwaitingReply(appointment.leadId, new Date(), orgId);
 
     await sendAutomatedReplySms({
       orgId,
@@ -1185,6 +1190,7 @@ export async function sendSmsFromUser(opts: {
   destinationPolicy?: SmsDestinationPolicy;
   uncertainOnTransportError?: boolean;
   origin?: "chrome_extension";
+  answersCustomer?: boolean;
 }) {
   const to = assertSmsDestination(opts.toPhone, opts.destinationPolicy ?? "automated");
   const body = (opts.body || "").trim();
@@ -1307,6 +1313,9 @@ export async function sendSmsFromUser(opts: {
   }
 
   await bumpConversation(conversation._id, message);
+  if (leadId && (opts.answersCustomer ?? opts.destinationPolicy === "manual")) {
+    await recordLeadAnswered(leadId, opts.orgId, message.sentAt);
+  }
   emitToOrg(opts.orgId, "comm:message:new", { message: message.toObject() });
   return { conversation, message };
 }
@@ -1492,6 +1501,9 @@ export async function triggerSmsAiReply(
             beforeDispatch: () => claimAiReplyDispatch(check),
           });
           if (!result) throw new AiReplySuppressedError();
+          if (lead?._id && String(lead._id) !== String(replyLead._id)) {
+            await recordLeadAnswered(lead._id, orgId, result.message.sentAt);
+          }
           return { messageId: String(result.message._id) };
         },
         notifyHandoff: async (reason, topic) => {
@@ -1864,7 +1876,11 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
   };
 
   await bumpConversation(conversation._id, message);
-  if (lead?._id) await touchLeadOnInbound(lead._id, orgId);
+  const receivedAt = new Date(message.createdAt || Date.now());
+  if (lead?._id) {
+    if (!lifecycle && !isSmsKeyword(body)) await markLeadAwaitingReply(lead._id, receivedAt);
+    await touchLeadOnInbound(lead._id, orgId);
+  }
   emitToOrg(orgId, "comm:message:new", {
     message: message.toObject(),
     conversation: {
@@ -1895,6 +1911,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
       if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) {
         if (screeningMode === "training") queueShadowAttentionSkip(smsShadowSource(orgId, conversation, lead, check));
         if (lifecycle) settleLifecycleSms().catch((err) => console.error("[comm] lead intake for inbound SMS failed:", err));
+        else await markLeadAwaitingReply(lead._id, receivedAt, orgId);
         void notifyLeadMessageUnlessHandoff(orgId, lead, "sms", body);
         return message;
       }
@@ -1965,6 +1982,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
       }
     }
 
+    if (lead?._id) await markLeadAwaitingReply(lead._id, receivedAt, orgId);
     if (lead) void notifyLeadMessage(orgId, lead, "sms", body);
     triggerSmsAiReply(orgId, conversation, lead, check, body, screened).catch((err) => {
       console.error("[comm] triggerSmsAiReply failed:", err);
@@ -2180,7 +2198,7 @@ async function handlePhoneLegAnswered(payload: any, state: any): Promise<void> {
   }
   const { call } = found;
   await markPhoneLegs(call._id, [leg], "answered");
-  const line = call.lineLabel || (await resolveDealerName(call.orgId));
+  const line = calledLine(call) || (await resolveDealerName(call.orgId));
   await telnyx.gatherDigit(leg, `Call for ${line} from ${spokenCaller(call)}. Press 1 to take the call.`, {
     kind: "phone-accept", callLogId: String(call._id), userId: String(state.userId), ...(call.routing ? { revision: call.routing.revision } : {}),
   }).catch(async () => {
@@ -2231,6 +2249,7 @@ async function handlePhoneAccept(payload: any, state: any): Promise<void> {
       { new: true },
     );
     if (live) emitCallUpdate(live);
+    if (live?.leadId) await recordLeadAnswered(live.leadId, live.orgId, live.answeredAt);
   } catch (error: any) {
     console.error("[comm] Could not connect the call to the employee phone", { callId: String(claimed._id), error: String(error?.message || error).slice(0, 200) });
     await telnyx.hangupCall(leg).catch(() => {});
@@ -2277,9 +2296,10 @@ async function pushIncomingCall(call: any): Promise<void> {
       ids = staff.map((user) => String(user._id));
     }
     const caller = call.customerName || prettyPhone(call.from);
+    const line = calledLine(call);
     const payload = {
       title: "Incoming call",
-      body: [caller, call.lineLabel ? `Calling ${call.lineLabel}` : ""].filter(Boolean).join(" · "),
+      body: [caller, line ? `Calling ${line}` : ""].filter(Boolean).join(" · "),
       tag: `incoming-call-${call._id}`,
       data: { url: call.leadId ? `/crm/leads?leadId=${call.leadId}` : "/crm/leads" },
     };
@@ -2303,20 +2323,31 @@ function prettyPhone(value: string): string {
   return match ? `(${match[1]}) ${match[2]}-${match[3]}` : String(value || "an unknown number");
 }
 
+function calledLine(call: any): string {
+  const line = String(call?.lineLabel || "").trim();
+  const picked = String(call?.routing?.selectedLabel || "").trim();
+  if (!picked || line.toLowerCase().includes(picked.toLowerCase())) return line;
+  return line ? `${line}, ${picked}` : picked;
+}
+
 async function notifyMissedCall(call: any): Promise<void> {
   try {
     const orgId = String(call.orgId);
     const caller = call.customerName || prettyPhone(call.from);
-    const line = call.lineLabel || "";
+    const line = calledLine(call);
     const { title, message } = notificationTemplates.missed_call({ caller, line });
     const metadata = {
       callId: String(call._id),
       ...(call.leadId ? { leadId: String(call.leadId), route: `/crm/leads?leadId=${call.leadId}` } : { route: "/crm/leads" }),
     };
     const groupId = call.ringGroupId || call.routing?.targetGroupId || null;
-    const ringTeamIds = groupId && mongoose.isValidObjectId(String(groupId))
+    const storeTeamIds = groupId && mongoose.isValidObjectId(String(groupId))
       ? await routingGroupRecipients(orgId, String(groupId)).catch(() => [] as string[])
       : [];
+    const extraTeamIds = storeTeamIds.length && call.extraRingGroupId && mongoose.isValidObjectId(String(call.extraRingGroupId))
+      ? await routingGroupRecipients(orgId, String(call.extraRingGroupId)).catch(() => [] as string[])
+      : [];
+    const ringTeamIds = [...new Set([...storeTeamIds, ...extraTeamIds])];
     await notifyLeadPeople({
       organizationId: orgId,
       leadId: call.leadId,
@@ -2561,6 +2592,10 @@ export async function handleCallInitiated(payload: any) {
   const ringTeam = !inboundRouting && line?.ringGroupId
     ? await routingGroupRecipients(String(orgId), line.ringGroupId).catch(() => [] as string[])
     : [];
+  const allLocations = ringTeam.length && line?.kind === 'location'
+    ? await allLocationsRing(orgId).catch(() => null)
+    : null;
+  const ringRecipients = allLocations ? [...new Set([...ringTeam, ...allLocations.recipientIds])] : ringTeam;
   const call = await CallLog.create({
     orgId,
     customerId: lead?.customerLink?.status === 'linked' ? lead.customerId : customer?._id ?? null,
@@ -2575,7 +2610,8 @@ export async function handleCallInitiated(payload: any) {
     startedAt: new Date(),
     customerName: displayName,
     ...(line ? { lineLabel: line.label } : {}),
-    ...(ringTeam.length ? { ringGroupId: line!.ringGroupId, ringRecipientIds: ringTeam } : {}),
+    ...(ringTeam.length ? { ringGroupId: line!.ringGroupId, ringRecipientIds: ringRecipients } : {}),
+    ...(allLocations ? { extraRingGroupId: allLocations.groupId } : {}),
   });
   if (call.leadId) void touchLeadOnInbound(call.leadId, orgId);
   void grantCallbackPermission(call).catch((err) => console.error("[comm] Could not save the callback permission for a Do Not Contact caller", err));
@@ -2726,6 +2762,7 @@ export async function handleCallAnswered(payload: any) {
       await stopHoldAudio(call);
     }
     emitCallUpdate(call);
+    if (call.leadId) await recordLeadAnswered(call.leadId, call.orgId, call.answeredAt);
   }
 }
 
@@ -3024,6 +3061,7 @@ export async function logClientCall(opts: {
   }
 
   await call.save();
+  if (opts.event === "answered" && call.leadId) await recordLeadAnswered(call.leadId, opts.orgId, call.answeredAt);
   emitToOrg(opts.orgId, "comm:call:update", { call: call.toObject() });
   return call;
 }

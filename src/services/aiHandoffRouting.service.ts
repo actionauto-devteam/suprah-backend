@@ -7,6 +7,7 @@ import { AiAgentTaskChannel } from '../models/AiAgentTask.model';
 import { addLeadNoteAndNotify, resolveGroupMemberIds } from '../utils/leadNote';
 import { createAiAgentTaskAndNotify } from '../utils/aiAgentTask';
 import { crmNotificationRecipients } from '../utils/crmNotificationRecipients';
+import { markLeadAwaitingReply } from '../utils/leadActivity';
 import logger from '../utils/logger';
 import {
   AiHandoffTopic,
@@ -104,6 +105,7 @@ export async function writeAiHandoff(input: {
   noteSuffix?: string;
 }): Promise<AiHandoffRouting | null> {
   const reason = String(input.reason || '').trim() || 'Needs human follow-up';
+  await markLeadAwaitingReply(input.leadId, new Date(), input.organizationId, true);
   let routing: AiHandoffRouting;
   try {
     routing = await resolveAiHandoffRouting({

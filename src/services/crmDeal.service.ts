@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import CrmDeal, { CRM_DEAL_STAGES, CrmDealStage, DealActor, ICrmDeal } from '../models/CrmDeal.model';
 import Lead from '../models/lead.model';
 import { ApiError } from '../utils/ApiError';
+import { clearLeadAwaitingReply } from '../utils/leadActivity';
 import { CrmStaff, isManagerOrAdmin, listStaffTeam, orgIdVariants, requireTeamMember, staffName, staffTeamQuery } from '../utils/crmStaff';
 import { isContactRestrictedStatus } from '../constants/leadStatus';
 import User from '../models/User.model';
@@ -229,7 +230,9 @@ async function markLeadSold(orgId: string, leadId: unknown, by: DealActor): Prom
     { _id: lead._id, status: lead.status },
     { $set: { status: 'Sold', isPending: false }, $push: { statusHistory: { from: lead.status, to: 'Sold', changedAt: new Date(), changedBy, reason: `Deal won (by ${by.name})` } } },
   );
-  return updated.modifiedCount ? 'changed' : 'conflict';
+  if (!updated.modifiedCount) return 'conflict';
+  await clearLeadAwaitingReply(lead._id, orgId, new Date());
+  return 'changed';
 }
 
 async function syncDealPurchase(orgId: string, doc: ICrmDeal, wasWon: boolean, by: DealActor) {

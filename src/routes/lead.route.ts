@@ -6,6 +6,7 @@ import {
   getLeadLocationCounts,
   getLeadTypeCounts,
   getAssignedNewCount,
+  getNeedsReplyCount,
   getLeadById,
   getUnansweredInquiryReminders,
   runUnansweredInquiryReminderCheck,
@@ -15,6 +16,7 @@ import {
   updateLead,
   createInquiry,
   markAsRead,
+  markNoReplyNeeded,
   markAsPending,
   replyToInquiry,
   bulkReplyToInquiries,
@@ -69,6 +71,7 @@ router.get("/status-counts", getLeadStatusCounts);
 router.get("/location-counts", getLeadLocationCounts);
 router.get("/lead-type-counts", getLeadTypeCounts);
 router.get("/assigned-new-count", getAssignedNewCount);
+router.get("/needs-reply-count", getNeedsReplyCount);
 router.get("/possible-matches", getLicensePossibleMatchesHandler);
 
 router.post(
@@ -87,6 +90,7 @@ router.post("/:id/ai-draft", staffAiDraftLimiter, generateLeadAiDraftHandler);
 router.get("/:id/ai-summary", getLeadAiSummary);
 router.post("/:id/ai-summary/regenerate", regenerateLeadAiSummary);
 router.patch("/:id/read", markAsRead);
+router.patch("/:id/no-reply-needed", markNoReplyNeeded);
 router.patch("/:id/pending", markAsPending);
 router.post("/:id/appointment", setAppointmentForLead);
 router.get("/:id/appointments", getAppointmentsForLead);

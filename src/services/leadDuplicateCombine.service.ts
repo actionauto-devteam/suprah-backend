@@ -14,6 +14,7 @@ import { newestFirst } from './leadIntakeDecision';
 import { leadIntakeLockKeys, withLeadIntakeLock } from './leadIntakeLock.service';
 import { getLeadIntakeMode, onLeadIntakeResumed } from './leadIntakeControl.service';
 import { emitToOrg } from '../utils/socketEmitter';
+import { moveLeadAwaitingReply } from '../utils/leadActivity';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 
@@ -206,6 +207,7 @@ async function combineWithinLock(
       ...(newAssignee ? { $push: { assignmentHistory: { from: null, to: newAssignee, changedAt: now } } } : {}),
     },
   );
+  await moveLeadAwaitingReply(combinedIds, main._id, organizationId);
 
   await LeadCombineRecord.updateOne(
     { _id: record._id },

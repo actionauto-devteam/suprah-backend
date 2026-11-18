@@ -23,6 +23,7 @@ import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
 import { notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
+import { markLeadAwaitingReply } from '../utils/leadActivity';
 import logger from '../utils/logger';
 import { CONFIRM_KEYWORDS, RESCHEDULE_KEYWORDS, isSmsKeyword, normalizeSmsCommand } from '../utils/smsKeywords';
 import { leadDisplayName } from './leadMessageNotice.service';
@@ -52,6 +53,7 @@ class RetryableIntakeError extends Error {
 const RESERVED_DRAFT_FIELDS = new Set([
   '_id', 'organizationId', 'sourceInquiryId', 'intakeSlots', 'inquiryCount', 'lastInquiryAt', 'intakeIdentity',
   'customerId', 'customerLink', 'normalizedPhone', 'normalizedEmail', 'statusHistory', 'notes', 'announced',
+  'customerArea',
 ]);
 
 const AUTO_REPLY_PATTERNS = [
@@ -93,6 +95,7 @@ export async function submitLeadInquiry(request: LeadIntakeRequest): Promise<Lea
 }
 
 export const CONVERSATION_ONLY_KINDS = ['email_reply', 'sms', 'call'];
+const REPLY_KINDS = ['email_reply', 'sms'];
 
 export async function findOpenLeadForContact(
   organizationId: string,
@@ -125,9 +128,21 @@ export async function skipLeadInquiryNotification(eventId: unknown): Promise<voi
   );
 }
 
-export async function appendInquiryToLead(organizationId: string, leadId: string, event: ILeadInquiry) {
+export async function fillEmptyLeadAddress(organizationId: string, lead: any, event: ILeadInquiry) {
+  const draftAddress = (event.leadDraft as Record<string, unknown> | null | undefined)?.address;
+  const address = typeof draftAddress === 'string' ? draftAddress.trim() : '';
+  if (!lead || !address || String(lead.address || '').trim()) return lead;
+  const filled = await Lead.findOneAndUpdate(
+    { _id: lead._id, organizationId, address: { $in: [null, ''] } },
+    { $set: { address } },
+    { new: true, timestamps: false },
+  ).catch(() => null);
+  return filled || lead;
+}
+
+export async function appendInquiryToLead(organizationId: string, leadId: string, event: ILeadInquiry, options: { fillAddress?: boolean } = {}) {
   const countsAsInquiry = !CONVERSATION_ONLY_KINDS.includes(event.kind);
-  return Lead.findOneAndUpdate(
+  const appended = await Lead.findOneAndUpdate(
     { _id: leadId, organizationId, status: { $nin: LIFECYCLE_TERMINAL_STATUSES } },
     [
       {
@@ -145,6 +160,8 @@ export async function appendInquiryToLead(organizationId: string, leadId: string
     ],
     { new: true },
   );
+  if (appended && REPLY_KINDS.includes(event.kind)) await markLeadAwaitingReply(appended._id, event.receivedAt, organizationId);
+  return options.fillAddress === false ? appended : fillEmptyLeadAddress(organizationId, appended, event);
 }
 
 export async function createLeadForInquiry(organizationId: string, event: ILeadInquiry, decision: Pick<LeadIntakeDecision, 'intakeSlots'>) {
@@ -179,7 +196,9 @@ export async function createLeadForInquiry(organizationId: string, event: ILeadI
     ...(decision.intakeSlots?.length ? { intakeSlots: decision.intakeSlots } : {}),
   };
   try {
-    return await Lead.create(document);
+    const created = await Lead.create(document);
+    if (REPLY_KINDS.includes(event.kind)) await markLeadAwaitingReply(created._id, event.receivedAt, organizationId);
+    return created;
   } catch (err: any) {
     if (err?.code !== 11000) throw err;
     const existing = await Lead.findOne({ organizationId, sourceInquiryId: event._id });

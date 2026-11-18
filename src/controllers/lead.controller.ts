@@ -29,6 +29,7 @@ import { cacheService } from '../services/cache.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
 import { buildLeadSearchCondition } from '../utils/leadSearch';
+import { customerAreaFilterCondition, leadCustomerArea, postalAddressLine } from '../utils/customerArea';
 import { LEAD_STATUS_CATEGORIES, LIFECYCLE_TERMINAL_STATUSES, UNANSWERED_LEAD_STATUSES, isContactRestrictedStatus } from '../constants/leadStatus';
 import {
   assertContactAllowed,
@@ -44,7 +45,7 @@ import {
 } from '../services/contactRestriction.service';
 import { normalizeIdentityPhone } from '../utils/contactIdentity';
 import { addLeadNoteAndNotify } from '../utils/leadNote';
-import { touchLeadActivity } from '../utils/leadActivity';
+import { clearLeadAwaitingReply, recordLeadAnswered, touchLeadActivity } from '../utils/leadActivity';
 import { resolveCrmStaff } from '../utils/crmStaff';
 import { withRetry } from '../utils/withRetry';
 import {
@@ -118,6 +119,12 @@ function appendLeadCondition(query: any, condition: Record<string, unknown>) {
   if (!condition || Object.keys(condition).length === 0) return;
   if (!query.$and) query.$and = [];
   query.$and.push(condition);
+}
+
+function leadNeedsReplySince(lead: any): Date | null {
+  const since = lead?.followUp?.awaitingReplySince;
+  if (!since || LIFECYCLE_TERMINAL_STATUSES.includes(String(lead?.status || ''))) return null;
+  return since;
 }
 
 function parseDateOnlyBoundary(value: unknown, boundary: 'start' | 'end'): Date | null {
@@ -458,6 +465,7 @@ export async function sendLeadReplyEmail(
   );
 
   await touchLeadActivity(lead._id, orgId);
+  await recordLeadAnswered(lead._id, orgId);
 
   return {
     gmailMessageId: sendResult?.data?.id || null,
@@ -634,6 +642,7 @@ export const receiveADF = async (req: Request, res: Response) => {
       vehicleId: vehicleContext?.vehicleId,
       location: vehicleContext?.location,
       comments: adfData.comments,
+      address: postalAddressLine(adfData.rawFields),
       parsedContent: adfData.parsedContent,
       channel: 'adf',
       source: LEAD_SOURCE.THIRD_PARTY_LEAD,
@@ -802,6 +811,16 @@ export const getAllLeads = async (req: Request, res: Response) => {
       appendLeadCondition(query, { _id: { $in: await leadIdsHandledBy(String(orgId), handledBy) } });
     }
 
+    const customerAreaCondition = typeof req.query.customerArea === 'string' ? customerAreaFilterCondition(req.query.customerArea) : null;
+    if (customerAreaCondition) appendLeadCondition(query, customerAreaCondition);
+
+    if (req.query.needsReply === 'true') {
+      appendLeadCondition(query, {
+        'followUp.awaitingReplySince': { $ne: null },
+        status: { $nin: LIFECYCLE_TERMINAL_STATUSES },
+      });
+    }
+
     if (location && location !== 'All') {
       if (location === UNMAPPED_LEAD_LOCATION_LABEL) {
         appendLeadCondition(query, {
@@ -883,7 +902,12 @@ export const getAllLeads = async (req: Request, res: Response) => {
     let leads: any[];
     if (sortBy === "waiting_longest") {
       const customerAt = { $ifNull: ['$followUp.lastCustomerActivityAt', '$createdAt'] };
-      const repAt = { $ifNull: ['$followUp.lastRepResponseAt', new Date(0)] };
+      const repAt = {
+        $max: [
+          { $ifNull: ['$followUp.lastRepResponseAt', new Date(0)] },
+          { $ifNull: ['$followUp.lastAnsweredAt', new Date(0)] },
+        ],
+      };
       leads = await Lead.aggregate([
         { $match: Lead.find().cast(Lead, { ...query }) },
         {
@@ -942,7 +966,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
       });
       const storeName = storeForLabel(leadStores, lead.location) || (typeof lead.location === 'string' ? lead.location.trim() : '') || null;
       const campaign = campaignSummary(lead, campaignKinds || undefined);
-      return { ...lead, source: normalized.source, sourceProvider: normalized.sourceProvider, isDemoLead, storeName, campaign };
+      return { ...lead, source: normalized.source, sourceProvider: normalized.sourceProvider, isDemoLead, storeName, campaign, customerArea: leadCustomerArea(lead), needsReplySince: leadNeedsReplySince(lead) };
     });
 
     res.json(
@@ -1137,6 +1161,8 @@ export const getLeadById = async (req: Request, res: Response) => {
         source: normalized.source,
         sourceProvider: normalized.sourceProvider,
         isDemoLead,
+        customerArea: leadCustomerArea(lead),
+        needsReplySince: leadNeedsReplySince(lead),
       }),
     );
   } catch (error) {
@@ -1504,6 +1530,7 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
       }
       return res.status(404).json({ message: 'Lead not found' });
     }
+    if (!lead.customerArea?.code) Object.assign(lead, { customerArea: leadCustomerArea(lead) || null });
 
     if (restrictedContactChanged) {
       await recordContactRestrictionAudit({
@@ -1688,6 +1715,8 @@ export const updateLead = async (req: Request, res: Response) => {
     if (!lead) {
       return res.status(409).json({ message: CONTACT_RESTRICTION_MESSAGES.statusChanged, code: LEAD_STATUS_CHANGED_CODE });
     }
+    if (statusSet['followUp.lastRepResponseAt']) await recordLeadAnswered(lead._id, orgId);
+    else if (LIFECYCLE_TERMINAL_STATUSES.includes(status)) await clearLeadAwaitingReply(lead._id, orgId, new Date());
 
     if (isRemovingDoNotContact) {
       await releaseProtectedContacts({ organizationId: orgId, leadId: lead._id, actorUserId: userId }).catch((err) => {
@@ -1884,6 +1913,67 @@ export const createInquiry = async (req: Request, res: Response) => {
       message: 'Error creating inquiry',
       error: process.env.NODE_ENV === 'development' ? error : 'Internal server error',
     });
+  }
+};
+
+export const getNeedsReplyCount = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    if (!orgId) {
+      return res.status(400).json({ message: 'Organization context missing' });
+    }
+    const viewerId = await viewerUserId(req);
+    if (!mongoose.isValidObjectId(viewerId)) {
+      return res.json(new ApiResponse(200, { count: 0 }));
+    }
+    const count = await Lead.countDocuments({
+      organizationId: orgId,
+      assignedTo: viewerId,
+      'followUp.awaitingReplySince': { $ne: null },
+      status: { $nin: LIFECYCLE_TERMINAL_STATUSES },
+      'combinedInto.leadId': { $exists: false },
+    });
+    res.json(new ApiResponse(200, { count }));
+  } catch (error) {
+    console.error('[ERROR] Error counting leads that need a reply:', error);
+    res.status(500).json({ message: 'Error counting leads that need a reply' });
+  }
+};
+
+export const markNoReplyNeeded = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const orgId = req.orgId;
+    const user = req.user || req.crmUser;
+    if (!user) throw new ApiError(401, 'Please authenticate');
+    if (!orgId) {
+      return res.status(400).json({ message: 'Organization context missing' });
+    }
+    if (!mongoose.isValidObjectId(String(id))) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+    const lead = await Lead.findOne({ _id: id, organizationId: orgId }).select('_id firstName lastName followUp.awaitingReplySince').lean();
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+    const cleared = await clearLeadAwaitingReply(lead._id, orgId, new Date());
+    if (cleared) {
+      await activityService.createActivity({
+        userId: user._id.toString(),
+        organizationId: orgId,
+        type: 'other',
+        title: 'Marked as no reply needed',
+        description: `No reply needed for the last message from ${lead.firstName || 'the customer'} ${lead.lastName || ''}`.trim(),
+        metadata: { leadId: lead._id.toString(), activityKind: 'lead_no_reply_needed' },
+        ipAddress: req.ip,
+      });
+    }
+    res.json(new ApiResponse(200, { leadId: String(lead._id), needsReply: false }, 'Marked as no reply needed'));
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
+    console.error('[ERROR] Error marking a lead as no reply needed:', error);
+    res.status(500).json({ message: 'Could not mark this lead as no reply needed' });
   }
 };
 
@@ -2733,6 +2823,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           centralIngestion: true,
           vehicle: vehicleInfo,
           comments,
+          address: postalAddressLine(parsed.adfData?.rawFields),
           followUp: {
             lastCustomerActivityAt: new Date(),
             reminderCount: 0,

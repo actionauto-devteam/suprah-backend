@@ -164,6 +164,7 @@ export interface ICallLog extends Document {
   customerName?: string;
   lineLabel?: string;
   ringGroupId?: string | null;
+  extraRingGroupId?: string | null;
   ringRecipientIds?: string[];
   answeredVia?: "browser" | "phone";
   phoneLegs?: { userId: string; phone: string; callControlId: string; state: "dialing" | "answered" | "ended"; at: Date }[];
@@ -203,6 +204,7 @@ const CallLogSchema = new Schema<ICallLog>(
     customerName: { type: String },
     lineLabel: { type: String },
     ringGroupId: { type: String, default: null },
+    extraRingGroupId: { type: String, default: null },
     ringRecipientIds: { type: [String], default: undefined },
     answeredVia: { type: String, enum: ["browser", "phone"] },
     phoneLegs: { type: [Schema.Types.Mixed], default: undefined },
