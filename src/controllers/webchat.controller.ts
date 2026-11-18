@@ -13,7 +13,7 @@ import WebChatMessage from '../models/WebChatMessage.model';
 import IntakeClaim from '../models/IntakeClaim.model';
 import CrmLocation from '../models/CrmLocation.model';
 import { normalizeLocationKey } from '../utils/locationKey';
-import { touchLeadActivity } from '../utils/leadActivity';
+import { markLeadAwaitingReply, recordLeadAnswered, touchLeadActivity } from '../utils/leadActivity';
 import { activeLeadStores, storeForStock } from '../utils/leadStore';
 import { LEAD_SOURCE } from '../constants/leadSource';
 import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
@@ -401,6 +401,7 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
             Lead.updateOne({ _id: session.leadId, organizationId: session.organizationId }, { $set: { 'followUp.lastRepResponseAt': now } }),
           ]);
           await touchLeadActivity(session.leadId, session.organizationId, now);
+          await recordLeadAnswered(session.leadId, session.organizationId, now);
           const payload = serializeForStaff(message);
           emitToOrg(String(session.organizationId), 'webchat:message', {
             leadId: String(session.leadId),
@@ -635,6 +636,7 @@ async function createWebchatConversation(input: WebchatConversationInput) {
     direction: 'inbound',
     body: input.firstMessage,
   });
+  await markLeadAwaitingReply(lead._id, chatMessage.createdAt, input.orgId);
 
   if (!viaIntake) emitToOrg(String(input.orgId), 'lead:new', lead.toObject());
   emitToOrg(String(input.orgId), 'webchat:message', {
@@ -691,6 +693,7 @@ async function appendVisitorMessage(session: any, body: string) {
       { $set: { 'followUp.lastCustomerActivityAt': now, isRead: false } },
     ),
   ]);
+  await markLeadAwaitingReply(session.leadId, now);
 
   emitToOrg(session.organizationId, 'webchat:message', {
     leadId: String(session.leadId),
@@ -1115,6 +1118,7 @@ export const sendStaffMessage = asyncHandler(async (req: Request, res: Response)
     Lead.updateOne({ _id: session.leadId }, { $set: { 'followUp.lastRepResponseAt': now } }),
   ]);
   await touchLeadActivity(session.leadId, session.organizationId, now);
+  await recordLeadAnswered(session.leadId, session.organizationId, now);
 
   await recordWebchatExceptionReply(session, replyDecision, {
     actor: { kind: 'staff', userId: staff.userId, name: staff.name },

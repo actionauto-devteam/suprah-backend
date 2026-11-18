@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import Lead from '../models/lead.model';
 import { ParsedADFLead } from '../utils/adfParser';
 import { buildInquiryContentKey, buildInquiryFingerprint, buildProviderInquiryKey } from '../utils/inquiryKeys';
+import { postalAddressLine } from '../utils/customerArea';
 import { InquirySourceIds, claimInquirySideEffect, finishInquirySideEffect } from './leadInquiry.service';
 import { LeadIntakeRequest, LeadIntakeResult } from './leadIntake.service';
 import logger from '../utils/logger';
@@ -33,6 +34,7 @@ export function adfInquiryRequest(input: {
   const provider = adf.provider || adf.vendor || '';
   const vehicle = vehicleFromAdf(adf.vehicle);
   const keyInput = { provider, email: adf.email, phone: adf.phone, vehicle, comments: adf.comments };
+  const address = postalAddressLine(adf.rawFields);
   return {
     organizationId: input.organizationId,
     kind: 'provider_inquiry',
@@ -49,7 +51,7 @@ export function adfInquiryRequest(input: {
     },
     fingerprint: adf.requestDateProvided ? buildInquiryFingerprint({ ...keyInput, requestDate: adf.requestDate }) : null,
     contentKey: buildInquiryContentKey(keyInput),
-    leadDraft: input.leadDraft,
+    leadDraft: address ? { address, ...input.leadDraft } : input.leadDraft,
     contextLeadId: input.contextLeadId,
   };
 }

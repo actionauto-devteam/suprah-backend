@@ -12,6 +12,7 @@ import {
   updateDealershipNumber,
 } from '../services/dealershipPhoneNumber.service';
 import { routingGroupMembers } from '../services/callRoutingConfig.service';
+import { describeAllLocationsRing, saveAllLocationsRingGroup } from '../services/allLocationsRing.service';
 
 function admin(req: Request) {
   if (!req.orgId) throw new ApiError(400, 'Organization context missing');
@@ -21,8 +22,18 @@ function admin(req: Request) {
 
 export const listPhoneNumbersHandler = asyncHandler(async (req: Request, res: Response) => {
   const { orgId } = admin(req);
-  const [numbers, suggestion] = await Promise.all([listDealershipNumbers(orgId), currentNumberSuggestion(orgId)]);
-  res.json(new ApiResponse(200, { numbers, suggestion }, 'Phone numbers'));
+  const [numbers, suggestion, allLocations] = await Promise.all([
+    listDealershipNumbers(orgId),
+    currentNumberSuggestion(orgId),
+    describeAllLocationsRing(orgId),
+  ]);
+  res.json(new ApiResponse(200, { numbers, suggestion, allLocations }, 'Phone numbers'));
+});
+
+export const saveAllLocationsRingHandler = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = admin(req);
+  const allLocations = await saveAllLocationsRingGroup(orgId, req.body);
+  res.json(new ApiResponse(200, allLocations, 'Sales calls for all locations saved'));
 });
 
 export const listTeamMembersHandler = asyncHandler(async (req: Request, res: Response) => {

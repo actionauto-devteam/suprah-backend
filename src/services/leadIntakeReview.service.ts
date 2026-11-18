@@ -9,6 +9,7 @@ import { CallLog, CommunicationMessage } from '../models/communication.model';
 import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
 import { ApiError } from '../utils/ApiError';
 import { emitToOrg } from '../utils/socketEmitter';
+import { clearLeadAwaitingReply, moveLeadAwaitingReply } from '../utils/leadActivity';
 import logger from '../utils/logger';
 import { isOrganizationAdmin } from './contactRestriction.service';
 import { loadLeadAssociationInputs } from './leadLifecycle.service';
@@ -18,6 +19,7 @@ import {
   LeadIntakeResult,
   appendInquiryToLead,
   createLeadForInquiry,
+  fillEmptyLeadAddress,
   runInquirySideEffects,
   submitLeadInquiry,
 } from './leadIntake.service';
@@ -169,6 +171,7 @@ async function closeMergedLead(organizationId: string, leadId: unknown, status: 
       },
     },
   );
+  if (LIFECYCLE_TERMINAL_STATUSES.includes(status)) await clearLeadAwaitingReply(leadId, undefined, new Date());
   emitToOrg(organizationId, 'lead:update', { leadId: String(leadId) });
 }
 
@@ -181,6 +184,7 @@ async function moveLeadRecords(organizationId: string, fromLeadId: unknown, toLe
     CallLog.updateMany({ orgId: orgIds, leadId: fromLeadId }, { $set: { leadId: toLeadId } }),
     Appointment.updateMany({ organizationId, leadId: fromLeadId }, { $set: { leadId: toLeadId } }),
   ]);
+  await moveLeadAwaitingReply([fromLeadId], toLeadId, organizationId);
 }
 
 const RESOLUTION_FOR: Record<ReviewResolutionInput, LeadInquiryReviewResolution> = {
@@ -279,7 +283,7 @@ export async function resolveLeadReview(input: {
     if (possibleMatch) {
       const createdLeadId = current.association.leadId;
       if (input.resolution === 'associate') {
-        const appended = await appendInquiryToLead(organizationId, String(input.leadId), claimed as ILeadInquiry);
+        const appended = await appendInquiryToLead(organizationId, String(input.leadId), claimed as ILeadInquiry, { fillAddress: false });
         if (!appended) throw new ApiError(409, 'The lead you picked just closed. Pick an open lead.');
         await moveLeadRecords(organizationId, createdLeadId, input.leadId);
         await LeadInquiry.updateOne(
@@ -289,11 +293,12 @@ export async function resolveLeadReview(input: {
         await closeMergedLead(organizationId, createdLeadId, 'Closed', `Linked to another lead after staff review${note ? `: ${note}` : ''}`, actor);
         finalLeadId = String(input.leadId);
         await rearmSideEffects(current._id);
+        await fillEmptyLeadAddress(organizationId, appended, claimed as ILeadInquiry);
       } else if (input.resolution === 'not_customer_inquiry') {
         await closeMergedLead(organizationId, createdLeadId, 'Bad Lead', `Marked as not a customer inquiry${note ? `: ${note}` : ''}`, actor);
       }
     } else if (input.resolution === 'associate') {
-      const appended = await appendInquiryToLead(organizationId, String(input.leadId), claimed as ILeadInquiry);
+      const appended = await appendInquiryToLead(organizationId, String(input.leadId), claimed as ILeadInquiry, { fillAddress: false });
       if (!appended) throw new ApiError(409, 'The lead you picked just closed. Pick an open lead.');
       await LeadInquiry.updateOne(
         { _id: current._id },
@@ -301,6 +306,7 @@ export async function resolveLeadReview(input: {
       );
       finalLeadId = String(input.leadId);
       await rearmSideEffects(current._id);
+      await fillEmptyLeadAddress(organizationId, appended, claimed as ILeadInquiry);
     } else if (input.resolution === 'create_lead') {
       const lead = await createLeadForInquiry(organizationId, claimed as ILeadInquiry, { intakeSlots: undefined });
       await LeadInquiry.updateOne(

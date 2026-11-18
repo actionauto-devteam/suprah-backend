@@ -5,6 +5,7 @@ import OrgLeadConfig, { IOrgLeadConfig } from '../models/OrgLeadConfig.model';
 import Lead from '../models/lead.model';
 import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
 import { normalizeIdentityEmail } from '../utils/contactIdentity';
+import { postalAddressLine } from '../utils/customerArea';
 import { decrypt, encrypt } from '../utils/crypto';
 import { ApiError } from '../utils/ApiError';
 import { parseEmailBody, extractADFFromBody, parseADF, detectChannel } from '../utils/adfParser';
@@ -17,6 +18,9 @@ import { triggerAiReplyForNewInquiry } from './communication.service';
 import { triggerAiEmailReplyForNewInquiry } from './aiEmailReply.service';
 import { getLeadIntakeMode } from './leadIntakeControl.service';
 import { processGmailMessageThroughIntake } from './gmailLeadIntake';
+import { isAutomatedEmail } from './emailInquiryEvidence';
+import { gmailHeader } from '../utils/gmailMessageParser';
+import { markLeadAwaitingReply } from '../utils/leadActivity';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
 import { cacheService } from './cache.service';
 import { notificationTemplates } from '../utils/notificationTemplates';
@@ -39,15 +43,26 @@ export function rememberCheckedMessage(orgId: string, messageId: string) {
     recentlyCheckedMessages.set(`${orgId}:${messageId}`, now + RECHECK_SKIPPED_MESSAGE_MS);
 }
 
-export async function notifyCustomerEmailReply(orgId: string, message: any): Promise<boolean> {
+function isCustomerWrittenEmail(message: any, leadSourceEmail?: string | null): boolean {
+    const from = gmailHeader(message, 'from');
+    const sender = normalizeIdentityEmail(from.match(/<([^<>]+)>/)?.[1] || from);
+    if (!sender) return false;
+    const leadSource = normalizeIdentityEmail(leadSourceEmail);
+    if (leadSource && sender === leadSource) return false;
+    return !isAutomatedEmail(message);
+}
+
+export async function notifyCustomerEmailReply(orgId: string, message: any, leadSourceEmail?: string | null, intakeHandled = false): Promise<boolean> {
     if (!message?.threadId) return false;
-    const lead: any = await Lead.findOne({ organizationId: orgId, threadId: message.threadId, 'combinedInto.leadId': { $exists: false } }).select('_id firstName lastName phone email assignedTo createdAt').lean();
+    const lead: any = await Lead.findOne({ organizationId: orgId, threadId: message.threadId, 'combinedInto.leadId': { $exists: false } }).select('_id firstName lastName phone email assignedTo createdAt messageId').lean();
     if (!lead) return false;
     const at = new Date(Number(message.internalDate) || Date.now());
     const touched = await Lead.updateOne(
         { _id: lead._id, $or: [{ 'followUp.lastCustomerActivityAt': { $lt: at } }, { 'followUp.lastCustomerActivityAt': null }] },
         { $set: { 'followUp.lastCustomerActivityAt': at, isRead: false } },
     );
+    const startedLead = Boolean(lead.messageId) && lead.messageId === message.id;
+    if (!intakeHandled && !startedLead && isCustomerWrittenEmail(message, leadSourceEmail)) await markLeadAwaitingReply(lead._id, at);
     await cacheService.del(`lead:thread:${lead._id}`).catch(() => undefined);
     const { clearLeadConversationEmailCache } = await import('./leadConversation.service');
     await clearLeadConversationEmailCache(lead._id, message.threadId);
@@ -225,7 +240,7 @@ class OrgGmailService {
                         if (result.status === 'skipped') rememberCheckedMessage(orgId, message.id);
                         if (result.status === 'inactive' || result.status === 'skipped') continue;
                         if (result.status === 'associated' && result.created) intakeCreated++;
-                        await notifyCustomerEmailReply(orgId, message);
+                        await notifyCustomerEmailReply(orgId, message, config.leadSourceEmail, true);
                         await gmail.users.messages.batchModify({
                             userId: 'me',
                             requestBody: { ids: [message.id], removeLabelIds: ['UNREAD'] },
@@ -294,6 +309,7 @@ class OrgGmailService {
                                 vehicleId: vehicleContext?.vehicleId,
                                 location: vehicleContext?.location,
                                 comments: adfData?.comments || '',
+                                address: postalAddressLine(adfData?.rawFields),
                                 subject,
                                 body: rawBody,
                                 parsedContent,
@@ -371,7 +387,7 @@ class OrgGmailService {
                     rememberCheckedMessage(orgId, reply.id);
                     try {
                         const detail = await withRetry(() => gmail.users.messages.get({ userId: 'me', id: reply.id!, format: 'metadata' }));
-                        await notifyCustomerEmailReply(orgId, detail.data);
+                        await notifyCustomerEmailReply(orgId, detail.data, config.leadSourceEmail);
                     } catch (err) {
                         console.error(`[OrgSync] Could not check reply ${reply.id} for org ${orgId}:`, err);
                     }

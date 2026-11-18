@@ -1,6 +1,7 @@
 import { CallLog } from '../models/communication.model';
 import { RoutingConfig, IvrRoutingState } from '../models/CallRoutingConfig.model';
 import { routingGroupRecipients } from './callRoutingConfig.service';
+import { allLocationsRingGroupId, isLocationRoute } from './allLocationsRing.service';
 import * as telnyx from './telnyx.service';
 import { getSocketIO } from '../utils/socketEmitter';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
@@ -123,6 +124,10 @@ async function route(call: any, stage: 'selected' | 'reception' | 'all-org', gro
     if (lock.routing.config.allOrgFallback) return route(lock, 'all-org', null, 'reception-unavailable', callbacks);
     return finishMissed(lock, callbacks);
   }
+  if (stage === 'selected' && lock.extraRingGroupId) {
+    const extra = await routingGroupRecipients(String(call.orgId), String(lock.extraRingGroupId)).catch(() => [] as string[]);
+    ids = [...new Set([...ids, ...extra])];
+  }
   const next = await advance(lock, stage, reason, {
     status: 'ringing', answeredBy: null, agentLegCallControlId: null, 'routing.targetGroupId': groupId,
     'routing.recipientIds': ids, 'routing.allOrg': stage === 'all-org',
@@ -203,7 +208,9 @@ export async function handleIvrGather(payload: any, callbacks: IvrCallbacks): Pr
     ? await DealershipPhoneNumber.findOne({ _id: option.phoneNumberId, organizationId: call.orgId }).select('label kind location ringGroupId').lean()
     : null;
   const leadLocation = option.type === 'number' ? (line?.kind === 'location' ? line.location : '') : (option.type === 'location' ? option.leadLocation : '');
+  const extraRingGroupId = isLocationRoute(option, line) ? await allLocationsRingGroupId(call.orgId).catch(() => null) : null;
   const selected = await advance(call, 'routing', 'digit-selected', {
+    extraRingGroupId,
     'routing.selectedDigit': option.digit, 'routing.selectedLabel': option.label,
     'routing.type': option.type, 'routing.language': option.language,
     'routing.leadLocation': leadLocation,
@@ -260,7 +267,10 @@ export async function canReceiveIvrCall(call: any, userId: string): Promise<bool
   if (call.routing.allOrg) return true;
   if (!(call.routing.recipientIds || []).includes(String(userId))) return false;
   const current = await routingGroupRecipients(String(call.orgId), call.routing.targetGroupId);
-  return current.includes(String(userId));
+  if (current.includes(String(userId))) return true;
+  if (call.routing.stage !== 'selected' || !call.extraRingGroupId) return false;
+  const extra = await routingGroupRecipients(String(call.orgId), String(call.extraRingGroupId)).catch(() => [] as string[]);
+  return extra.includes(String(userId));
 }
 
 export async function ivrAgentFailed(call: any, callbacks: IvrCallbacks): Promise<void> {

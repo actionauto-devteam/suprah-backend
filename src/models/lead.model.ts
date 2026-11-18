@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose';
 import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
 import { contactIdentity } from '../utils/contactIdentity';
+import { CustomerArea, leadCustomerArea, sameCustomerArea } from '../utils/customerArea';
 import { CUSTOMER_IDENTITY_INDEXES, IDENTITY_SCHEMA_OPTIONS } from '../constants/customerIdentityIndexes';
 import { IActorRef, ActorRefSchema } from './communication.model';
 import { AiHumanAttention, aiHumanAttentionFields } from './aiHumanAttention';
@@ -101,6 +102,7 @@ export interface ILead extends Document {
 
   comments: string;
   address?: string;
+  customerArea?: CustomerArea | null;
   tags?: string[];
   opportunityValue?: number | null;
   aiSummary?: string;
@@ -116,6 +118,8 @@ export interface ILead extends Document {
   followUp?: {
     lastCustomerActivityAt?: Date;
     lastRepResponseAt?: Date;
+    lastAnsweredAt?: Date;
+    awaitingReplySince?: Date;
     lastActivityAt?: Date;
     lastReminderSentAt?: Date;
     reminderCount?: number;
@@ -413,6 +417,18 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       default: '',
     },
 
+    customerArea: {
+      type: new Schema(
+        {
+          code: { type: String },
+          basis: { type: String },
+          detail: { type: String, default: '' },
+        },
+        { _id: false },
+      ),
+      default: undefined,
+    },
+
     tags: [
       {
         type: String,
@@ -456,6 +472,15 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       lastRepResponseAt: {
         type: Date,
         default: null,
+      },
+
+      lastAnsweredAt: {
+        type: Date,
+        default: null,
+      },
+
+      awaitingReplySince: {
+        type: Date,
       },
 
       lastActivityAt: {
@@ -777,7 +802,30 @@ LeadSchema.pre('validate', function () {
     this.normalizedPhone = identity.normalizedPhone;
     this.customerLink = { status: 'pending', nextRetryAt: new Date() };
   }
+  if (this.isNew || this.isModified('phone') || this.isModified('address')) {
+    this.customerArea = leadCustomerArea({ address: this.address, phone: this.phone }) || undefined;
+  }
 });
+
+async function refreshLeadCustomerArea(document: any) {
+  try {
+    const LeadModel = mongoose.model('Lead');
+    const current: any = await LeadModel.findOne({ _id: document._id }).select('phone address customerArea').lean();
+    if (!current) return;
+    const area = leadCustomerArea(current);
+    if (!sameCustomerArea(area, current.customerArea)) {
+      await LeadModel.updateOne(
+        { _id: current._id, phone: current.phone ?? null, address: current.address ?? null },
+        area ? { $set: { customerArea: area } } : { $unset: { customerArea: 1 } },
+        { timestamps: false },
+      );
+    }
+    Object.assign(document, { customerArea: area || null });
+    if (typeof document.unmarkModified === 'function') document.unmarkModified('customerArea');
+  } catch {
+    return;
+  }
+}
 
 async function synchronizeLeadDocument(document: any) {
   if (!document?._id || !document.organizationId) return;
@@ -799,6 +847,9 @@ LeadSchema.pre('findOneAndUpdate', function () {
     Object.prototype.hasOwnProperty.call(update?.$set || update || {}, field)
     || Object.prototype.hasOwnProperty.call(update?.$unset || {}, field));
   (this as any).syncCustomerIdentity = shouldSync;
+  (this as any).syncCustomerArea = Boolean(this.getOptions().upsert) || ['phone', 'address'].some(field =>
+    Object.prototype.hasOwnProperty.call(update?.$set || update || {}, field)
+    || Object.prototype.hasOwnProperty.call(update?.$unset || {}, field));
   if (shouldSync && update && !Array.isArray(update)) {
     update.$set = { ...(update.$set || {}), 'customerLink.status': 'pending', 'customerLink.nextRetryAt': new Date() };
     this.setUpdate(update);
@@ -806,13 +857,14 @@ LeadSchema.pre('findOneAndUpdate', function () {
 });
 
 LeadSchema.post('findOneAndUpdate', async function (result) {
-  if (!(this as any).syncCustomerIdentity) return;
-  const document = result?.value || result;
-  if (document?._id) await synchronizeLeadDocument(document);
-  else {
-    const current = await this.model.findOne(this.getFilter()).select('_id organizationId').lean();
-    if (current) await synchronizeLeadDocument(current);
-  }
+  const syncIdentity = Boolean((this as any).syncCustomerIdentity);
+  const syncArea = Boolean((this as any).syncCustomerArea);
+  if (!syncIdentity && !syncArea) return;
+  let document = result?.value || result;
+  if (!document?._id) document = await this.model.findOne(this.getFilter()).select('_id organizationId').lean();
+  if (!document?._id) return;
+  if (syncIdentity) await synchronizeLeadDocument(document);
+  if (syncArea) await refreshLeadCustomerArea(document);
 });
 
 export default mongoose.model<ILead>(

@@ -206,7 +206,11 @@ describe('Real-DB: dealership phone numbers (local MongoDB, simulated Telnyx onl
   test('suggests the current Suprah number until it is added, then adds it as the main number', async () => {
     const before = await api().list();
     expect(before.status).toBe(200);
-    expect(before.body.data).toEqual({ numbers: [], suggestion: { number: COMPANY } });
+    expect(before.body.data).toEqual({
+      numbers: [],
+      suggestion: { number: COMPANY },
+      allLocations: { groupId: null, groupName: '', groupActive: false, appliesTo: [] },
+    });
     const res = await api().create({ number: '(801) 555-0900', kind: 'main', label: '' });
     expect(res.status).toBe(201);
     expect(res.body.data).toMatchObject({ number: COMPANY, label: 'Main', kind: 'main', organizationId: ORG });
