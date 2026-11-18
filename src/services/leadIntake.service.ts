@@ -445,7 +445,8 @@ async function sendIntakeNotification(event: any): Promise<void> {
     emitToOrg(organizationId, 'lead:new', { _id: String(lead._id), leadId: String(lead._id) });
     return;
   }
-  const template = CONVERSATION_ONLY_KINDS.includes(event.kind)
+  const conversationReply = CONVERSATION_ONLY_KINDS.includes(event.kind);
+  const template = conversationReply
     ? notificationTemplates.lead_customer_replied({ customerName: customerNameOf(event), channel: event.kind })
     : notificationTemplates.lead_new_inquiry({
         customerName: customerNameOf(event),
@@ -456,6 +457,7 @@ async function sendIntakeNotification(event: any): Promise<void> {
     organizationId,
     leadId: lead._id,
     type: 'lead_new_inquiry',
+    assignedOwnerOnly: conversationReply,
     title: template.title,
     message: template.message,
     metadata,

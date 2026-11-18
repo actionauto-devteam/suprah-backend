@@ -22,6 +22,7 @@ export interface LeadNoticeInput {
   message: string;
   metadata?: Record<string, unknown>;
   ownerIds?: unknown[];
+  assignedOwnerOnly?: boolean;
   ringTeamIds?: string[];
   excludeUserId?: unknown;
   topicText?: string;
@@ -113,8 +114,10 @@ async function pickLeadNoticePeople(
     ? await Lead.findOne({ _id: leadId, organizationId }).select('assignedTo comments notes.authorType notes.mentionedGroupIds').lean()
     : null;
 
-  const owner = await firstActiveOwner(organizationId, [...(input.ownerIds || []), lead?.assignedTo]);
+  const assignedOwnerOnly = input.assignedOwnerOnly || input.type === 'lead_message';
+  const owner = await firstActiveOwner(organizationId, assignedOwnerOnly ? [lead?.assignedTo] : [...(input.ownerIds || []), lead?.assignedTo]);
   if (owner) return { audience: 'owner', ids: [owner] };
+  if (assignedOwnerOnly) return { audience: 'owner', ids: [] };
   if (input.ringTeamIds?.length) return { audience: 'ring_team', ids: input.ringTeamIds };
   if (!lead) return null;
   const team = await tagLeadTeam(organizationId, lead, input);
@@ -140,6 +143,7 @@ export async function notifyLeadPeople(input: LeadNoticeInput): Promise<LeadNoti
   const excludedIds = excluded ? await samePersonIds(organizationId, excluded).catch(() => [excluded]) : [];
 
   const picked = await pickLeadNoticePeople(organizationId, input).catch((err) => {
+    if (input.assignedOwnerOnly || input.type === 'lead_message') throw err;
     logger.warn({ err, type: input.type }, '[LeadNotice] Could not pick who to notify, sending to admins');
     return null;
   });

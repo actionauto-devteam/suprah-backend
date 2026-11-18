@@ -50,7 +50,7 @@ export async function notifyLeadMessage(orgId: unknown, lead: any, channel: 'sms
       route: `/crm/leads?leadId=${lead._id}`,
       pushTag: `lead-message-${lead._id}`,
     };
-    await notifyLeadPeople({
+    const audience = await notifyLeadPeople({
       organizationId: orgId,
       leadId: lead._id,
       ownerIds: [lead.assignedTo],
@@ -61,7 +61,7 @@ export async function notifyLeadMessage(orgId: unknown, lead: any, channel: 'sms
       topicText: preview,
       tagText: title,
     });
-    return true;
+    return audience !== 'nobody';
   } catch (error) {
     console.error('[comm] Customer message notification failed', error);
     return false;

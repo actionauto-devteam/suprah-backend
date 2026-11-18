@@ -15,6 +15,7 @@ jest.mock('../src/utils/socketEmitter', () => ({
 import User from '../src/models/User.model';
 import CrmUser from '../src/models/CrmUser.model';
 import Organization from '../src/models/Organization.model';
+import Lead from '../src/models/lead.model';
 import { generateCrmToken } from '../src/middleware/crmAuth.middleware';
 import UnifiedPushService from '../src/services/unifiedPush.service';
 import { notifyLeadMessage } from '../src/services/leadMessageNotice.service';
@@ -69,6 +70,7 @@ describe('Real-DB proof: push reaches the person on whichever account the device
   });
 
   afterAll(async () => {
+    await Lead.collection.deleteMany({ organizationId: orgA });
     await User.collection.deleteMany({ _id: { $in: [ids.repUser, ids.otherOrgUser] } });
     await CrmUser.collection.deleteMany({ _id: { $in: [ids.repCrm, ids.lonelyCrm] } });
     await Organization.collection.deleteMany({ _id: { $in: [orgA, orgB] } });
@@ -125,14 +127,18 @@ describe('Real-DB proof: push reaches the person on whichever account the device
   });
 
   it('a text on a lead assigned to the rep reaches the device the rep turned on from the CRM', async () => {
-    await User.collection.updateOne({ _id: ids.repUser }, { $set: { pushSubscriptions: [] } });
     const lead = { _id: new mongoose.Types.ObjectId(), firstName: 'Pat', lastName: 'Lee', assignedTo: ids.repUser, createdAt: new Date(Date.now() - 3600_000) };
-    expect(await notifyLeadMessage(String(orgA), lead, 'sms', 'Is the truck still there?')).toBe(true);
-    for (let i = 0; i < 40 && mockSend.mock.calls.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(endpointsSent().sort()).toEqual(['crm-desktop', 'shared-browser']);
-    const sentPayload = JSON.parse(mockSend.mock.calls[0][1]);
-    expect(sentPayload.tag).toBe(`lead-message-${lead._id}`);
-    await User.collection.updateOne({ _id: ids.repUser }, { $set: { pushSubscriptions: [sub('main-laptop'), sub('shared-browser')] } });
+    await Lead.collection.insertOne({ ...lead, organizationId: orgA, status: 'New' });
+    await User.collection.updateOne({ _id: ids.repUser }, { $set: { pushSubscriptions: [] } });
+    try {
+      expect(await notifyLeadMessage(String(orgA), lead, 'sms', 'Is the truck still there?')).toBe(true);
+      for (let i = 0; i < 40 && mockSend.mock.calls.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(endpointsSent().sort()).toEqual(['crm-desktop', 'shared-browser']);
+      const sentPayload = JSON.parse(mockSend.mock.calls[0][1]);
+      expect(sentPayload.tag).toBe(`lead-message-${lead._id}`);
+    } finally {
+      await User.collection.updateOne({ _id: ids.repUser }, { $set: { pushSubscriptions: [sub('main-laptop'), sub('shared-browser')] } });
+    }
   });
 
   it('Send test reaches every device of the signed-in person and is limited to one every few seconds', async () => {

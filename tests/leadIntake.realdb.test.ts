@@ -175,6 +175,25 @@ describe('Real-DB: lead intake lifecycle (local MongoDB only)', () => {
     expect(await Notification.countDocuments({ type: 'lead_new_inquiry', userId: ids.rep, 'metadata.inquiryId': result.inquiryId })).toBe(1);
   });
 
+  it.each([
+    { kind: 'sms' as const, channel: 'sms' as const },
+    { kind: 'email_reply' as const, channel: 'email' as const },
+  ])('$kind customer replies persist notices only for the assigned owner', async ({ kind, channel }) => {
+    for (const assignedTo of [ids.rep, null]) {
+      const phone = nextPhone();
+      const email = nextEmail();
+      const lead = await openLead({ phone, email }, { assignedTo });
+      const result = await submitLeadInquiry(inquiry({ phone, email }, {
+        kind, channel, contextLeadId: lead._id, source: channel === 'sms' ? 'SMS' : 'Email',
+      }));
+      if (result.status !== 'associated') throw new Error('Expected the customer reply to use the existing lead');
+      expect(result).toMatchObject({ status: 'associated', created: false, leadId: String(lead._id) });
+      const notices = await Notification.find({ organizationId: ORG, 'metadata.inquiryId': result.inquiryId }).lean();
+      expect(notices.map(notice => String(notice.userId))).toEqual(assignedTo ? [String(assignedTo)] : []);
+      if (assignedTo) expect(notices[0].type).toBe('lead_new_inquiry');
+    }
+  });
+
   it('treats a missing email as no conflict', async () => {
     const phone = nextPhone();
     const lead = await openLead({ phone, email: nextEmail() });

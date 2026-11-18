@@ -91,8 +91,8 @@ describe('Real-DB: who gets a lead notice (local test DB only)', () => {
       { _id: fran, organizationId: orgId, name: 'Fran Fallback', email: 'fran@notice.test', role: 'employee', isActive: true },
     ] as any[]);
     await CrmUser.collection.insertMany([
-      { _id: maryCrm, organizationId: orgId, fullName: 'Mary Cruz', email: 'mary@notice.test', isActive: true },
-      { _id: oliveCrm, organizationId: orgId, fullName: 'Olive Online', email: 'olive@notice.test', isActive: true },
+      { _id: maryCrm, organizationId: orgId, username: `mary-${maryCrm}`, fullName: 'Mary Cruz', email: 'mary@notice.test', isActive: true },
+      { _id: oliveCrm, organizationId: orgId, username: `olive-${oliveCrm}`, fullName: 'Olive Online', email: 'olive@notice.test', isActive: true },
     ] as any[]);
     await CrmLeadGroup.collection.insertMany([
       { _id: onlineTeam, organizationId: orgId, name: 'Online Team', memberIds: [olive, owen], isActive: true, roundRobinCursor: 0 },
@@ -138,20 +138,20 @@ describe('Real-DB: who gets a lead notice (local test DB only)', () => {
     expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
   });
 
-  it('3. later notices on that lead go to the same tagged team, with no second tag note', async () => {
-    const audience = await notifyLeadPeople(notice('lead_message', { leadId: openLead, topicText: 'Can I get financing?', tagText: 'New text from Ulysses Open' }));
+  it('3. later new inquiries go to the same tagged team, with no second tag note', async () => {
+    const audience = await notifyLeadPeople(notice('lead_new_inquiry', { leadId: openLead, topicText: 'Can I get financing?', tagText: 'New inquiry from Ulysses Open' }));
     expect(audience).toBe('team');
     expect(await notesOf(openLead)).toHaveLength(1);
-    expect(mockNotifyUsers).toHaveBeenCalledWith([String(oliveCrm)], ORG, 'lead_message', 'Title', 'Message', expect.any(Object));
+    expect(mockNotifyUsers).toHaveBeenCalledWith([String(oliveCrm)], ORG, 'lead_new_inquiry', 'Title', 'Message', expect.any(Object));
     expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
   });
 
   it('4. a topic with no team uses the fallback team; a lead whose rep left counts as unassigned', async () => {
-    const audience = await notifyLeadPeople(notice('lead_message', { leadId: goneRepLead, topicText: 'What APR can I get on a loan?', tagText: 'New text from Gina Gone' }));
+    const audience = await notifyLeadPeople(notice('lead_new_inquiry', { leadId: goneRepLead, topicText: 'What APR can I get on a loan?', tagText: 'New inquiry from Gina Gone' }));
     expect(audience).toBe('team');
     const notes = await notesOf(goneRepLead);
-    expect(notes[0].text).toBe('@Fallback Team, New text from Gina Gone. Topic: Financing and credit.');
-    expect(mockNotifyUsers).toHaveBeenCalledWith([String(fran)], ORG, 'lead_message', 'Title', 'Message', expect.any(Object));
+    expect(notes[0].text).toBe('@Fallback Team, New inquiry from Gina Gone. Topic: Financing and credit.');
+    expect(mockNotifyUsers).toHaveBeenCalledWith([String(fran)], ORG, 'lead_new_inquiry', 'Title', 'Message', expect.any(Object));
     expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
   });
 
@@ -182,5 +182,57 @@ describe('Real-DB: who gets a lead notice (local test DB only)', () => {
     expect(await notifyLeadPeople(notice('appointment_created', { excludeUserId: mary }))).toBe('admins');
     expect(mockNotifyOrgAdmins).toHaveBeenLastCalledWith(ORG, 'appointment_created', 'Title', 'Message', { tag: 'appointment_created' }, [String(mary), String(maryCrm)]);
     expect(mockNotifyUsers).not.toHaveBeenCalled();
+  });
+
+  it('customer replies never fall back to tagged teams, admins, stale owners or the ringing team', async () => {
+    for (const leadId of [openLead, quietLead, goneRepLead]) {
+      const before = await notesOf(leadId);
+      expect(await notifyLeadPeople(notice('lead_message', {
+        leadId, ownerIds: [sam], ringTeamIds: [String(fran)], topicText: 'Can I get financing?',
+      }))).toBe('nobody');
+      expect(await notesOf(leadId)).toEqual(before);
+    }
+    expect(mockNotifyUsers).not.toHaveBeenCalled();
+    expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('customer replies use the current database assignment instead of a stale sender snapshot', async () => {
+    await Lead.updateOne({ _id: assignedLead }, { $set: { assignedTo: sam } });
+    try {
+      expect(await notifyLeadPeople(notice('lead_message', { leadId: assignedLead, ownerIds: [mary] }))).toBe('owner');
+      expect(mockNotifyUsers).toHaveBeenCalledWith([String(sam)], ORG, 'lead_message', 'Title', 'Message', expect.any(Object));
+      expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
+    } finally {
+      await Lead.updateOne({ _id: assignedLead }, { $set: { assignedTo: mary } });
+    }
+  });
+
+  it('conversation-only intake notices enforce the assigned owner without changing their notification type', async () => {
+    expect(await notifyLeadPeople(notice('lead_new_inquiry', {
+      leadId: assignedLead, assignedOwnerOnly: true, ownerIds: [sam],
+    }))).toBe('owner');
+    expect(mockNotifyUsers).toHaveBeenLastCalledWith([String(maryCrm)], ORG, 'lead_new_inquiry', 'Title', 'Message', expect.any(Object));
+    expect(await notifyLeadPeople(notice('lead_new_inquiry', { leadId: quietLead, assignedOwnerOnly: true }))).toBe('nobody');
+    expect(mockNotifyUsers).toHaveBeenCalledTimes(1);
+    expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('a customer reply cannot target a lead in another organization or an unsaved lead', async () => {
+    for (const leadId of [assignedLead, new mongoose.Types.ObjectId()]) {
+      expect(await notifyLeadPeople(notice('lead_message', { organizationId: BARE, leadId, ownerIds: [fran] }))).toBe('nobody');
+    }
+    expect(mockNotifyUsers).not.toHaveBeenCalled();
+    expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('recipient lookup failure never broadcasts customer replies to administrators', async () => {
+    const lookup = jest.spyOn(Lead, 'findOne').mockImplementationOnce(() => { throw new Error('lookup unavailable'); });
+    try {
+      await expect(notifyLeadPeople(notice('lead_message', { leadId: assignedLead }))).rejects.toThrow('lookup unavailable');
+      expect(mockNotifyUsers).not.toHaveBeenCalled();
+      expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
+    } finally {
+      lookup.mockRestore();
+    }
   });
 });
