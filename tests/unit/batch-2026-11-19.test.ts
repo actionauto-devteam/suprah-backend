@@ -22,6 +22,23 @@ jest.mock('../../src/controllers/payment.controller', () => {
   };
 });
 
+jest.mock('../../src/models/transaction.model', () => ({
+  __esModule: true,
+  default: { findOneAndUpdate: jest.fn(), findById: jest.fn(), updateOne: jest.fn() },
+}));
+jest.mock('../../src/models/User.model', () => ({
+  __esModule: true,
+  default: { findOneAndUpdate: jest.fn(), exists: jest.fn(), findById: jest.fn() },
+}));
+jest.mock('../../src/models/AuditLog.model', () => ({ __esModule: true, default: { create: jest.fn() } }));
+jest.mock('../../src/models/referral.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/models/Payment.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/utils/safeNotification', () => ({
+  safeCreateNotification: jest.fn(),
+  notifyOrgAdmins: jest.fn(),
+}));
+
 import paymentRoutes from '../../src/routes/payment.routes';
 import {
   refundRequestFor,
@@ -30,6 +47,11 @@ import {
   remainingRefundable,
 } from '../../src/utils/paymentRefund';
 import { payoutAccountStatus, payoutFailedNotice } from '../../src/utils/driverPayoutAccount';
+import { withdrawalRequestFrom } from '../../src/utils/walletWithdrawal';
+import adminReferral from '../../src/controllers/admin.referral.controller';
+import Transaction from '../../src/models/transaction.model';
+import User from '../../src/models/User.model';
+import AuditLog from '../../src/models/AuditLog.model';
 
 describe('payments are staff-only', () => {
   const app = express();
@@ -193,5 +215,120 @@ describe('driver payout account status', () => {
         'Open Settings and finish your Stripe payout account, then let your dispatcher know so they can send it again.',
     });
     expect(payoutFailedNotice(undefined, 12.5).message).toContain('for a delivered load');
+  });
+});
+
+describe('reward withdrawals', () => {
+  const tx = Transaction as unknown as Record<string, jest.Mock>;
+  const users = User as unknown as Record<string, jest.Mock>;
+  const id = '64b7f0c2a1b2c3d4e5f60718';
+  const withdrawal = () => ({
+    _id: id,
+    userId: 'customer-1',
+    amount: 50,
+    note: 'Withdrawal request to venmo',
+    withdrawalMethod: { type: 'venmo' },
+    save: jest.fn().mockResolvedValue(undefined),
+  });
+  const existing = (doc: unknown) => ({ select: () => ({ lean: () => Promise.resolve(doc) }) });
+
+  const call = (handler: any, req: any) =>
+    new Promise<{ status: number; body: any }>((resolve, reject) => {
+      const res: any = { statusCode: 200 };
+      res.status = (code: number) => { res.statusCode = code; return res; };
+      res.json = (body: any) => { resolve({ status: res.statusCode, body }); return res; };
+      handler({ user: { _id: 'admin-1' }, body: {}, ...req }, res, reject);
+    });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (AuditLog as any).create.mockResolvedValue({});
+  });
+
+  it('checks the request: amount, method and where to send it', () => {
+    expect(withdrawalRequestFrom({ amount: 25.5, methodType: 'venmo', methodDetails: ' @sam ' })).toEqual({
+      ok: true, amount: 25.5, methodType: 'venmo', methodDetails: '@sam',
+    });
+    expect(withdrawalRequestFrom({ amount: '40', methodType: 'check', methodDetails: '12 Main St' })).toMatchObject({ ok: true, amount: 40 });
+    expect(withdrawalRequestFrom({ amount: 0, methodType: 'venmo', methodDetails: 'x' })).toEqual({ ok: false, message: 'Enter an amount greater than $0 to withdraw.' });
+    expect(withdrawalRequestFrom({ amount: 'ten', methodType: 'venmo', methodDetails: 'x' })).toEqual({ ok: false, message: 'Enter an amount greater than $0 to withdraw.' });
+    expect(withdrawalRequestFrom({ amount: 1.234, methodType: 'venmo', methodDetails: 'x' })).toEqual({ ok: false, message: 'Enter the amount in dollars and cents, for example 25.50.' });
+    expect(withdrawalRequestFrom({ amount: 10, methodType: 'cash', methodDetails: 'x' })).toEqual({ ok: false, message: 'Choose how to receive the money: Venmo, PayPal, bank transfer or check.' });
+    expect(withdrawalRequestFrom({ amount: 10, methodType: 'paypal', methodDetails: '   ' })).toEqual({ ok: false, message: 'Add where to send the money, for example your Venmo or PayPal username.' });
+    expect(withdrawalRequestFrom({ amount: 10, methodType: 'paypal', methodDetails: 'x'.repeat(501) })).toEqual({ ok: false, message: 'Keep the payment details under 500 characters.' });
+    expect(withdrawalRequestFrom(undefined)).toMatchObject({ ok: false });
+  });
+
+  it('approves a pending withdrawal once and takes the money only if it is still there', async () => {
+    tx.findOneAndUpdate.mockResolvedValue(withdrawal());
+    users.findOneAndUpdate.mockResolvedValue({ walletBalance: 30, organizationId: 'org-1' });
+
+    const res = await call(adminReferral.approveWithdrawal, { params: { transactionId: id } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.newBalance).toBe(30);
+    expect(tx.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: id, type: 'withdrawal', status: 'pending' },
+      { $set: { status: 'completed' } },
+      { new: true },
+    );
+    expect(users.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: 'customer-1', walletBalance: { $gte: 50 } },
+      { $inc: { walletBalance: -50 } },
+      { new: true },
+    );
+  });
+
+  it('refuses a second approval without touching the wallet', async () => {
+    tx.findOneAndUpdate.mockResolvedValue(null);
+    tx.findById.mockReturnValue(existing({ type: 'withdrawal', status: 'completed' }));
+
+    const res = await call(adminReferral.approveWithdrawal, { params: { transactionId: id } });
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toBe('This withdrawal was already approved or rejected. Refresh to see its current status.');
+    expect(users.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('puts the request back when the balance is no longer there', async () => {
+    tx.findOneAndUpdate.mockResolvedValue(withdrawal());
+    users.findOneAndUpdate.mockResolvedValue(null);
+    users.exists.mockResolvedValue({ _id: 'customer-1' });
+
+    const res = await call(adminReferral.approveWithdrawal, { params: { transactionId: id } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('User no longer has sufficient balance for this withdrawal');
+    expect(tx.updateOne).toHaveBeenCalledWith({ _id: id, status: 'completed' }, { $set: { status: 'pending' } });
+  });
+
+  it('answers 404 for an unknown or malformed request id', async () => {
+    tx.findOneAndUpdate.mockResolvedValue(null);
+    tx.findById.mockReturnValue(existing(null));
+    expect((await call(adminReferral.approveWithdrawal, { params: { transactionId: id } })).status).toBe(404);
+    expect((await call(adminReferral.approveWithdrawal, { params: { transactionId: 'not-an-id' } })).status).toBe(404);
+  });
+
+  it('rejects only a pending withdrawal, with a trimmed reason', async () => {
+    const doc = withdrawal();
+    tx.findOneAndUpdate.mockResolvedValue(doc);
+    users.findById.mockReturnValue({ select: () => ({ lean: () => Promise.resolve({ organizationId: 'org-1' }) }) });
+
+    const res = await call(adminReferral.rejectWithdrawal, {
+      params: { transactionId: id },
+      body: { reason: '  Wrong Venmo name  ' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(tx.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: id, type: 'withdrawal', status: 'pending' },
+      { $set: { status: 'rejected' } },
+      { new: true },
+    );
+    expect(doc.note).toBe('Withdrawal request to venmo (REJECTED: Wrong Venmo name)');
+
+    tx.findOneAndUpdate.mockResolvedValue(null);
+    tx.findById.mockReturnValue(existing({ type: 'withdrawal', status: 'completed' }));
+    expect((await call(adminReferral.rejectWithdrawal, { params: { transactionId: id } })).status).toBe(409);
   });
 });
