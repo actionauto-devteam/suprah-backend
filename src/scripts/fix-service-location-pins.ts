@@ -78,14 +78,17 @@ const run = async () => {
       continue;
     }
 
-    const plan = planStorePin(current, await findStorePin(address, { amazon }));
+    const found = await findStorePin(address, { amazon });
+    const plan = planStorePin(current, found);
     counts[plan.action] += 1;
     if (plan.action === 'move') {
       moves.push({ _id: store._id, from: current, to: plan.to });
       const distance = plan.movedMeters === null ? 'it had no usable pin' : `moves ${miles(plan.movedMeters)}`;
       console.log(`MOVE  ${label}: ${distance}; ${plan.source} matched "${plan.matched}" at ${plan.to[1]}, ${plan.to[0]}`);
     } else if (plan.action === 'check') {
-      const why = plan.reason === 'lookup-failed' ? 'the lookup failed, run again' : 'no match to the house';
+      // Amazon needs the server's AWS access; on a computer without it, its lookups fail.
+      const failedWith = found.failed.map((source) => (source === 'census' ? 'the Census lookup' : 'the Amazon lookup')).join(' and ');
+      const why = plan.reason === 'lookup-failed' ? `${failedWith} failed (run again; Amazon needs the server's AWS access)` : 'no match to the house';
       console.log(`CHECK ${label}: ${why}; ${plan.hasPin ? 'its current pin stays' : 'it has no usable pin, so the website hides it'}.`);
     }
     await sleep(PAUSE_MS);
