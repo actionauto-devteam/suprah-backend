@@ -48,6 +48,11 @@ export interface IPayment extends Document {
   paidAt?: Date;
   dueDate?: Date;
 
+  /** Total refunded so far. A partly refunded payment stays "succeeded";
+   *  only a full refund marks it "refunded". */
+  refundedAmount?: number;
+  refundedAt?: Date;
+
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -118,6 +123,8 @@ const PaymentSchema: Schema<IPayment> = new Schema(
     notes: { type: String, trim: true },
     paidAt: { type: Date },
     dueDate: { type: Date },
+    refundedAmount: { type: Number, min: 0 },
+    refundedAt: { type: Date },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   },
   { timestamps: true }

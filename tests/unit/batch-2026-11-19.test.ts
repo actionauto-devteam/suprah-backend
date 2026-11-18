@@ -23,6 +23,12 @@ jest.mock('../../src/controllers/payment.controller', () => {
 });
 
 import paymentRoutes from '../../src/routes/payment.routes';
+import {
+  refundRequestFor,
+  refundStateFromCharge,
+  refundUpdate,
+  remainingRefundable,
+} from '../../src/utils/paymentRefund';
 
 describe('payments are staff-only', () => {
   const app = express();
@@ -77,5 +83,63 @@ describe('payments are staff-only', () => {
       const res = await as(method, path, 'customer');
       expect([method, path, res.status]).toEqual([method, path, 200]);
     }
+  });
+});
+
+describe('refunds', () => {
+  const paid = { amount: 100 };
+
+  it('refunds everything left when no amount is given', () => {
+    expect(refundRequestFor(paid, undefined)).toEqual({ ok: true, amount: 100, explicit: false });
+    expect(refundRequestFor({ amount: 100, refundedAmount: 40 }, '')).toEqual({ ok: true, amount: 60, explicit: false });
+  });
+
+  it('accepts a partial amount in dollars and cents, as a number or text', () => {
+    expect(refundRequestFor(paid, 25.5)).toEqual({ ok: true, amount: 25.5, explicit: true });
+    expect(refundRequestFor(paid, ' 10.10 ')).toEqual({ ok: true, amount: 10.1, explicit: true });
+    expect(refundRequestFor({ amount: 100, refundedAmount: 40 }, 60)).toEqual({ ok: true, amount: 60, explicit: true });
+  });
+
+  it.each([
+    [0, 'Enter a refund amount greater than $0.'],
+    [-5, 'Enter a refund amount greater than $0.'],
+    ['abc', 'Enter a refund amount greater than $0.'],
+    [Number.NaN, 'Enter a refund amount greater than $0.'],
+    [{}, 'Enter a refund amount greater than $0.'],
+    [10.005, 'Enter the refund amount in dollars and cents, for example 25.50.'],
+    [100.01, 'You can refund up to $100.00 on this payment.'],
+  ])('refuses %p', (requested, message) => {
+    expect(refundRequestFor(paid, requested)).toEqual({ ok: false, message });
+  });
+
+  it('never refunds more than what is left', () => {
+    expect(refundRequestFor({ amount: 100, refundedAmount: 70 }, 30.01)).toEqual({
+      ok: false,
+      message: 'You can refund up to $30.00 on this payment.',
+    });
+    expect(refundRequestFor({ amount: 100, refundedAmount: 100 }, undefined)).toEqual({
+      ok: false,
+      message: 'This payment has already been fully refunded.',
+    });
+    expect(remainingRefundable({ amount: 19.99, refundedAmount: 5.33 })).toBe(14.66);
+    expect(remainingRefundable({ amount: 10, refundedAmount: 12 })).toBe(0);
+  });
+
+  it("reads Stripe's totals: a partial refund is not a full one", () => {
+    expect(refundStateFromCharge({ amount_refunded: 2550, refunded: false })).toEqual({ refundedAmount: 25.5, fullyRefunded: false });
+    expect(refundStateFromCharge({ amount_refunded: 10000, refunded: true })).toEqual({ refundedAmount: 100, fullyRefunded: true });
+    expect(refundStateFromCharge({})).toEqual({ refundedAmount: 0, fullyRefunded: false });
+  });
+
+  it('only marks the payment refunded when all of it went back, and never lowers the total', () => {
+    const at = new Date('2026-11-19T00:00:00Z');
+    expect(refundUpdate({ refundedAmount: 25.5, fullyRefunded: false }, at)).toEqual({
+      $max: { refundedAmount: 25.5 },
+      $set: { refundedAt: at },
+    });
+    expect(refundUpdate({ refundedAmount: 100, fullyRefunded: true }, at)).toEqual({
+      $max: { refundedAmount: 100 },
+      $set: { refundedAt: at, status: 'refunded' },
+    });
   });
 });
