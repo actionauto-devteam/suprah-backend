@@ -22,6 +22,7 @@ import {
   roundCents,
 } from '../utils/paymentRefund';
 import { isAwaitingPayment } from '../utils/customerPayments';
+import { claimFailed, claimPaid } from '../utils/paymentPaid';
 import { fillMonthlyRevenue, lastMonths } from '../utils/paymentTrend';
 
 const stripe = new Stripe(config.stripe.secretKey, {
@@ -39,6 +40,50 @@ const getUserId = (req: Request): string => {
   if (!userId) throw new ApiError(401, 'User not authenticated');
   return userId;
 };
+
+/** Charge, receipt and card type for a paid PaymentIntent (the receipt is non-critical). */
+async function paidDetailsFromIntent(pi: Stripe.PaymentIntent): Promise<Record<string, unknown>> {
+  const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : pi.latest_charge?.id;
+  if (!chargeId) return {};
+  const details: Record<string, unknown> = { stripeChargeId: chargeId };
+  try {
+    const charge = await stripe.charges.retrieve(chargeId);
+    details.receiptUrl = charge.receipt_url || undefined;
+    details.paymentMethod = charge.payment_method_details?.type || undefined;
+  } catch { /* non-critical */ }
+  return details;
+}
+
+/**
+ * Everything that follows a payment going through: tell the staff member who
+ * sent the invoice, give a referral reward if one is due, record it, and
+ * update open screens. Called only by whichever path marked it paid first
+ * (Stripe's update, or the customer coming back), so it runs once.
+ */
+async function afterPaid(payment: any, source: string) {
+  await safeCreateNotification({
+    userId: payment.createdBy as any,
+    organizationId: payment.organizationId,
+    type: 'payment_received',
+    title: 'Payment Received',
+    message: `Payment of $${payment.amount.toFixed(2)} from ${payment.customerName} was successful.`,
+    metadata: { paymentId: payment._id.toString(), amount: payment.amount, customerName: payment.customerName },
+  });
+
+  try { await ReferralService.processPaymentReward(payment, source); }
+  catch (e) { logger.error({ err: e, paymentId: payment._id }, 'Referral reward failed after payment'); }
+
+  await activityService.createActivity({
+    userId: 'SYSTEM',
+    organizationId: payment.organizationId.toString(),
+    type: 'payment_completed',
+    title: 'Payment Succeeded',
+    description: `Payment of $${payment.amount.toFixed(2)} received`,
+    metadata: { paymentId: payment._id.toString(), source },
+  }).catch(() => {});
+
+  await broadcastPaymentSuccess(payment);
+}
 
 async function broadcastPaymentSuccess(payment: any) {
   try {
@@ -478,18 +523,24 @@ const getCheckoutSessionStatus = asyncHandler(async (req: Request, res: Response
   if (!payment) throw new ApiError(404, 'Invoice not found');
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) throw new ApiError(403, 'Not authorized');
 
-  // If the webhook hasn't landed yet but Stripe says paid, reconcile now.
+  // If the webhook hasn't landed yet but Stripe says paid, reconcile now
+  // (only once, even if the webhook lands at the same moment).
+  let current = payment;
   if (session.payment_status === 'paid' && payment.status !== 'succeeded') {
-    payment.status = 'succeeded';
-    payment.paidAt = new Date();
-    payment.stripePaymentIntentId = (session.payment_intent as string) || payment.stripePaymentIntentId;
-    payment.stripeCheckoutSessionId = session.id;
-    await payment.save();
-    try { await ReferralService.processPaymentReward(payment, user._id.toString()); } catch { /* noop */ }
-    await broadcastPaymentSuccess(payment);
+    const piId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+    const claimed = await claimPaid(
+      { _id: payment._id },
+      { stripeCheckoutSessionId: session.id, ...(piId ? { stripePaymentIntentId: piId } : {}) },
+    );
+    if (claimed) {
+      current = claimed;
+      await afterPaid(claimed, 'STRIPE_CHECKOUT_RETURN');
+    } else {
+      current = (await Payment.findById(payment._id)) || payment;
+    }
   }
 
-  res.json(new ApiResponse(200, { status: payment.status, payment }, 'Checkout status'));
+  res.json(new ApiResponse(200, { status: current.status, payment: current }, 'Checkout status'));
 });
 
 // ─── Confirm Payment (dealer, existing Elements path) ─────────────────────────
@@ -500,7 +551,7 @@ const confirmPayment = asyncHandler(async (req: Request, res: Response) => {
   if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
 
   const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-  const payment = await Payment.findOne({ stripePaymentIntentId: paymentIntentId, organizationId: orgId });
+  let payment = await Payment.findOne({ stripePaymentIntentId: paymentIntentId, organizationId: orgId });
   if (!payment) throw new ApiError(404, 'Payment record not found');
 
   if (payment.status === 'succeeded') {
@@ -508,19 +559,10 @@ const confirmPayment = asyncHandler(async (req: Request, res: Response) => {
   }
 
   if (paymentIntent.status === 'succeeded') {
-    payment.status = 'succeeded';
-    payment.paidAt = new Date();
-    payment.stripeChargeId = paymentIntent.latest_charge as string;
-
-    if (payment.stripeChargeId) {
-      try {
-        const charge = await stripe.charges.retrieve(payment.stripeChargeId);
-        payment.receiptUrl = charge.receipt_url || undefined;
-        payment.paymentMethod = charge.payment_method_details?.type || undefined;
-      } catch { /* non-critical */ }
-    }
-
-    await payment.save();
+    const claimed = await claimPaid({ _id: payment._id }, await paidDetailsFromIntent(paymentIntent));
+    // Stripe's own update got there first and already ran the follow-ups.
+    if (!claimed) return res.json(new ApiResponse(200, await Payment.findById(payment._id), 'Payment already confirmed'));
+    payment = claimed;
 
     await safeCreateNotification({
       userId, organizationId: orgId, type: 'payment_received', title: 'Payment Received',
@@ -759,52 +801,21 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session;
       const paymentId = session.metadata?.paymentId;
-      const payment = paymentId
-        ? await Payment.findById(paymentId)
-        : await Payment.findOne({ stripeCheckoutSessionId: session.id });
+      if (session.payment_status !== 'paid') break;
 
-      if (payment && payment.status !== 'succeeded' && session.payment_status === 'paid') {
-        payment.status = 'succeeded';
-        payment.paidAt = new Date();
-        payment.stripeCheckoutSessionId = session.id;
-        payment.stripePaymentIntentId = (session.payment_intent as string) || payment.stripePaymentIntentId;
+      let paid: Record<string, unknown> = { stripeCheckoutSessionId: session.id };
+      const piId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+      if (piId) {
+        paid.stripePaymentIntentId = piId;
+        try {
+          paid = { ...paid, ...(await paidDetailsFromIntent(await stripe.paymentIntents.retrieve(piId))) };
+        } catch { /* receipt is non-critical */ }
+      }
 
-        if (payment.stripePaymentIntentId) {
-          try {
-            const pi = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
-            payment.stripeChargeId = (pi.latest_charge as string) || payment.stripeChargeId;
-            if (payment.stripeChargeId) {
-              const charge = await stripe.charges.retrieve(payment.stripeChargeId);
-              payment.receiptUrl = charge.receipt_url || undefined;
-              payment.paymentMethod = charge.payment_method_details?.type || undefined;
-            }
-          } catch { /* receipt is non-critical */ }
-        }
-
-        await payment.save();
-
-        await safeCreateNotification({
-          userId: payment.createdBy as any,
-          organizationId: payment.organizationId,
-          type: 'payment_received',
-          title: 'Payment Received',
-          message: `Payment of $${payment.amount.toFixed(2)} from ${payment.customerName} was successful.`,
-          metadata: { paymentId: payment._id.toString(), amount: payment.amount, customerName: payment.customerName },
-        });
-
-        try { await ReferralService.processPaymentReward(payment, 'STRIPE_CHECKOUT'); }
-        catch (e) { logger.error({ err: e, paymentId: payment._id }, 'Referral failed during checkout webhook'); }
-
-        await activityService.createActivity({
-          userId: 'SYSTEM',
-          organizationId: payment.organizationId.toString(),
-          type: 'payment_completed',
-          title: 'Payment Succeeded (Checkout)',
-          description: `Checkout confirmation: $${payment.amount.toFixed(2)} received`,
-          metadata: { paymentId: payment._id.toString(), sessionId: session.id },
-        }).catch(() => {});
-
-        await broadcastPaymentSuccess(payment);
+      // Only the first report of this payment runs the follow-ups.
+      const payment = await claimPaid(paymentId ? { _id: paymentId } : { stripeCheckoutSessionId: session.id }, paid);
+      if (payment) {
+        await afterPaid(payment, 'STRIPE_CHECKOUT');
         logger.info({ paymentId: payment._id, sessionId: session.id }, 'Stripe Checkout: payment success');
       }
       break;
@@ -812,38 +823,18 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
 
     case 'payment_intent.succeeded': {
       const pi = event.data.object as Stripe.PaymentIntent;
-      const payment = await Payment.findOne({ stripePaymentIntentId: pi.id });
-      if (payment && payment.status !== 'succeeded') {
-        payment.status = 'succeeded';
-        payment.paidAt = new Date();
-        payment.stripeChargeId = pi.latest_charge as string;
-        await payment.save();
-
-        await activityService.createActivity({
-          userId: 'SYSTEM', organizationId: payment.organizationId.toString(),
-          type: 'payment_completed', title: 'Payment Succeeded (Webhook)',
-          description: `Webhook confirmation: $${payment.amount.toFixed(2)} received`,
-          metadata: { paymentId: payment._id.toString(), piId: pi.id },
-        });
-
+      const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : pi.latest_charge?.id;
+      const payment = await claimPaid({ stripePaymentIntentId: pi.id }, chargeId ? { stripeChargeId: chargeId } : {});
+      if (payment) {
+        await afterPaid(payment, 'STRIPE_WEBHOOK');
         logger.info({ paymentId: payment._id, piId: pi.id }, 'Stripe Webhook: Payment success');
-
-        try { await ReferralService.processPaymentReward(payment, 'STRIPE_WEBHOOK'); }
-        catch (e) { logger.error({ err: e, paymentId: payment._id }, 'Referral processing failed during webhook'); }
-
-        await broadcastPaymentSuccess(payment);
       }
       break;
     }
 
     case 'payment_intent.payment_failed': {
       const pi = event.data.object as Stripe.PaymentIntent;
-      const payment = await Payment.findOne({ stripePaymentIntentId: pi.id });
-      if (payment && payment.status !== 'succeeded') {
-        payment.status = 'failed';
-        payment.failureReason = pi.last_payment_error?.message || 'Payment failed';
-        await payment.save();
-      }
+      await claimFailed({ stripePaymentIntentId: pi.id }, pi.last_payment_error?.message || 'Payment failed');
       break;
     }
 
@@ -970,26 +961,17 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
   if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
 
   const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-  const payment = await Payment.findOne({ stripePaymentIntentId: paymentIntentId });
+  let payment = await Payment.findOne({ stripePaymentIntentId: paymentIntentId });
   if (!payment) throw new ApiError(404, 'Payment record not found');
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) throw new ApiError(403, 'Not authorized');
 
   if (payment.status === 'succeeded') return res.json(new ApiResponse(200, payment, 'Payment already confirmed'));
 
   if (paymentIntent.status === 'succeeded') {
-    payment.status = 'succeeded';
-    payment.paidAt = new Date();
-    payment.stripeChargeId = paymentIntent.latest_charge as string;
-
-    if (payment.stripeChargeId) {
-      try {
-        const charge = await stripe.charges.retrieve(payment.stripeChargeId);
-        payment.receiptUrl = charge.receipt_url || undefined;
-        payment.paymentMethod = charge.payment_method_details?.type || undefined;
-      } catch { /* non-critical */ }
-    }
-
-    await payment.save();
+    const claimed = await claimPaid({ _id: payment._id }, await paidDetailsFromIntent(paymentIntent));
+    // Stripe's own update got there first and already ran the follow-ups.
+    if (!claimed) return res.json(new ApiResponse(200, await Payment.findById(payment._id), 'Payment already confirmed'));
+    payment = claimed;
 
     try { await ReferralService.processPaymentReward(payment, user._id.toString()); }
     catch (e) { logger.error({ err: e, paymentId: payment._id }, 'Referral processing failed during customer confirmation'); }
@@ -1053,11 +1035,9 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
     try {
       const session = await stripe.checkout.sessions.retrieve(payment.stripeCheckoutSessionId);
       if (session.payment_status === 'paid') {
-        payment.status = 'succeeded';
-        payment.paidAt = new Date();
-        payment.stripePaymentIntentId = (session.payment_intent as string) || payment.stripePaymentIntentId;
-        await payment.save();
-        await broadcastPaymentSuccess(payment);
+        const piId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+        const claimed = await claimPaid({ _id: payment._id }, piId ? { stripePaymentIntentId: piId } : {});
+        if (claimed) await afterPaid(claimed, 'STRIPE_CANCEL_CHECK');
         throw new ApiError(409, 'This invoice was already paid, so it can’t be cancelled.');
       }
     } catch (e) {
@@ -1071,11 +1051,9 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
     try {
       const pi = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
       if (pi.status === 'succeeded') {
-        payment.status = 'succeeded';
-        payment.paidAt = new Date();
-        payment.stripeChargeId = (pi.latest_charge as string) || payment.stripeChargeId;
-        await payment.save();
-        await broadcastPaymentSuccess(payment);
+        const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : pi.latest_charge?.id;
+        const claimed = await claimPaid({ _id: payment._id }, chargeId ? { stripeChargeId: chargeId } : {});
+        if (claimed) await afterPaid(claimed, 'STRIPE_CANCEL_CHECK');
         throw new ApiError(409, 'This invoice was already paid, so it can’t be cancelled.');
       }
       if (pi.status !== 'canceled') {
@@ -1087,8 +1065,19 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  // Cancel only if nothing marked it paid in the meantime (Stripe's update can
+  // land while this request is running; saving the old copy would hide a payment).
+  const cancelled = await Payment.findOneAndUpdate(
+    { _id: payment._id, status: { $nin: ['succeeded', 'refunded', 'cancelled'] } },
+    { $set: { status: 'cancelled' } },
+    { new: true },
+  );
+  if (!cancelled) {
+    const latest = await Payment.findById(payment._id);
+    if (latest?.status === 'cancelled') return res.json(new ApiResponse(200, latest, 'Invoice already cancelled'));
+    throw new ApiError(409, 'This invoice was already paid, so it can’t be cancelled.');
+  }
   payment.status = 'cancelled';
-  await payment.save();
 
   // Let the dealership know + sync dashboards.
   try {
