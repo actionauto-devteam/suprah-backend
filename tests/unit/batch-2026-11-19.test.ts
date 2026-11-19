@@ -416,3 +416,13 @@ describe('Link Wise setup', () => {
     });
   });
 });
+
+// ─── My Garage "Payments Due" matches the "To pay" list ─────────────────────
+import { isAwaitingPayment } from '../../src/utils/customerPayments';
+
+describe('Payments Due count', () => {
+  it('counts the same invoices the customer sees under "To pay"', () => {
+    expect(['pending', 'failed', 'processing'].every(isAwaitingPayment)).toBe(true);
+    expect(['succeeded', 'refunded', 'cancelled', '', undefined, null].some(isAwaitingPayment)).toBe(false);
+  });
+});

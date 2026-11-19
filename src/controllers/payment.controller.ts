@@ -21,6 +21,7 @@ import {
   remainingRefundable,
   roundCents,
 } from '../utils/paymentRefund';
+import { isAwaitingPayment } from '../utils/customerPayments';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-02-25.clover',
@@ -891,7 +892,9 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
   const totalPaid = roundCents(
     payments.filter(p => p.status === 'succeeded').reduce((s, p) => s + p.amount - (p.refundedAmount || 0), 0),
   );
-  const pendingCount = payments.filter(p => p.status === 'pending' || p.status === 'failed').length;
+  // The same invoices as the "To pay" list on the customer's Suprah Pay page,
+  // so the My Garage "Payments Due" tile and that list always agree.
+  const pendingCount = payments.filter(p => isAwaitingPayment(p.status)).length;
 
   res.json(new ApiResponse(200, { payments, stats: { totalOwed, totalPaid, pendingCount } }, 'Payments fetched successfully'));
 });
