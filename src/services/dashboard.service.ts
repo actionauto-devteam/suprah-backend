@@ -11,6 +11,18 @@ import DriverLocation from '../models/DriverLocation.model';
 import DriverProfile from '../models/DriverProfile.model';
 import AnalyticsAggregate from '../models/AnalyticsAggregate.model';
 
+/**
+ * Money a paid payment kept: its amount minus anything refunded since.
+ * A partly refunded payment stays "succeeded" (2026-11-19), so revenue counts
+ * only the part the dealership kept; full refunds aren't "succeeded" at all.
+ */
+export const KEPT_PAYMENT_AMOUNT = {
+    $subtract: [
+        { $convert: { input: '$amount', to: 'double', onError: 0, onNull: 0 } },
+        { $convert: { input: '$refundedAmount', to: 'double', onError: 0, onNull: 0 } },
+    ],
+};
+
 export class DashboardService {
     static async getDashboardMetrics(orgId: string, period: string = '1Y') {
         const orgObjectId = orgId;
@@ -26,7 +38,7 @@ export class DashboardService {
         const livePayments = await Payment.find({ organizationId: orgId })
             .sort({ createdAt: -1 })
             .limit(10)
-            .select('customerName amount status description createdAt');
+            .select('customerName amount refundedAmount status description createdAt');
 
         return {
             stats,
@@ -113,7 +125,7 @@ export class DashboardService {
                 {
                     $group: {
                         _id: { $month: '$createdAt' },
-                        revenue: { $sum: { $convert: { input: '$amount', to: 'double', onError: 0, onNull: 0 } } }
+                        revenue: { $sum: KEPT_PAYMENT_AMOUNT }
                     }
                 },
                 { $sort: { _id: 1 } }
@@ -158,7 +170,7 @@ export class DashboardService {
             {
                 $group: {
                     _id: groupBy,
-                    revenue: { $sum: { $convert: { input: '$amount', to: 'double', onError: 0, onNull: 0 } } },
+                    revenue: { $sum: KEPT_PAYMENT_AMOUNT },
                     date: { $first: '$createdAt' }
                 }
             },
