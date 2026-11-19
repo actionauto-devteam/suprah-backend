@@ -33,7 +33,10 @@ jest.mock('../../src/models/User.model', () => ({
 jest.mock('../../src/models/AuditLog.model', () => ({ __esModule: true, default: { create: jest.fn() } }));
 jest.mock('../../src/models/referral.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: {} }));
-jest.mock('../../src/models/Payment.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/models/Payment.model', () => ({
+  __esModule: true,
+  default: { aggregate: jest.fn(), find: jest.fn() },
+}));
 jest.mock('../../src/utils/safeNotification', () => ({
   safeCreateNotification: jest.fn(),
   notifyOrgAdmins: jest.fn(),
@@ -52,6 +55,9 @@ import adminReferral from '../../src/controllers/admin.referral.controller';
 import Transaction from '../../src/models/transaction.model';
 import User from '../../src/models/User.model';
 import AuditLog from '../../src/models/AuditLog.model';
+import Payment from '../../src/models/Payment.model';
+import { DashboardService, KEPT_PAYMENT_AMOUNT } from '../../src/services/dashboard.service';
+import { fillMonthlyRevenue, lastMonths } from '../../src/utils/paymentTrend';
 
 describe('payments are staff-only', () => {
   const app = express();
@@ -424,5 +430,59 @@ describe('Payments Due count', () => {
   it('counts the same invoices the customer sees under "To pay"', () => {
     expect(['pending', 'failed', 'processing'].every(isAwaitingPayment)).toBe(true);
     expect(['succeeded', 'refunded', 'cancelled', '', undefined, null].some(isAwaitingPayment)).toBe(false);
+  });
+});
+
+describe('CRM dashboard revenue leaves out refunded money', () => {
+  const payments = Payment as unknown as Record<string, jest.Mock>;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    payments.aggregate.mockResolvedValue([]);
+  });
+
+  it('counts each paid payment as its amount minus anything refunded', () => {
+    expect(KEPT_PAYMENT_AMOUNT).toEqual({
+      $subtract: [
+        { $convert: { input: '$amount', to: 'double', onError: 0, onNull: 0 } },
+        { $convert: { input: '$refundedAmount', to: 'double', onError: 0, onNull: 0 } },
+      ],
+    });
+  });
+
+  it.each(['1Y', '7D', '1M', '6M'])('uses it for the %s revenue chart, on paid payments only', async (period) => {
+    await (DashboardService as any).getRevenueTrajectory('64b7f0c2a1b2c3d4e5f60718', period);
+    const pipeline = payments.aggregate.mock.calls[0][0];
+    expect(pipeline[0].$match.status).toBe('succeeded');
+    expect(pipeline[1].$group.revenue).toEqual({ $sum: KEPT_PAYMENT_AMOUNT });
+  });
+});
+
+describe('Payments page revenue trend', () => {
+  it('covers the last 6 calendar months, oldest first, across a new year', () => {
+    const { months, start } = lastMonths(new Date('2026-02-15T10:00:00Z'), 6);
+    expect(months).toEqual([
+      { year: 2025, month: 9 },
+      { year: 2025, month: 10 },
+      { year: 2025, month: 11 },
+      { year: 2025, month: 12 },
+      { year: 2026, month: 1 },
+      { year: 2026, month: 2 },
+    ]);
+    expect(start.toISOString()).toBe('2025-09-01T00:00:00.000Z');
+  });
+
+  it('fills months without paid payments with 0 and rounds to cents', () => {
+    const { months } = lastMonths(new Date('2026-11-19T00:00:00Z'), 3);
+    expect(
+      fillMonthlyRevenue(months, [
+        { _id: { year: 2026, month: 11 }, revenue: 74.505 },
+        { _id: { year: 2026, month: 9 }, revenue: 100 },
+      ]),
+    ).toEqual([
+      { year: 2026, month: 9, revenue: 100 },
+      { year: 2026, month: 10, revenue: 0 },
+      { year: 2026, month: 11, revenue: 74.51 },
+    ]);
   });
 });
