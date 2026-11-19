@@ -355,7 +355,7 @@ export const getAppointmentsDashboard = asyncHandler(
             lastName:
               apt.customerBooking?.lastName || customerData?.lastName || "",
             email: apt.customerBooking?.email,
-            phone: apt.customerBooking?.phone || customerData?.phone || "N/A",
+            phone: apt.customerBooking?.phone || "",
             isCustomerBooking: apt.customerBooking?.isCustomerBooking,
           },
           crmUser: {

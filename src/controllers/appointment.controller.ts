@@ -490,7 +490,7 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
     const { vehicleId, firstName, lastName, email, phone, startTime, notes } = req.body || {};
     const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 80);
 
-    if (!vehicleId || !firstName || !lastName || !email || !phone || !startTime) {
+    if (!vehicleId || !firstName || !lastName || !String(email || '').trim() || !String(phone || '').trim() || !startTime) {
         return res.status(400).json(
             new ApiResponse(400, null, 'vehicleId, firstName, lastName, email, phone, and startTime are required')
         );

@@ -22,6 +22,7 @@ export interface AddLeadNoteInput {
   noteKind?: 'appointment';
   suppressNotification?: boolean;
   sourceTaskId?: string;
+  recordMentions?: boolean;
 }
 
 export function shouldSuppressHandoffNoteNotification(
@@ -99,6 +100,22 @@ export async function addLeadNoteAndNotify(input: AddLeadNoteInput) {
 
   const note = lead.notes[lead.notes.length - 1];
 
+  if (input.recordMentions !== false && (mentionedUserIds.length || mentionedGroupIds.length)) {
+    await import('../services/leadMention.service')
+      .then(({ recordLeadMentions }) => recordLeadMentions(input.organizationId, String(lead._id), {
+        _id: (note as any)._id,
+        text,
+        createdAt: noteAt,
+        createdBy: input.createdBy,
+        authorType: input.authorType,
+        authorName: input.authorName,
+        mentionedUserIds,
+        mentionedGroupIds,
+        sourceTaskId: input.sourceTaskId,
+      }))
+      .catch((err) => logger.error({ err, leadId: String(lead._id) }, '[LeadNote] Failed to save the mentions'));
+  }
+
   if (input.createdBy) {
     await activityService.createActivity({
       userId: input.createdBy,
@@ -136,7 +153,7 @@ export async function addLeadNoteAndNotify(input: AddLeadNoteInput) {
       'lead_note_mention',
       title,
       message,
-      { leadId: String(lead._id), noteId: String((note as any)._id), route: `/crm/leads?leadId=${lead._id}` },
+      { leadId: String(lead._id), noteId: String((note as any)._id), route: `/crm/leads?leadId=${lead._id}&note=${(note as any)._id}` },
     ).catch((err) => logger.error({ err }, '[LeadNote] Failed to notify mentioned users'));
   }
 

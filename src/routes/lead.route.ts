@@ -37,6 +37,7 @@ import { generateLeadAiDraftHandler, getLeadReplyOptionsHandler } from "../contr
 import { staffAiDraftLimiter } from "../middleware/trainingLabRateLimit";
 import { getLeadVehiclePreviewHandler } from "../controllers/leadVehiclePreview.controller";
 import { getLicensePossibleMatchesHandler } from "../controllers/licensePossibleMatch.controller";
+import { completeLeadMentionsHandler, getLeadMentionCountHandler, listLeadMentionsHandler } from "../controllers/leadMention.controller";
 import crmAuth from "../middleware/crmAuth.middleware";
 import {
   adfLimiter,
@@ -72,6 +73,9 @@ router.get("/location-counts", getLeadLocationCounts);
 router.get("/lead-type-counts", getLeadTypeCounts);
 router.get("/assigned-new-count", getAssignedNewCount);
 router.get("/needs-reply-count", getNeedsReplyCount);
+router.get("/mentions", listLeadMentionsHandler);
+router.get("/mentions/count", getLeadMentionCountHandler);
+router.post("/mentions/complete", completeLeadMentionsHandler);
 router.get("/possible-matches", getLicensePossibleMatchesHandler);
 
 router.post(

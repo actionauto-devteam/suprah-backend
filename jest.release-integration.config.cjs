@@ -5,6 +5,7 @@ module.exports = {
     '**/tests/calendarMeetSync.realdb.test.ts',
     '**/tests/meetScheduleCleanup.realdb.test.ts',
     '**/tests/meetJoinConcurrency.realdb.test.ts',
+    '**/tests/meetScheduling.realdb.test.ts',
     '**/tests/unifiedPushLinked.realdb.test.ts',
     '**/tests/appointmentRescheduleNotification.realdb.test.ts',
     '**/tests/calendarOAuthState.test.ts',

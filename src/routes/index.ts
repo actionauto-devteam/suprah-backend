@@ -111,6 +111,9 @@ import customerFeedbackRoute from "./customerFeedback.routes";
 import crmDealRoute from "./crmDeal.routes";
 import youtubeRoute from "./youtube.route";
 import suprahMeetRoute from "./suprahMeet.route";
+// ➕ DEAL DESK — AI Deal Builder, Supra New Deal channel, Deal Queue, F&I rotation
+import dealDeskRoute from "./dealDesk.routes";
+import dealDeskPublicRoute from "./dealDeskPublic.routes";
 
 
 const router = express.Router();
@@ -300,6 +303,18 @@ const defaultRoutes = [
   {
     path: "/crm/deals",
     route: crmDealRoute,
+  },
+  // ➕ DEAL DESK — same shadowing rule: must stay ABOVE "/crm" so
+  // crm.route's dynamic "/:id"-style routes don't capture "/crm/deal-desk/*".
+  // Separate from "/crm/deals" (existing crmDeal.routes) on purpose.
+  {
+    path: "/crm/deal-desk",
+    route: dealDeskRoute,
+  },
+  // Website Purchase Widget — PUBLIC (rate-limited, CORS per dealer site, no auth).
+  {
+    path: "/public/deal-desk",
+    route: dealDeskPublicRoute,
   },
   {
     path: "/crm/lead-intake",

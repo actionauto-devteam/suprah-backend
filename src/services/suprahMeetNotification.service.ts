@@ -54,7 +54,10 @@ async function send(meeting: MeetingNotice, kind: 'invitation' | 'reminder' | 'l
   // One persisted notification per recipient/session/stage. A reschedule has
   // a new reminder key; retrying a partially delivered batch reuses existing rows.
   const eventKey = `meet:${String(meeting._id)}:${kind}${isReminder ? `:${meeting.scheduledAt?.toISOString()}` : ''}`;
-  const targets = await recipients(meeting, isReminder || isLive);
+  const targets = await recipients(meeting, isReminder || isLive || Boolean(meeting.scheduledAt));
+  const hostConfirmation = kind === 'invitation' && time
+    ? `You scheduled "${meeting.title}" for ${time}. Open Suprah Meet to view or start your meeting.`
+    : null;
   const scheduledMs = meeting.scheduledAt?.getTime();
   const pushExpiresAt = new Date(isReminder && scheduledMs ? scheduledMs
     : isLive ? Math.min(scheduledMs ?? now.getTime(), meeting.openedAt?.getTime() ?? now.getTime()) + 3_600_000
@@ -64,8 +67,10 @@ async function send(meeting: MeetingNotice, kind: 'invitation' | 'reminder' | 'l
     const results = await Promise.allSettled(targets.slice(i, i + 10).map((userId) =>
       notificationService.createNotification({
         userId, organizationId: String(meeting.organizationId), type,
-        title: isLive ? 'Suprah Meet room is open' : isReminder ? 'Suprah Meet starts soon' : `${firstName} invited you to a meeting`,
-        message,
+        title: hostConfirmation && userId === String(meeting.hostCrmUserId)
+          ? 'Suprah Meet scheduled'
+          : isLive ? 'Suprah Meet room is open' : isReminder ? 'Suprah Meet starts soon' : `${firstName} invited you to a meeting`,
+        message: hostConfirmation && userId === String(meeting.hostCrmUserId) ? hostConfirmation : message,
         idempotencyKey: eventKey,
         ensurePushDelivery: true,
         metadata: {

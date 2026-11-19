@@ -175,8 +175,8 @@ const AppointmentEmailNoticeSchema = new Schema(
 const CustomerBookingSchema = new Schema({
   firstName: { type: String, required: true, trim: true },
   lastName: { type: String, required: true, trim: true },
-  email: { type: String, required: true, lowercase: true, trim: true },
-  phone: { type: String, required: true, trim: true },
+  email: { type: String, lowercase: true, trim: true, default: '' },
+  phone: { type: String, trim: true, default: '' },
   isCustomerBooking: { type: Boolean, default: true },
   bookingHistory: {
     previousBookings: [{ type: Schema.Types.ObjectId, ref: 'Appointment' }],

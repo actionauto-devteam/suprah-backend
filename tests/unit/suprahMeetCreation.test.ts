@@ -55,6 +55,22 @@ it('notifies for every recurring session, keeping Mountain wall time conversion'
   expect(res.json.mock.calls[0][0].data.seriesCount).toBe(2);
 });
 
+it('persists and returns a private schedule with only the host and one invited person', async () => {
+  const person = '507f1f77bcf86cd799439011';
+  findUsers.mockReturnValue({ select: () => ({ lean: async () => [{ _id: person }] }) });
+  const res = response();
+  await invoke(controller.createMeeting, { crmUser: host, body: {
+    title: 'One-to-one', visibility: 'private', invitees: [person], scheduledAt: '2026-10-21T12:00',
+  } }, res);
+  expect(createMeeting.mock.calls[0][0]).toMatchObject({
+    organizationId: 'org-1', hostCrmUserId: 'host', status: 'scheduled', visibility: 'private', invitees: [person],
+  });
+  expect(res.json.mock.calls[0][0].data.meetings).toEqual([
+    expect.objectContaining({ _id: 'session-1', title: 'One-to-one', invitees: [person], hostCrmUserId: 'host' }),
+  ]);
+  expect(notifyCreated).toHaveBeenCalledTimes(1);
+});
+
 it('expands selected departments and deduplicates people already invited directly', async () => {
   const person = '507f1f77bcf86cd799439011';
   const colleague = '507f1f77bcf86cd799439012';
