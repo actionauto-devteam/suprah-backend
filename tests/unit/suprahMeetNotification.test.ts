@@ -33,15 +33,21 @@ beforeEach(() => {
   updateMeeting.mockResolvedValue({ modifiedCount: 1 });
 });
 
-it('invites each active org-scoped recipient once, excluding the creator', async () => {
+it('confirms scheduling to the host and invites each active org-scoped recipient once', async () => {
   await notifyMeetingCreated(buildMeeting());
   expect(findUsers).toHaveBeenCalledWith({
     organizationId: 'org-1', isActive: true, isSystem: { $ne: true },
     _id: { $in: ['host', 'person-1', 'department-member'] },
   });
   expect(findHost).toHaveBeenCalledWith({ _id: 'host', organizationId: 'org-1' });
-  expect(createNotification.mock.calls.map(([notice]) => notice.userId)).toEqual(['person-1', 'department-member']);
-  const notice = createNotification.mock.calls[0][0];
+  expect(createNotification.mock.calls.map(([notice]) => notice.userId)).toEqual(['host', 'person-1', 'department-member']);
+  const confirmation = createNotification.mock.calls[0][0];
+  expect(confirmation.title).toBe('Suprah Meet scheduled');
+  expect(confirmation.message).toContain('You scheduled "Team planning"');
+  expect(confirmation.message).toContain('12:00 PM MDT');
+  expect(confirmation.ensurePushDelivery).toBe(true);
+  expect(confirmation.metadata.route).toBe('/crm/suprah-meet/room/MEET-1234');
+  const notice = createNotification.mock.calls[1][0];
   expect(notice.type).toBe('suprah_meet_invited');
   expect(notice.title).toBe('Taylor invited you to a meeting');
   expect(notice.message).toContain('Taylor created "Team planning"');
@@ -60,7 +66,7 @@ it('invite-all expands only within the same active organization audience', async
   expect(findUsers.mock.calls[0][0]).toEqual({
     organizationId: 'org-1', isActive: true, isSystem: { $ne: true },
   });
-  expect(createNotification).toHaveBeenCalledTimes(2);
+  expect(createNotification).toHaveBeenCalledTimes(3);
 });
 
 it('does not send creation invitations for Google copies, while retaining reminders and live alerts', async () => {
@@ -80,6 +86,15 @@ it('instant invitations say live now without an Upcoming/date claim', async () =
   const notice = createNotification.mock.calls[0][0];
   expect(notice.message).toContain('live now');
   expect(notice.message).not.toContain('Upcoming');
+  expect(createNotification.mock.calls.map(([notice]) => notice.userId)).not.toContain('host');
+});
+
+it('notifies both people when a scheduled meeting has only a host and one invitee', async () => {
+  findUsers.mockReturnValue({ select: () => ({ lean: async () => [{ _id: 'person-1' }, { _id: 'host' }] }) });
+  await notifyMeetingCreated(buildMeeting({ invitees: ['person-1'] }));
+  expect(findUsers.mock.calls[0][0]._id.$in).toEqual(['person-1', 'host']);
+  expect(createNotification.mock.calls.map(([notice]) => notice.userId)).toEqual(['person-1', 'host']);
+  expect(createNotification.mock.calls[1][0].title).toBe('Suprah Meet scheduled');
 });
 
 it('keeps the durable invitation pending on partial persistence failure', async () => {

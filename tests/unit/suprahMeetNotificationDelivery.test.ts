@@ -97,6 +97,22 @@ it('retrying an accepted event reuses its row and does not re-alert the same dev
   expect(emitToCrmUser).toHaveBeenCalledTimes(2);
 });
 
+it('delivers a durable confirmation and reminder to both members of a two-person schedule without duplicate alerts', async () => {
+  findUsers.mockReturnValue({ select: () => ({ lean: async () => [{ _id: 'person' }, { _id: 'host' }] }) });
+  findCrmUserById.mockImplementation(async (id) => ({
+    _id: id, organizationId: 'org-1', notificationPreferences: { crm: true },
+    pushSubscriptions: [{ endpoint: 'pc' }, { endpoint: 'phone' }],
+  }));
+  await notifyMeetingCreated(meeting);
+  await notifyMeetingCreated(meeting);
+  await notifyMeetingReminder(meeting, new Date('2026-10-20T17:50:00Z'));
+  const persisted = upsertNotification.mock.calls.map(([, update]) => update.$setOnInsert);
+  expect(persisted.filter((notice) => notice.userId === 'host' && notice.type === 'suprah_meet_invited')[0])
+    .toMatchObject({ title: 'Suprah Meet scheduled', metadata: { meetingCode: 'MEET-1234' } });
+  expect(push.mock.calls.map(([ids]) => ids[0]).sort()).toEqual(['host', 'host', 'person', 'person']);
+  expect(emitToCrmUser).toHaveBeenCalledTimes(4);
+});
+
 it('keeps the meeting notification pending when device delivery fails', async () => {
   push.mockResolvedValueOnce({ sent: 0, failed: 1, pruned: 0 });
   await expect(notifyMeetingCreated(meeting)).rejects.toThrow('Device push failed');
