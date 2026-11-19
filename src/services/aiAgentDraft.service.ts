@@ -63,7 +63,7 @@ const SAFETY_WARNINGS = {
   unchecked: "Check this before sending. The safety check couldn't finish for this suggestion.",
 };
 const MAX_ENTRY_LENGTH = 1500;
-const LEAD_FIELDS = 'firstName lastName email phone status channel source sourceProvider subject comments parsedContent createdAt notes threadId sourceInquiryId intakeIdentity identityEmailExcluded customerId vehicle';
+const LEAD_FIELDS = 'firstName lastName email phone status channel source sourceProvider subject comments parsedContent createdAt notes threadId previousThreadIds sourceInquiryId intakeIdentity identityEmailExcluded customerId vehicle';
 
 const inFlight = new Set<string>();
 

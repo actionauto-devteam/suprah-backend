@@ -30,7 +30,7 @@ export async function processGmailMessageThroughIntake(input: {
   const receivedAt = message.internalDate ? new Date(Number(message.internalDate)) : new Date();
   const threadId: string | undefined = message.threadId || undefined;
   const threadLead: any = threadId
-    ? await Lead.findOne({ organizationId, threadId }).sort({ createdAt: -1 }).select('_id').lean()
+    ? await Lead.findOne({ organizationId, $or: [{ threadId }, { previousThreadIds: threadId }] }).sort({ createdAt: -1 }).select('_id').lean()
     : null;
   const sourceIds = { gmailMessageId: message.id, gmailThreadId: threadId };
   const baseDraft: Record<string, unknown> = {

@@ -37,6 +37,7 @@ export interface ILead extends Document {
   parsedContent?: string;
 
   threadId?: string;
+  previousThreadIds?: string[];
   messageId?: string;
   ingestionFingerprint?: string;
   isRead?: boolean;
@@ -255,6 +256,11 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
 
     threadId: {
       type: String,
+    },
+
+    previousThreadIds: {
+      type: [String],
+      default: undefined,
     },
 
     messageId: {

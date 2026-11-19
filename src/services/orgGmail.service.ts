@@ -19,11 +19,12 @@ import { triggerAiEmailReplyForNewInquiry } from './aiEmailReply.service';
 import { getLeadIntakeMode } from './leadIntakeControl.service';
 import { processGmailMessageThroughIntake } from './gmailLeadIntake';
 import { isAutomatedEmail } from './emailInquiryEvidence';
-import { gmailHeader } from '../utils/gmailMessageParser';
+import { extractGmailText, gmailHeader } from '../utils/gmailMessageParser';
 import { markLeadAwaitingReply } from '../utils/leadActivity';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
 import { cacheService } from './cache.service';
 import { notificationTemplates } from '../utils/notificationTemplates';
+import { forgetRevokedPreviousMailbox, isPreviousMailboxReadable, previousMailboxClient } from './previousMailbox.service';
 
 const RECHECK_SKIPPED_MESSAGE_MS = 10 * 60 * 1000;
 const recentlyCheckedMessages = new Map<string, number>();
@@ -54,7 +55,7 @@ function isCustomerWrittenEmail(message: any, leadSourceEmail?: string | null): 
 
 export async function notifyCustomerEmailReply(orgId: string, message: any, leadSourceEmail?: string | null, intakeHandled = false): Promise<boolean> {
     if (!message?.threadId) return false;
-    const lead: any = await Lead.findOne({ organizationId: orgId, threadId: message.threadId, 'combinedInto.leadId': { $exists: false } }).select('_id firstName lastName phone email assignedTo createdAt messageId').lean();
+    const lead: any = await Lead.findOne({ organizationId: orgId, $or: [{ threadId: message.threadId }, { previousThreadIds: message.threadId }], 'combinedInto.leadId': { $exists: false } }).select('_id firstName lastName phone email assignedTo createdAt messageId').lean();
     if (!lead) return false;
     const at = new Date(Number(message.internalDate) || Date.now());
     const touched = await Lead.updateOne(
@@ -107,7 +108,7 @@ class OrgGmailService {
         return oauth2Client.generateAuthUrl({
             access_type: 'offline',
             scope: scopes,
-            prompt: 'consent',
+            prompt: 'consent select_account',
             state: orgId,
         });
     }
@@ -136,31 +137,58 @@ class OrgGmailService {
             return { total: 0, synced: 0 };
         }
 
+        let result = { total: 0, synced: 0 };
+        let failure: unknown = null;
         try {
-            const oauth2Client = this.createOAuth2Client();
+            result = await this.syncMailbox(orgId, config, false);
+        } catch (error) {
+            failure = error;
+        }
+        const previous = config.previousMailbox;
+        if (previous && isPreviousMailboxReadable(previous)) {
+            await this.syncMailbox(orgId, config, true)
+                .catch((error) => forgetRevokedPreviousMailbox(orgId, previous, error))
+                .catch(() => undefined);
+        }
+        if (failure) throw failure;
+        return result;
+    }
 
-            // Decrypt tokens
-            const accessToken = decrypt(config.accessToken);
-            const refreshToken = decrypt(config.refreshToken);
+    private mainMailboxClient(orgId: string, config: IOrgLeadConfig): OAuth2Client {
+        const oauth2Client = this.createOAuth2Client();
 
-            oauth2Client.setCredentials({
-                access_token: accessToken,
-                refresh_token: refreshToken,
-                expiry_date: config.expiryDate
-            });
+        // Decrypt tokens
+        const accessToken = decrypt(config.accessToken);
+        const refreshToken = decrypt(config.refreshToken);
 
-            // Handle token Refresh
-            oauth2Client.once('tokens', async (tokens) => {
-                const updateData: any = {};
-                if (tokens.access_token) updateData.accessToken = encrypt(tokens.access_token);
-                if (tokens.refresh_token) updateData.refreshToken = encrypt(tokens.refresh_token);
-                if (tokens.expiry_date) updateData.expiryDate = tokens.expiry_date;
+        oauth2Client.setCredentials({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+            expiry_date: config.expiryDate
+        });
 
-                if (Object.keys(updateData).length > 0) {
-                    await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: updateData });
-                    console.log(`[OrgSync] Refreshed and re-encrypted tokens for org: ${orgId}`);
-                }
-            });
+        // Handle token Refresh
+        oauth2Client.once('tokens', async (tokens) => {
+            const updateData: any = {};
+            if (tokens.access_token) updateData.accessToken = encrypt(tokens.access_token);
+            if (tokens.refresh_token) updateData.refreshToken = encrypt(tokens.refresh_token);
+            if (tokens.expiry_date) updateData.expiryDate = tokens.expiry_date;
+
+            if (Object.keys(updateData).length > 0) {
+                await OrgLeadConfig.updateOne({ organizationId: orgId, refreshToken: config.refreshToken }, { $set: updateData });
+                console.log(`[OrgSync] Refreshed and re-encrypted tokens for org: ${orgId}`);
+            }
+        });
+
+        return oauth2Client;
+    }
+
+    private async syncMailbox(orgId: string, config: IOrgLeadConfig, fromPrevious: boolean): Promise<{ total: number; synced: number }> {
+        try {
+            const oauth2Client = fromPrevious
+                ? previousMailboxClient(orgId, config.previousMailbox!)
+                : this.mainMailboxClient(orgId, config);
+            const readsTwoAccounts = Boolean(config.leadSourceEmail) && isPreviousMailboxReadable(config.previousMailbox);
 
             const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
@@ -250,7 +278,7 @@ class OrgGmailService {
                         console.error(`[OrgSync] Lead intake failed for message ${message.id} for org ${orgId}:`, err);
                     }
                 }
-                await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: { lastSyncAt: new Date() } });
+                if (!fromPrevious) await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: { lastSyncAt: new Date() } });
                 return { total: details.length, synced: intakeCreated };
             }
 
@@ -270,9 +298,17 @@ class OrgGmailService {
                     // this is a best-effort secondary check (threadId has no unique index),
                     // the real dedup guarantee is the atomic messageId upsert below.
                     const alreadyImportedInThread = detail.data.threadId
-                        ? await Lead.findOne({ organizationId: orgId, threadId: detail.data.threadId }).select('_id').lean()
+                        ? await Lead.findOne({ organizationId: orgId, $or: [{ threadId: detail.data.threadId }, { previousThreadIds: detail.data.threadId }] }).select('_id').lean()
                         : null;
                     if (alreadyImportedInThread) {
+                        rememberCheckedMessage(orgId, msg.id!);
+                        continue;
+                    }
+                    const sameEmailInOtherAccount = readsTwoAccounts
+                        ? await Lead.exists({ organizationId: orgId, body: rawBody, createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } })
+                        : null;
+                    if (sameEmailInOtherAccount) {
+                        await gmail.users.messages.batchModify({ userId: 'me', requestBody: { ids: [msg.id!], removeLabelIds: ['UNREAD'] } });
                         rememberCheckedMessage(orgId, msg.id!);
                         continue;
                     }
@@ -395,11 +431,11 @@ class OrgGmailService {
             }
 
             // Update last sync
-            await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: { lastSyncAt: new Date() } });
+            if (!fromPrevious) await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: { lastSyncAt: new Date() } });
 
             return { total: messages.length, synced: syncedCount };
         } catch (error) {
-            console.error(`[OrgSync-FATAL] Sync failed for org ${orgId}:`, error);
+            console.error(`[OrgSync-FATAL] Sync failed for org ${orgId}${fromPrevious ? ' (previous email account)' : ''}:`, error);
             throw error;
         }
     }
@@ -517,7 +553,7 @@ class OrgGmailService {
             body = Buffer.from(message.payload.body.data, 'base64').toString();
         }
 
-        return body;
+        return body || extractGmailText(message);
     }
 }
 

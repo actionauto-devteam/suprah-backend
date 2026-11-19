@@ -13,6 +13,14 @@ export interface IOrgLeadConfig extends Document {
 
     leadSourceEmail: string;
 
+    previousMailbox?: {
+        gmailAddress?: string;
+        accessToken?: string;
+        refreshToken?: string;
+        expiryDate?: number;
+        replacedAt?: Date;
+    };
+
     webhookSecret: string;
 
     isActive: boolean;
@@ -41,6 +49,13 @@ const OrgLeadConfigSchema: Schema = new Schema({
     gmailConnected: { type: Boolean, default: false },
     calendarConnected: { type: Boolean, default: false },
     leadSourceEmail: { type: String, default: 'leads@dealerscloud.com' },
+    previousMailbox: {
+        gmailAddress: { type: String },
+        accessToken: { type: String },
+        refreshToken: { type: String },
+        expiryDate: { type: Number },
+        replacedAt: { type: Date },
+    },
     webhookSecret: { type: String },
     isActive: { type: Boolean, default: true, index: true },
     lastSyncAt: { type: Date },

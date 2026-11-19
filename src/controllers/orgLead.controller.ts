@@ -10,6 +10,10 @@ import { v4 as uuidv4 } from 'uuid';
 import googleCalendarService from '../services/googleCalendar.service';
 import { google } from 'googleapis';
 import { cacheService } from '../services/cache.service';
+import { isPreviousMailboxReadable, previousMailboxAfterSwitch, previousMailboxReadUntil } from '../services/previousMailbox.service';
+
+const EMAIL_ACCESS_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
+const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 
 const initiateAuth = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId;
@@ -31,6 +35,11 @@ const handleCallback = asyncHandler(async (req: Request, res: Response) => {
         const tokens = await orgGmailService.getTokensFromCode(code as string);
         if (!tokens.access_token || !tokens.refresh_token) {
             throw new ApiError(400, 'Google did not return a refresh token. Please revoke access and try again.');
+        }
+        const granted = typeof tokens.scope === 'string' ? tokens.scope.split(/\s+/).filter(Boolean) : null;
+        if (granted && !granted.includes(EMAIL_ACCESS_SCOPE)) {
+            console.warn(`[OrgOAuth] Sign-in refused for org ${orgId}: Google did not grant email access.`);
+            return res.redirect(`${process.env.FRONTEND_URL}/crm/settings/integrations?error=email_access`);
         }
 
         // Fetch the actual Google email address via userinfo API
@@ -58,19 +67,30 @@ const handleCallback = asyncHandler(async (req: Request, res: Response) => {
             refreshToken: encrypt(tokens.refresh_token),
             expiryDate: tokens.expiry_date,
             gmailConnected: true,
-            calendarConnected: true,
+            calendarConnected: granted ? granted.includes(CALENDAR_SCOPE) : true,
             isActive: true,
             connectedAt: new Date(),
         };
 
+        const existing: any = await OrgLeadConfig.findOne({ organizationId: orgId })
+            .select('gmailAddress accessToken refreshToken expiryDate previousMailbox')
+            .lean();
+        const previous = previousMailboxAfterSwitch(existing, gmailAddress);
+
         await OrgLeadConfig.findOneAndUpdate(
             { organizationId: orgId },
-            { $set: updateData },
+            {
+                $set: { ...updateData, ...('set' in previous ? { previousMailbox: previous.set } : {}) },
+                ...('clear' in previous ? { $unset: { previousMailbox: 1 } } : {}),
+            },
             { upsert: true, new: true }
         );
 
         // Invalidate Cache
         await cacheService.del(`config:org:${orgId}`);
+        setTimeout(() => {
+            cacheService.del(`config:org:${orgId}`).catch(() => undefined);
+        }, 5000).unref();
 
         // --- NEW: Set up Calendar Webhook (non-critical) ---
         try {
@@ -123,6 +143,9 @@ const getConfig = asyncHandler(async (req: Request, res: Response) => {
         isActive: config.isActive,
         leadSourceEmail: config.leadSourceEmail,
         lastSyncAt: config.lastSyncAt,
+        previousMailbox: isPreviousMailboxReadable(config.previousMailbox)
+            ? { gmailAddress: config.previousMailbox.gmailAddress, readUntil: previousMailboxReadUntil(config.previousMailbox) }
+            : null,
         webhookUrl: `${process.env.BACKEND_URL}/api/leads/adf?orgId=${orgId}`,
         hasWebhookSecret: !!config.webhookSecret
     }, 'Configuration fetched'));
@@ -144,7 +167,7 @@ const updateConfig = asyncHandler(async (req: Request, res: Response) => {
     // Invalidate Cache
     await cacheService.del(`config:org:${orgId}`);
 
-    res.json(new ApiResponse(200, config, 'Configuration updated'));
+    res.json(new ApiResponse(200, { leadSourceEmail: config?.leadSourceEmail, isActive: config?.isActive }, 'Configuration updated'));
 });
 
 /**
@@ -182,8 +205,15 @@ const sync = asyncHandler(async (req: Request, res: Response) => {
     console.log(`[ManualSync] Triggered by user ${userId} for org ${orgId}`);
 
     // Helper: detect Google "insufficient authentication scopes" errors
+    const isRateLimited = (err: any): boolean => {
+        const reasons = [err?.errors, err?.cause?.errors, err?.response?.data?.error?.errors]
+            .flatMap((list) => (Array.isArray(list) ? list : []))
+            .map((entry: any) => `${entry?.reason ?? ''} ${entry?.message ?? ''}`);
+        return /rate ?limit|quota|limit ?exceeded/i.test([err?.message ?? '', ...reasons].join(' '));
+    };
     const isInsufficientScopes = (err: any): boolean => {
         const msg: string = err?.message ?? err?.errors?.[0]?.message ?? '';
+        if (isRateLimited(err)) return false;
         return (
             msg.toLowerCase().includes('insufficient') ||
             msg.toLowerCase().includes('insufficientauthenticateduser') ||
@@ -203,9 +233,10 @@ const sync = asyncHandler(async (req: Request, res: Response) => {
                 { organizationId: orgId },
                 { $set: { gmailConnected: false, calendarConnected: false } }
             );
+            await cacheService.del(`config:org:${orgId}`);
             throw new ApiError(
                 403,
-                'Google account authorization is missing required permissions. Please disconnect and reconnect your Google account.'
+                'Google no longer lets Suprah read this email account. An admin needs to connect the same account again in CRM Settings > Lead Integrations.'
             );
         }
         console.warn(`[ManualSync] Gmail sync failed: ${err.message}`);
@@ -246,7 +277,8 @@ const disconnect = asyncHandler(async (req: Request, res: Response) => {
                 refreshToken: null,
                 isActive: false,
                 gmailAddress: null
-            }
+            },
+            $unset: { previousMailbox: 1 }
         }
     );
 

@@ -110,7 +110,7 @@ class GoogleCalendarService {
         if (newTokens.refresh_token) update['refreshToken'] = encrypt(newTokens.refresh_token);
 
         if (target.type === 'org') {
-          await OrgLeadConfig.updateOne({ organizationId: target.id }, { $set: update });
+          await OrgLeadConfig.updateOne({ organizationId: target.id, refreshToken: tokens.refreshToken }, { $set: update });
         } else {
           // Nested update for CrmUser.googleCalendar
           const nestedUpdate: Record<string, any> = {};

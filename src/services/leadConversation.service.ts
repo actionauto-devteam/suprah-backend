@@ -23,6 +23,8 @@ import { getLeadIntakeMode } from './leadIntakeControl.service';
 import { describeWebchatContactPolicy } from './contactRestriction.service';
 import { combineInfoForLead } from './leadDuplicateCombine.service';
 import { AI_AGENT_FALLBACK_LABEL, resolveAiAgentIdentity } from '../utils/aiAgentIdentity';
+import { isMissingGmailThread, leadEmailThreadIds } from '../utils/gmailThread';
+import { readPreviousMailboxThread } from './previousMailbox.service';
 
 export type ConversationChannel = 'sms' | 'email' | 'webchat' | 'call' | 'note' | 'inquiry';
 export type DeliveryCode = 'sending' | 'sent' | 'delivered' | 'failed' | 'unconfirmed' | 'received';
@@ -167,8 +169,19 @@ async function loadEmailThread(organizationId: string, leadId: string, threadId:
     getCentralOAuth2Client(organizationId),
   ]);
   const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-  const thread: any = await withRetry(() => gmail.users.threads.get({ userId: 'me', id: threadId, format: 'full' }));
-  const entries = parseGmailThreadMessages(thread.data.messages || [], [config?.gmailAddress || ''].filter(Boolean));
+  let messages: any[];
+  let ownAddress = config?.gmailAddress || '';
+  try {
+    const thread: any = await withRetry(() => gmail.users.threads.get({ userId: 'me', id: threadId, format: 'full' }));
+    messages = thread.data.messages || [];
+  } catch (error) {
+    if (!isMissingGmailThread(error)) throw error;
+    const previous = await readPreviousMailboxThread(organizationId, threadId);
+    if (!previous) throw error;
+    messages = previous.messages;
+    ownAddress = previous.gmailAddress;
+  }
+  const entries = parseGmailThreadMessages(messages, [ownAddress, config?.gmailAddress || ''].filter(Boolean));
   await cacheService.set(cacheKey, entries, 45).catch(() => undefined);
   return entries;
 }
@@ -219,7 +232,7 @@ const isOlder = (item: ConversationItem, cursor: Cursor | null) =>
 const newestFirst = (a: ConversationItem, b: ConversationItem) =>
   a.occurredAt === b.occurredAt ? (a.id < b.id ? 1 : -1) : a.occurredAt < b.occurredAt ? 1 : -1;
 
-const LEAD_FIELDS = 'firstName lastName email phone status channel source sourceProvider subject comments parsedContent createdAt notes threadId sourceInquiryId intakeIdentity identityEmailExcluded customerId aiPausedAt aiPausedBy aiAutoPausedUntil vehicle combinedInto';
+const LEAD_FIELDS = 'firstName lastName email phone status channel source sourceProvider subject comments parsedContent createdAt notes threadId previousThreadIds sourceInquiryId intakeIdentity identityEmailExcluded customerId aiPausedAt aiPausedBy aiAutoPausedUntil vehicle combinedInto';
 
 function leadName(lead: any) {
   return [lead?.firstName, lead?.lastName].filter(Boolean).join(' ').trim() || lead?.email || lead?.phone || 'Customer';
@@ -243,6 +256,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
   };
   const timeFilter = cursorDate ? { $lte: cursorDate } : undefined;
   const fetchLimit = limit + 1;
+  const emailThreadIds = leadEmailThreadIds(lead);
 
   const [sms, calls, chats, inquiries, emails, foreignGmail, agent] = await Promise.all([
     safe('sms', () => CommunicationMessage.find({ orgId: orgIds, leadId, ...(timeFilter ? { createdAt: timeFilter } : {}) })
@@ -254,11 +268,16 @@ export async function loadConversationItems(organizationId: string, lead: any, o
     safe('inquiry', () => LeadInquiry.find({ organizationId, 'association.leadId': leadId, 'association.state': 'associated' })
       .select('kind source sourceProvider channel subject comments vehicle receivedAt sourceIds contact')
       .sort({ receivedAt: -1 }).limit(200).lean(), [] as any[]),
-    lead.threadId ? safe('email', () => loadEmailThread(organizationId, leadId, String(lead.threadId)), [] as EmailEntry[]) : Promise.resolve([] as EmailEntry[]),
-    lead.threadId
+    emailThreadIds.length
+      ? safe('email', async () => (await Promise.all(emailThreadIds.map((threadId) => loadEmailThread(organizationId, leadId, threadId).catch((error) => {
+          unavailableSources.push(isMissingGmailThread(error) ? 'email_not_in_mailbox' : 'email');
+          return [] as EmailEntry[];
+        })))).flat(), [] as EmailEntry[])
+      : Promise.resolve([] as EmailEntry[]),
+    emailThreadIds.length
       ? safe('email', () => LeadInquiry.find({
           organizationId,
-          'sourceIds.gmailThreadId': lead.threadId,
+          'sourceIds.gmailThreadId': { $in: emailThreadIds },
           $or: [{ 'association.leadId': { $ne: new mongoose.Types.ObjectId(leadId) } }, { 'association.state': { $in: ['received', 'pending_review'] } }],
         }).select('sourceIds.gmailMessageId association').lean(), [] as any[])
       : Promise.resolve([] as any[]),

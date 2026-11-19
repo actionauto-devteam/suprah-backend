@@ -7,6 +7,7 @@ import { getCentralOAuth2Client } from '../controllers/lead.controller';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import { NURTURE_ELIGIBLE_STATUSES as ELIGIBLE_STATUSES } from '../constants/leadStatus';
 import { retryDbWrite } from '../utils/retryDbWrite';
+import { isMissingGmailThread } from '../utils/gmailThread';
 import logger from '../utils/logger';
 import { resolveSmsDestination } from '../utils/smsDestination';
 import { checkContactForSend, contactRestrictionMessage, isDoNotContactError } from '../services/contactRestriction.service';
@@ -66,6 +67,20 @@ export async function latestContactTimes(leadId: any): Promise<{ human: number; 
   };
 }
 
+async function readThreadSenders(gmail: ReturnType<typeof google.gmail>, threadId: string) {
+  try {
+    return await gmail.users.threads.get({
+      userId: 'me',
+      id: threadId,
+      format: 'metadata',
+      metadataHeaders: ['From'],
+    });
+  } catch (error) {
+    if (isMissingGmailThread(error)) return null;
+    throw error;
+  }
+}
+
 export async function customerEmailedSince(lead: any, sinceMs: number): Promise<boolean> {
   if (!lead.threadId) return false;
 
@@ -76,12 +91,8 @@ export async function customerEmailedSince(lead: any, sinceMs: number): Promise<
 
   const oauth2Client = await getCentralOAuth2Client(String(lead.organizationId));
   const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-  const thread = await gmail.users.threads.get({
-    userId: 'me',
-    id: lead.threadId,
-    format: 'metadata',
-    metadataHeaders: ['From'],
-  });
+  const thread = await readThreadSenders(gmail, lead.threadId);
+  if (!thread) return false;
 
   return (thread.data.messages || []).some((message) => {
     if (parseInt(message.internalDate || '0', 10) <= sinceMs) return false;
@@ -103,12 +114,8 @@ export async function latestCustomerEmailReplyAt(lead: any): Promise<number> {
 
   const oauth2Client = await getCentralOAuth2Client(String(lead.organizationId));
   const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-  const thread = await gmail.users.threads.get({
-    userId: 'me',
-    id: lead.threadId,
-    format: 'metadata',
-    metadataHeaders: ['From'],
-  });
+  const thread = await readThreadSenders(gmail, lead.threadId);
+  if (!thread) return 0;
 
   let latest = 0;
   for (const message of thread.data.messages || []) {

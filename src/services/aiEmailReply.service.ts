@@ -21,6 +21,7 @@ import { addLeadNoteAndNotify } from '../utils/leadNote';
 import { writeAiHandoff } from './aiHandoffRouting.service';
 import { guessAiHandoffTopic } from '../constants/aiHandoffTopics';
 import { sendLeadReplyEmail, fetchGmailThreadMessages } from '../controllers/lead.controller';
+import { readLeadEmailThreads } from '../utils/gmailThread';
 import { resolveCurrentVehicleAndPrice } from './aiReplyContext.service';
 import { describeVehicleInterest } from './vehicleInterest.service';
 import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from './aiShadowDraft.service';
@@ -37,7 +38,7 @@ const AI_AGENT_ACTOR_ID = 'ai-agent';
 
 
 async function buildEmailTranscript(lead: any): Promise<AiAgentTranscriptEntry[]> {
-  const messages = await fetchGmailThreadMessages(String(lead.organizationId), lead.threadId, lead.messageId);
+  const messages = await readLeadEmailThreads(lead, (threadId) => fetchGmailThreadMessages(String(lead.organizationId), threadId, lead.messageId));
   return messages.slice(-12).map((m: any) => ({
     from: m.direction === 'inbound' ? 'customer' : 'ai',
     body: m.body,

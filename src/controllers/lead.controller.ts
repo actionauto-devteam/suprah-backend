@@ -48,6 +48,8 @@ import { addLeadNoteAndNotify } from '../utils/leadNote';
 import { clearLeadAwaitingReply, recordLeadAnswered, touchLeadActivity } from '../utils/leadActivity';
 import { resolveCrmStaff } from '../utils/crmStaff';
 import { withRetry } from '../utils/withRetry';
+import { isMissingGmailThread, readLeadEmailThreads } from '../utils/gmailThread';
+import { readPreviousMailboxThread } from '../services/previousMailbox.service';
 import {
   LEAD_SOURCE,
   buildLeadSourceFilterCondition,
@@ -269,7 +271,7 @@ export async function getCentralOAuth2Client(orgId: string) {
       const update: any = { expiryDate: tokens.expiry_date };
       if (tokens.access_token) update.accessToken = encrypt(tokens.access_token);
       if (tokens.refresh_token) update.refreshToken = encrypt(tokens.refresh_token);
-      await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: update });
+      await OrgLeadConfig.updateOne({ organizationId: orgId, refreshToken: orgConfig.refreshToken }, { $set: update });
       await cacheService.del(`config:org:${orgId}`);
     } catch (err) {
       console.error('[CENTRAL-AUTH] Failed to persist refreshed tokens:', err);
@@ -277,6 +279,15 @@ export async function getCentralOAuth2Client(orgId: string) {
   });
 
   return oauth2Client;
+}
+
+async function gmailThreadExists(gmail: ReturnType<typeof google.gmail>, threadId: string): Promise<boolean> {
+  try {
+    await withRetry(() => gmail.users.threads.get({ userId: 'me', id: threadId, format: 'minimal' }));
+    return true;
+  } catch (error) {
+    return !isMissingGmailThread(error);
+  }
 }
 
 /**
@@ -315,6 +326,9 @@ export async function sendLeadReplyEmail(
     version: 'v1',
     auth: oauth2Client,
   });
+  const mailboxThreadId = lead.threadId && (await gmailThreadExists(gmail, String(lead.threadId)))
+    ? String(lead.threadId)
+    : null;
 
   const replyingUser = forcedSenderEmail ? null : await User.findById(userId);
 
@@ -341,11 +355,11 @@ export async function sendLeadReplyEmail(
     `From: ${senderDisplay}`,
     `To: ${recipientEmail}`,
     `Subject: ${encodeEmailHeader(subject)}`,
-    ...(lead.messageId
+    ...(mailboxThreadId && lead.messageId
       ? [`In-Reply-To: ${lead.messageId}`]
       : []),
-    ...(lead.threadId
-      ? [`References: ${lead.threadId}`]
+    ...(mailboxThreadId
+      ? [`References: ${mailboxThreadId}`]
       : []),
     'MIME-Version: 1.0',
   ];
@@ -427,8 +441,8 @@ export async function sendLeadReplyEmail(
     userId: 'me',
     requestBody: {
       raw: encodedMessage,
-      ...(lead.threadId
-        ? { threadId: lead.threadId }
+      ...(mailboxThreadId
+        ? { threadId: mailboxThreadId }
         : {}),
     },
   });
@@ -443,13 +457,21 @@ export async function sendLeadReplyEmail(
    * which saves the lead BEFORE calling this helper.
    */
   const sentThreadId = sendResult?.data?.threadId;
-  if (sentThreadId && !lead.threadId) {
-    lead.threadId = sentThreadId;
-    lead.emailThreadSubject = subject;
-    await Lead.updateOne(
-      { _id: lead._id },
-      { $set: { threadId: sentThreadId, emailThreadSubject: subject } },
+  if (sentThreadId && !mailboxThreadId) {
+    const replacedThreadId = lead.threadId ? String(lead.threadId) : null;
+    const moved = await Lead.updateOne(
+      { _id: lead._id, threadId: replacedThreadId ?? { $in: [null, ''] } },
+      {
+        $set: { threadId: sentThreadId, emailThreadSubject: subject },
+        ...(replacedThreadId && replacedThreadId !== String(sentThreadId) ? { $addToSet: { previousThreadIds: replacedThreadId } } : {}),
+      },
     );
+    if (moved.matchedCount) {
+      lead.threadId = sentThreadId;
+      lead.emailThreadSubject = subject;
+    } else {
+      await Lead.updateOne({ _id: lead._id, threadId: { $ne: sentThreadId } }, { $addToSet: { previousThreadIds: sentThreadId } });
+    }
   }
 
   const io = getSocketIO();
@@ -3018,13 +3040,24 @@ export async function fetchGmailThreadMessages(orgId: string, threadId: string |
   const oauth2Client = await getCentralOAuth2Client(orgId);
   const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-  const threadData = await withRetry(() => gmail.users.threads.get({
-    userId: 'me',
-    id: threadId,
-    format: 'full',
-  }));
+  let threadMessages: any[];
+  let ownAddress = config?.gmailAddress;
+  try {
+    const threadData = await withRetry(() => gmail.users.threads.get({
+      userId: 'me',
+      id: threadId,
+      format: 'full',
+    }));
+    threadMessages = threadData.data.messages || [];
+  } catch (error) {
+    if (!isMissingGmailThread(error)) throw error;
+    const previous = await readPreviousMailboxThread(orgId, threadId);
+    if (!previous) return [];
+    threadMessages = previous.messages;
+    ownAddress = previous.gmailAddress;
+  }
 
-  return (threadData.data.messages || [])
+  return threadMessages
     .filter((msg: any) => msg.id !== excludeMessageId)
     .map((msg: any) => {
       const hdrs = msg.payload?.headers || [];
@@ -3044,8 +3077,9 @@ export async function fetchGmailThreadMessages(orgId: string, threadId: string |
       } else if (msg.payload?.body?.data) {
         body = Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
       }
+      if (!body) body = extractGmailText(msg);
 
-      const isOwn = config?.gmailAddress === email;
+      const isOwn = ownAddress === email;
 
       return {
         id: msg.id,
@@ -3090,8 +3124,8 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
       return res.json(new ApiResponse(200, cachedThread, 'Thread messages fetched (Cached)'));
     }
 
-    const threadMessages = await fetchGmailThreadMessages(req.orgId as string, lead.threadId, lead.messageId);
-    const messages = await withoutOtherLeadsEmails(String(req.orgId), String(lead._id), lead.threadId, threadMessages);
+    const messages = await readLeadEmailThreads(lead, async (threadId: string) =>
+      withoutOtherLeadsEmails(String(req.orgId), String(lead._id), threadId, await fetchGmailThreadMessages(req.orgId as string, threadId, lead.messageId)));
 
     // FIX: was 1800s (30 min) — customer replies took up to half an hour to
     // appear while the UI polls every 15s. 45s keeps Gmail quota safe and

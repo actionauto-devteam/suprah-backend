@@ -27,6 +27,7 @@ import { emitToOrg } from '../utils/socketEmitter';
 import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 export { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import { fetchGmailThreadMessages } from '../controllers/lead.controller';
+import { readLeadEmailThreads } from '../utils/gmailThread';
 import { recordAiUsage, resolveAiChannelMode } from './aiOperatingMode.service';
 import { maybeAlertTechnicalFailures } from './aiTechnicalAlert.service';
 
@@ -439,7 +440,7 @@ export async function screenAiHumanAttention(input: AttentionCheck & { leadId: s
         .sort({ createdAt: -1 }).limit(6).lean();
       history = history.reverse();
     } else {
-      const emailHistory = await fetchGmailThreadMessages(input.organizationId, (state as any).threadId, (state as any).messageId);
+      const emailHistory = await readLeadEmailThreads(state as any, (threadId) => fetchGmailThreadMessages(input.organizationId, threadId, (state as any).messageId));
       history = emailHistory.slice(-6);
     }
     if (willCallAttentionProvider(input.phone)) await recordAiUsage(input.organizationId, 'attention_screen');
