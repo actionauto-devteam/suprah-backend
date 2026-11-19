@@ -1,0 +1,357 @@
+/**
+ * Suprah Pay batch 3 (2026-11-20), one section per fix. Stripe, the database
+ * and notifications are stand-ins: nothing here talks to Stripe or a database.
+ */
+jest.mock('stripe', () => {
+  const instance = {
+    webhooks: { constructEvent: jest.fn() },
+    paymentIntents: { retrieve: jest.fn(), create: jest.fn(), cancel: jest.fn() },
+    charges: { retrieve: jest.fn() },
+    customers: { list: jest.fn(), create: jest.fn() },
+    checkout: { sessions: { retrieve: jest.fn(), create: jest.fn(), expire: jest.fn() } },
+  };
+  return { __esModule: true, default: jest.fn(() => instance), instance };
+});
+jest.mock('../../src/models/Payment.model', () => ({
+  __esModule: true,
+  default: {
+    findOneAndUpdate: jest.fn(),
+    findByIdAndUpdate: jest.fn(),
+    findById: jest.fn(),
+    findOne: jest.fn(),
+    find: jest.fn(),
+    aggregate: jest.fn(),
+  },
+}));
+jest.mock('../../src/models/User.model', () => ({
+  __esModule: true,
+  default: { findOne: jest.fn(() => ({ select: () => Promise.resolve(null) })) },
+}));
+jest.mock('../../src/services/referral.service', () => ({
+  __esModule: true,
+  default: { processPaymentReward: jest.fn() },
+}));
+jest.mock('../../src/services/membership.service', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/services/activity.service', () => ({
+  __esModule: true,
+  default: { createActivity: jest.fn(() => Promise.resolve()), logFinancialActivity: jest.fn() },
+}));
+jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null, emitToUser: jest.fn() }));
+jest.mock('../../src/socket/supraspace.socket', () => ({ getIO: () => null }));
+jest.mock('../../src/utils/safeNotification', () => ({
+  safeCreateNotification: jest.fn(),
+  notifyOrgAdmins: jest.fn(),
+}));
+
+import paymentController from '../../src/controllers/payment.controller';
+import Payment from '../../src/models/Payment.model';
+import ReferralService from '../../src/services/referral.service';
+import activityService from '../../src/services/activity.service';
+import { safeCreateNotification } from '../../src/utils/safeNotification';
+import { notifyOrgAdmins } from '../../src/utils/safeNotification';
+import { KEPT_AMOUNT, disputeOutcome, keptAmount } from '../../src/utils/paymentDispute';
+
+const stripe = (jest.requireMock('stripe') as { instance: any }).instance;
+const payments = Payment as unknown as Record<string, jest.Mock>;
+const NOT_DONE = { $nin: ['succeeded', 'refunded'] };
+
+/** Runs a controller and waits for what it answers (or the error it passes on). */
+function call(handler: any, req: Record<string, unknown>): Promise<{ res: any; error: any }> {
+  return new Promise((resolve) => {
+    const res: any = { statusCode: 200 };
+    res.status = jest.fn((code: number) => { res.statusCode = code; return res; });
+    res.json = jest.fn((body: unknown) => { res.body = body; resolve({ res, error: undefined }); return res; });
+    handler({ headers: {}, params: {}, body: {}, ...req }, res, (error: unknown) => resolve({ res, error }));
+  });
+}
+
+const invoice = (overrides: Record<string, unknown> = {}) => ({
+  _id: 'pay-1',
+  amount: 25,
+  status: 'processing',
+  customerName: 'Test Customer',
+  customerEmail: 'customer@example.com',
+  organizationId: 'org-1',
+  createdBy: 'staff-1',
+  save: jest.fn(),
+  ...overrides,
+});
+
+const stripeUpdate = (event: unknown) => {
+  stripe.webhooks.constructEvent.mockReturnValue(event);
+  return call(paymentController.handleStripeWebhook, { headers: { 'stripe-signature': 'sig' }, rawBody: '{}' });
+};
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  stripe.paymentIntents.retrieve.mockResolvedValue({ id: 'pi_1', latest_charge: 'ch_1', status: 'succeeded' });
+  stripe.charges.retrieve.mockResolvedValue({ receipt_url: 'https://receipt.example', payment_method_details: { type: 'card' } });
+});
+
+// ─── A payment is marked paid, and followed up, exactly once ───────────────
+describe('a payment is marked paid exactly once', () => {
+  const checkoutPaid = {
+    type: 'checkout.session.completed',
+    data: { object: { id: 'cs_1', payment_status: 'paid', payment_intent: 'pi_1', metadata: { paymentId: 'pay-1' } } },
+  };
+
+  it('marks a paid checkout as paid with its receipt, and follows up once', async () => {
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded' }));
+    const { res } = await stripeUpdate(checkoutPaid);
+
+    expect(res.body).toEqual({ received: true });
+    const [filter, update] = payments.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ _id: 'pay-1', status: NOT_DONE });
+    expect(update.$set).toMatchObject({
+      status: 'succeeded',
+      stripeCheckoutSessionId: 'cs_1',
+      stripePaymentIntentId: 'pi_1',
+      stripeChargeId: 'ch_1',
+      receiptUrl: 'https://receipt.example',
+      paymentMethod: 'card',
+    });
+    expect(safeCreateNotification).toHaveBeenCalledTimes(1);
+    expect(ReferralService.processPaymentReward).toHaveBeenCalledTimes(1);
+    expect(activityService.createActivity).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the staff member even when the customer coming back marks it paid first', async () => {
+    payments.findById.mockResolvedValueOnce(invoice());
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValue({
+      id: 'cs_1', status: 'complete', payment_status: 'paid', payment_intent: 'pi_1', metadata: { paymentId: 'pay-1' },
+    });
+    const { res } = await call(paymentController.getCheckoutSessionStatus, {
+      params: { sessionId: 'cs_1' },
+      user: { _id: 'customer-1', email: 'customer@example.com' },
+    });
+    expect(res.body.data.status).toBe('succeeded');
+    expect(safeCreateNotification).toHaveBeenCalledWith(expect.objectContaining({ userId: 'staff-1', title: 'Payment Received' }));
+
+    // Stripe's update arriving afterwards finds it already paid and adds nothing.
+    payments.findOneAndUpdate.mockResolvedValueOnce(null);
+    await stripeUpdate(checkoutPaid);
+    expect(safeCreateNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing more when Stripe reports the same payment again', async () => {
+    payments.findOneAndUpdate.mockResolvedValue(null); // already marked paid
+    await stripeUpdate(checkoutPaid);
+    await stripeUpdate({ type: 'payment_intent.succeeded', data: { object: { id: 'pi_1', latest_charge: 'ch_1' } } });
+
+    expect(safeCreateNotification).not.toHaveBeenCalled();
+    expect(ReferralService.processPaymentReward).not.toHaveBeenCalled();
+    expect(activityService.createActivity).not.toHaveBeenCalled();
+  });
+
+  it('ignores a checkout that Stripe has not been paid for', async () => {
+    await stripeUpdate({ ...checkoutPaid, data: { object: { ...checkoutPaid.data.object, payment_status: 'unpaid' } } });
+    expect(payments.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('never marks a paid or refunded invoice as failed', async () => {
+    await stripeUpdate({
+      type: 'payment_intent.payment_failed',
+      data: { object: { id: 'pi_1', last_payment_error: { message: 'Your card was declined.' } } },
+    });
+    expect(payments.findOneAndUpdate).toHaveBeenCalledWith(
+      { stripePaymentIntentId: 'pi_1', status: { $nin: ['succeeded', 'refunded', 'cancelled'] } },
+      { $set: { status: 'failed', failureReason: 'Your card was declined.' } },
+      { new: true },
+    );
+  });
+
+  it('records a refund from the Stripe dashboard against the right invoice', async () => {
+    await stripeUpdate({
+      type: 'charge.refunded',
+      data: { object: { payment_intent: 'pi_1', amount_refunded: 1000, refunded: false } },
+    });
+    const [filter, update] = payments.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ stripePaymentIntentId: 'pi_1' });
+    expect(update.$max).toEqual({ refundedAmount: 10 });
+  });
+
+  it('refuses an update that is not signed by Stripe', async () => {
+    stripe.webhooks.constructEvent.mockImplementation(() => { throw new Error('bad signature'); });
+    const { error } = await call(paymentController.handleStripeWebhook, { headers: { 'stripe-signature': 'x' }, rawBody: '{}' });
+    expect(error?.statusCode).toBe(400);
+    expect(payments.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel an invoice that got paid while the customer was cancelling', async () => {
+    payments.findById
+      .mockResolvedValueOnce(invoice({ status: 'pending' }))
+      .mockResolvedValueOnce(invoice({ status: 'succeeded' }));
+    payments.findOneAndUpdate.mockResolvedValueOnce(null); // paid in the meantime
+    const { error } = await call(paymentController.cancelMyPayment, {
+      params: { id: 'pay-1' },
+      user: { email: 'customer@example.com' },
+    });
+    expect(error?.statusCode).toBe(409);
+  });
+});
+
+// ─── Leaving Stripe's payment page puts the invoice back under "To pay" ─────
+describe("leaving Stripe's payment page", () => {
+  const customer = { _id: 'customer-1', email: 'customer@example.com' };
+  const earlierPage = (overrides: Record<string, unknown> = {}) => ({
+    id: 'cs_old', status: 'open', payment_status: 'unpaid', payment_intent: null, ...overrides,
+  });
+  const leave = () => call(paymentController.leaveCheckout, { params: { id: 'pay-1' }, user: customer });
+
+  it('closes the open Stripe page and puts the invoice back under To pay', async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValueOnce(earlierPage());
+    stripe.checkout.sessions.expire.mockResolvedValueOnce(earlierPage({ status: 'expired' }));
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'pending' }));
+
+    const { res } = await leave();
+    expect(stripe.checkout.sessions.expire).toHaveBeenCalledWith('cs_old');
+    expect(payments.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: 'pay-1', status: 'processing' },
+      { $set: { status: 'pending' } },
+      { new: true },
+    );
+    expect(res.body.data.status).toBe('pending');
+  });
+
+  it('marks it paid instead when Stripe says the page was paid after all', async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValueOnce(
+      earlierPage({ status: 'complete', payment_status: 'paid', payment_intent: 'pi_1' }),
+    );
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded' }));
+
+    const { res } = await leave();
+    expect(res.body.data.status).toBe('succeeded');
+    expect(stripe.checkout.sessions.expire).not.toHaveBeenCalled();
+    expect(safeCreateNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("can't change another customer's invoice", async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ customerEmail: 'someone@example.com', stripeCheckoutSessionId: 'cs_old' }));
+    const { error } = await leave();
+    expect(error?.statusCode).toBe(403);
+    expect(stripe.checkout.sessions.retrieve).not.toHaveBeenCalled();
+  });
+
+  const pay = () =>
+    call(paymentController.createCustomerCheckoutSession, { body: { paymentId: 'pay-1' }, user: customer });
+
+  it('Pay closes the earlier page before opening a new one', async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old', stripeCustomerId: 'cus_1' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValueOnce(earlierPage());
+    stripe.checkout.sessions.expire.mockResolvedValueOnce(earlierPage({ status: 'expired' }));
+    stripe.checkout.sessions.create.mockResolvedValueOnce({ id: 'cs_new', url: 'https://checkout.example/cs_new' });
+
+    const { res } = await pay();
+    expect(stripe.checkout.sessions.expire.mock.invocationCallOrder[0])
+      .toBeLessThan(stripe.checkout.sessions.create.mock.invocationCallOrder[0]);
+    expect(stripe.checkout.sessions.create.mock.calls[0][0].cancel_url).toMatch(/status=cancelled&invoice=pay-1$/);
+    expect(res.body.data.url).toBe('https://checkout.example/cs_new');
+  });
+
+  it('Pay never opens a second page for an invoice that was already paid', async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValueOnce(
+      earlierPage({ status: 'complete', payment_status: 'paid', payment_intent: 'pi_1' }),
+    );
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded' }));
+
+    const { error } = await pay();
+    expect(error?.statusCode).toBe(409);
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it("says to try again if Stripe's earlier page couldn't be closed", async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValue(earlierPage());
+    stripe.checkout.sessions.expire.mockRejectedValueOnce(new Error('Stripe is busy'));
+
+    const { error } = await pay();
+    expect(error?.statusCode).toBe(409);
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it("puts the invoice back when Stripe's page expires unpaid (only its latest page)", async () => {
+    await stripeUpdate({ type: 'checkout.session.expired', data: { object: { id: 'cs_old', metadata: { paymentId: 'pay-1' } } } });
+    expect(payments.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: 'pay-1', stripeCheckoutSessionId: 'cs_old', status: 'processing' },
+      { $set: { status: 'pending' } },
+    );
+  });
+});
+
+// ─── Card disputes (chargebacks) ────────────────────────────────────────────
+describe('card disputes', () => {
+  it("reads Stripe's dispute status in Suprah's terms", () => {
+    expect(['needs_response', 'under_review', 'warning_needs_response', 'warning_under_review'].map(disputeOutcome))
+      .toEqual(['open', 'open', 'open', 'open']);
+    expect(['won', 'warning_closed', 'prevented'].map(disputeOutcome)).toEqual(['won', 'won', 'won']);
+    expect(disputeOutcome('lost')).toBe('lost');
+  });
+
+  it('keeps counting a disputed payment until the bank decides, and leaves out a lost one like a refund', () => {
+    expect(keptAmount({ amount: 25, disputeStatus: 'open', disputedAmount: 25 })).toBe(25);
+    expect(keptAmount({ amount: 25, disputeStatus: 'won', disputedAmount: 25 })).toBe(25);
+    expect(keptAmount({ amount: 25, disputeStatus: 'lost', disputedAmount: 25 })).toBe(0);
+    expect(keptAmount({ amount: 25, refundedAmount: 10, disputeStatus: 'lost', disputedAmount: 15 })).toBe(0);
+    expect(keptAmount({ amount: 25, refundedAmount: 10 })).toBe(15);
+    expect(keptAmount({ amount: 25, refundedAmount: 20, disputeStatus: 'lost', disputedAmount: 25 })).toBe(0);
+  });
+
+  const disputeUpdate = (type: string, status: string) =>
+    stripeUpdate({
+      type,
+      data: { object: { id: 'dp_1', status, amount: 2500, reason: 'fraudulent', payment_intent: 'pi_1', charge: 'ch_1' } },
+    });
+
+  it('records a new dispute on its invoice and tells the dealership admins once', async () => {
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded', invoiceNumber: 'INV-1' }));
+    await disputeUpdate('charge.dispute.created', 'needs_response');
+
+    const [filter, update, options] = payments.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ $or: [{ stripePaymentIntentId: 'pi_1' }, { stripeChargeId: 'ch_1' }] });
+    expect(update.$set).toMatchObject({ stripeDisputeId: 'dp_1', disputeStatus: 'open', disputedAmount: 25, disputeReason: 'fraudulent' });
+    expect(options).toEqual({ new: false });
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(
+      'org-1',
+      'payment_failed',
+      'Payment disputed',
+      "Test Customer's payment for invoice INV-1 ($25.00) was disputed with their bank. It still counts in your revenue while the bank reviews it.",
+      { paymentId: 'pay-1', disputeStatus: 'open', route: '/billing/payments' },
+    );
+
+    // Stripe telling the same thing again (e.g. evidence added) tells nobody twice.
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded', stripeDisputeId: 'dp_1', disputeStatus: 'open' }));
+    await disputeUpdate('charge.dispute.updated', 'under_review');
+    expect(notifyOrgAdmins).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells the admins when the bank decides, and a lost dispute is closed out", async () => {
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded', stripeDisputeId: 'dp_1', disputeStatus: 'open' }));
+    await disputeUpdate('charge.dispute.closed', 'lost');
+    const [, update] = payments.findOneAndUpdate.mock.calls[0];
+    expect(update.$set).toMatchObject({ disputeStatus: 'lost' });
+    expect(update.$set.disputeClosedAt).toBeInstanceOf(Date);
+    expect((notifyOrgAdmins as jest.Mock).mock.calls[0][2]).toBe('Dispute lost');
+  });
+
+  it('ignores a dispute for a payment Suprah does not know', async () => {
+    payments.findOneAndUpdate.mockResolvedValueOnce(null);
+    await disputeUpdate('charge.dispute.created', 'needs_response');
+    expect(notifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('every revenue total uses the money kept (refunds and lost disputes left out)', async () => {
+    payments.aggregate.mockResolvedValue([]);
+    await call(paymentController.getPaymentStats, { orgId: 'org-1' });
+    const [byStatus, monthly] = payments.aggregate.mock.calls.map((c) => c[0]);
+    expect(byStatus[1].$group.keptAmount).toEqual({ $sum: KEPT_AMOUNT });
+    expect(monthly[1].$group.revenue).toEqual({ $sum: KEPT_AMOUNT });
+
+    payments.aggregate.mockClear();
+    await call(paymentController.getBillingBalance, { orgId: 'org-1' });
+    expect(payments.aggregate.mock.calls[0][0][1].$group.balance).toEqual({ $sum: KEPT_AMOUNT });
+  });
+});
