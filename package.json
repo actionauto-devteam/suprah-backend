@@ -36,6 +36,7 @@
     "@aws-sdk/client-transcribe": "^3.1138.0",
     "@aws-sdk/lib-storage": "^3.1027.0",
     "@aws-sdk/s3-request-presigner": "^3.1138.0",
+    "@capacitor/core": "^8.5.3",
     "@clerk/clerk-sdk-node": "^4.13.23",
     "@google/generative-ai": "^0.24.1",
     "@simplewebauthn/server": "^9.0.3",
