@@ -57,6 +57,7 @@ import User from '../../src/models/User.model';
 import AuditLog from '../../src/models/AuditLog.model';
 import Payment from '../../src/models/Payment.model';
 import { DashboardService, KEPT_PAYMENT_AMOUNT } from '../../src/services/dashboard.service';
+import { fillMonthlyRevenue, lastMonths } from '../../src/utils/paymentTrend';
 
 describe('payments are staff-only', () => {
   const app = express();
@@ -454,5 +455,34 @@ describe('CRM dashboard revenue leaves out refunded money', () => {
     const pipeline = payments.aggregate.mock.calls[0][0];
     expect(pipeline[0].$match.status).toBe('succeeded');
     expect(pipeline[1].$group.revenue).toEqual({ $sum: KEPT_PAYMENT_AMOUNT });
+  });
+});
+
+describe('Payments page revenue trend', () => {
+  it('covers the last 6 calendar months, oldest first, across a new year', () => {
+    const { months, start } = lastMonths(new Date('2026-02-15T10:00:00Z'), 6);
+    expect(months).toEqual([
+      { year: 2025, month: 9 },
+      { year: 2025, month: 10 },
+      { year: 2025, month: 11 },
+      { year: 2025, month: 12 },
+      { year: 2026, month: 1 },
+      { year: 2026, month: 2 },
+    ]);
+    expect(start.toISOString()).toBe('2025-09-01T00:00:00.000Z');
+  });
+
+  it('fills months without paid payments with 0 and rounds to cents', () => {
+    const { months } = lastMonths(new Date('2026-11-19T00:00:00Z'), 3);
+    expect(
+      fillMonthlyRevenue(months, [
+        { _id: { year: 2026, month: 11 }, revenue: 74.505 },
+        { _id: { year: 2026, month: 9 }, revenue: 100 },
+      ]),
+    ).toEqual([
+      { year: 2026, month: 9, revenue: 100 },
+      { year: 2026, month: 10, revenue: 0 },
+      { year: 2026, month: 11, revenue: 74.51 },
+    ]);
   });
 });

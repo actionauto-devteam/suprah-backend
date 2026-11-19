@@ -22,6 +22,7 @@ import {
   roundCents,
 } from '../utils/paymentRefund';
 import { isAwaitingPayment } from '../utils/customerPayments';
+import { fillMonthlyRevenue, lastMonths } from '../utils/paymentTrend';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-02-25.clover',
@@ -678,16 +679,31 @@ const updatePayment = asyncHandler(async (req: Request, res: Response) => {
 // ─── Payment Stats ────────────────────────────────────────────────────────────
 const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
-  const stats = await Payment.aggregate([
-    { $match: { organizationId: orgId } },
-    {
-      $group: {
-        _id: '$status',
-        count: { $sum: 1 },
-        totalAmount: { $sum: '$amount' },
-        refundedAmount: { $sum: { $ifNull: ['$refundedAmount', 0] } },
+  // The Payments page's Revenue Trend: money kept from paid payments in each
+  // of the last 6 months (2026-11-19: it used to add up only the payments on
+  // the current page, whatever their status).
+  const trend = lastMonths(new Date(), 6);
+  const [stats, monthlyRows] = await Promise.all([
+    Payment.aggregate([
+      { $match: { organizationId: orgId } },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$amount' },
+          refundedAmount: { $sum: { $ifNull: ['$refundedAmount', 0] } },
+        },
       },
-    },
+    ]),
+    Payment.aggregate([
+      { $match: { organizationId: orgId, status: 'succeeded', createdAt: { $gte: trend.start } } },
+      {
+        $group: {
+          _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
+          revenue: { $sum: { $subtract: ['$amount', { $ifNull: ['$refundedAmount', 0] }] } },
+        },
+      },
+    ]),
   ]);
 
   const formatted: Record<string, { count: number; totalAmount: number }> = {
@@ -710,6 +726,7 @@ const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, {
     byStatus: formatted, totalCount, totalRevenue,
     pendingAmount: formatted.pending.totalAmount + formatted.failed.totalAmount,
+    monthlyRevenue: fillMonthlyRevenue(trend.months, monthlyRows),
   }, 'Payment statistics fetched successfully'));
 });
 
