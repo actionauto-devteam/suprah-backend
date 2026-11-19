@@ -1,6 +1,7 @@
 import express from 'express';
 import paymentController from '../controllers/payment.controller';
 import auth from '../middleware/auth.middleware';
+import authorize from '../middleware/role.middleware';
 
 const router = express.Router();
 
@@ -17,6 +18,16 @@ router.post('/create-customer-checkout', paymentController.createCustomerCheckou
 router.get('/checkout-session/:sessionId', paymentController.getCheckoutSessionStatus);
 
 router.post('/:id/cancel-mine', paymentController.cancelMyPayment);
+
+// Everything below works on the dealership's own payment records (the list,
+// totals, sending requests, refunds), so only its staff may use it. Customers
+// use the routes above, which only touch invoices sent to their own email.
+router.use(
+  authorize(
+    ['super_admin', 'admin', 'employee'],
+    "Only your dealership's staff can view or manage payments.",
+  ),
+);
 
 router.get('/stats', paymentController.getPaymentStats);
 router.get('/balance', paymentController.getBillingBalance);

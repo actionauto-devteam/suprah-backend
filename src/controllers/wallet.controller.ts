@@ -9,6 +9,7 @@ import activityService from '../services/activity.service';
 import linkedAccountService from '../services/linkedAccount.service';
 import logger from '../utils/logger';
 import { notifyOrgAdmins } from '../utils/safeNotification';
+import { withdrawalRequestFrom } from '../utils/walletWithdrawal';
 
 
 const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
@@ -102,13 +103,15 @@ const linkReferral = asyncHandler(async (req: Request, res: Response) => {
 
 // 3. Request a Withdrawal  (FIX: Transaction.organizationId is REQUIRED)
 const requestWithdrawal = asyncHandler(async (req: Request, res: Response) => {
-    const { amount, methodType, methodDetails } = req.body;
     const user = (req.user as IUser);
     const userId = user._id;
 
-    if (!amount || amount <= 0 || !methodType || !methodDetails) {
-        return res.status(400).json(new ApiResponse(400, null, 'Amount, withdrawal method, and details are required'));
+    // An amount sent as text used to be saved and then crash the reply.
+    const withdrawalRequest = withdrawalRequestFrom(req.body);
+    if (!withdrawalRequest.ok) {
+        return res.status(400).json(new ApiResponse(400, null, withdrawalRequest.message));
     }
+    const { amount, methodType, methodDetails } = withdrawalRequest;
 
     const dbUser = await User.findById(userId);
     if (!dbUser) {

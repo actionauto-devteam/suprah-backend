@@ -14,6 +14,13 @@ import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { getSocketIO, emitToUser } from '../utils/socketEmitter';
 import { getIO } from '../socket/supraspace.socket';
+import {
+  refundRequestFor,
+  refundStateFromCharge,
+  refundUpdate,
+  remainingRefundable,
+  roundCents,
+} from '../utils/paymentRefund';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-02-25.clover',
@@ -252,14 +259,33 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
           _id: null,
           totalInvoices: { $sum: 1 },
           totalAmount: { $sum: '$amount' },
-          totalRevenue: { $sum: { $cond: [{ $eq: ['$status', 'succeeded'] }, '$amount', 0] } },
+          // Partly refunded payments stay "succeeded"; count only the part kept.
+          totalRevenue: {
+            $sum: {
+              $cond: [
+                { $eq: ['$status', 'succeeded'] },
+                { $subtract: ['$amount', { $ifNull: ['$refundedAmount', 0] }] },
+                0,
+              ],
+            },
+          },
           paidInvoices: { $sum: { $cond: [{ $eq: ['$status', 'succeeded'] }, 1, 0] } },
           pendingAmount: {
             $sum: {
               $cond: [{ $in: ['$status', ['pending', 'processing', 'failed']] }, '$amount', 0],
             },
           },
-          refundedAmount: { $sum: { $cond: [{ $eq: ['$status', 'refunded'] }, '$amount', 0] } },
+          refundedAmount: {
+            $sum: {
+              $switch: {
+                branches: [
+                  { case: { $eq: ['$status', 'refunded'] }, then: { $ifNull: ['$refundedAmount', '$amount'] } },
+                  { case: { $eq: ['$status', 'succeeded'] }, then: { $ifNull: ['$refundedAmount', 0] } },
+                ],
+                default: 0,
+              },
+            },
+          },
         },
       },
     ]),
@@ -549,37 +575,70 @@ const cancelPayment = asyncHandler(async (req: Request, res: Response) => {
 });
 
 // ─── Refund Payment ───────────────────────────────────────────────────────────
+// Refunds everything that is left, or `amount` dollars when given. A partly
+// refunded payment stays "succeeded" with `refundedAmount` set (2026-11-19):
+// it used to be marked "refunded" in full, which made totals and reports wrong.
 const refundPayment = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { id } = req.params;
-  const { amount } = req.body;
 
   const payment = await Payment.findOne({ _id: id, organizationId: orgId });
   if (!payment) throw new ApiError(404, 'Payment not found');
-  if (payment.status !== 'succeeded') throw new ApiError(400, 'Can only refund completed payments');
-  if (!payment.stripePaymentIntentId) throw new ApiError(400, 'No Stripe payment intent found');
+  if (payment.status !== 'succeeded') throw new ApiError(400, 'Only paid payments can be refunded.');
+  if (!payment.stripePaymentIntentId) {
+    throw new ApiError(400, "This payment wasn't paid by card through Suprah, so it can't be refunded here. Refund it the same way it was paid.");
+  }
 
+  const refundRequest = refundRequestFor(payment, req.body?.amount);
+  if (!refundRequest.ok) throw new ApiError(400, refundRequest.message);
+  const remainingBefore = remainingRefundable(payment);
+
+  // Without an amount, Stripe refunds exactly what is left on the charge,
+  // even if a refund made in the Stripe dashboard hasn't reached us yet.
   const refundParams: Stripe.RefundCreateParams = { payment_intent: payment.stripePaymentIntentId };
-  if (amount) refundParams.amount = Math.round(amount * 100);
+  if (refundRequest.explicit) refundParams.amount = Math.round(refundRequest.amount * 100);
 
-  await stripe.refunds.create(refundParams);
+  let refund: Stripe.Refund;
+  try {
+    refund = await stripe.refunds.create(refundParams);
+  } catch (error: any) {
+    logger.warn({ err: error?.message, paymentId: payment._id }, 'Stripe refused a refund');
+    throw new ApiError(402, `The refund didn't go through, so nothing was refunded. Stripe said: ${error?.message || 'no reason given'}`);
+  }
 
-  payment.status = 'refunded';
-  await payment.save();
+  // Our best estimate, then Stripe's own totals when we can read them.
+  let state = {
+    refundedAmount: roundCents((Number(payment.refundedAmount) || 0) + refundRequest.amount),
+    fullyRefunded: !refundRequest.explicit || refundRequest.amount >= remainingBefore,
+  };
+  try {
+    const chargeId = typeof refund.charge === 'string' ? refund.charge : refund.charge?.id;
+    if (chargeId) state = refundStateFromCharge(await stripe.charges.retrieve(chargeId));
+  } catch { /* Stripe's charge.refunded notice brings the exact totals */ }
 
-  notifyOrgAdmins(orgId, 'general', 'Payment Refunded',
-    `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} has been refunded.`,
-    { paymentId: payment._id.toString() });
+  const saved = await Payment.findOneAndUpdate({ _id: payment._id }, refundUpdate(state, new Date()), { new: true });
+
+  const refunded = refundRequest.amount;
+  notifyOrgAdmins(
+    orgId,
+    'general',
+    state.fullyRefunded ? 'Payment Refunded' : 'Payment Partly Refunded',
+    state.fullyRefunded
+      ? `${payment.customerName}'s payment of $${payment.amount.toFixed(2)} was refunded.`
+      : `$${refunded.toFixed(2)} of ${payment.customerName}'s $${payment.amount.toFixed(2)} payment was refunded.`,
+    { paymentId: payment._id.toString() },
+  );
 
   await activityService.createActivity({
     userId: (req.user?._id as any).toString(),
-    organizationId: orgId, type: 'wallet_adjustment', title: 'Payment Refunded',
-    description: `Refund of $${(amount || payment.amount).toFixed(2)} processed for ${payment.customerName}`,
-    metadata: { paymentId: payment._id.toString(), refundAmount: amount || payment.amount },
+    organizationId: orgId, type: 'wallet_adjustment',
+    title: state.fullyRefunded ? 'Payment Refunded' : 'Payment Partly Refunded',
+    description: `Refund of $${refunded.toFixed(2)} processed for ${payment.customerName}`,
+    metadata: { paymentId: payment._id.toString(), refundAmount: refunded, refundId: refund.id },
   });
 
-  logger.info({ paymentId: payment._id, amount: amount || payment.amount }, 'Payment refunded');
-  res.json(new ApiResponse(200, payment, 'Payment refunded successfully'));
+  logger.info({ paymentId: payment._id, amount: refunded, full: state.fullyRefunded }, 'Payment refunded');
+  res.json(new ApiResponse(200, saved ?? payment, state.fullyRefunded ? 'Payment refunded' : 'Payment partly refunded'));
 });
 
 // ─── Update Payment ───────────────────────────────────────────────────────────
@@ -620,7 +679,14 @@ const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const stats = await Payment.aggregate([
     { $match: { organizationId: orgId } },
-    { $group: { _id: '$status', count: { $sum: 1 }, totalAmount: { $sum: '$amount' } } },
+    {
+      $group: {
+        _id: '$status',
+        count: { $sum: 1 },
+        totalAmount: { $sum: '$amount' },
+        refundedAmount: { $sum: { $ifNull: ['$refundedAmount', 0] } },
+      },
+    },
   ]);
 
   const formatted: Record<string, { count: number; totalAmount: number }> = {
@@ -635,7 +701,8 @@ const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
     if (formatted[s._id]) {
       formatted[s._id] = { count: s.count, totalAmount: s.totalAmount };
       totalCount += s.count;
-      if (s._id === 'succeeded') totalRevenue = s.totalAmount;
+      // Money actually kept: paid payments minus any part refunded later.
+      if (s._id === 'succeeded') totalRevenue = roundCents(s.totalAmount - (s.refundedAmount || 0));
     }
   });
 
@@ -650,9 +717,10 @@ const getBillingBalance = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const result = await Payment.aggregate([
     { $match: { organizationId: orgId, status: 'succeeded' } },
-    { $group: { _id: null, balance: { $sum: '$amount' } } },
+    // Partly refunded payments count only the part the dealership kept.
+    { $group: { _id: null, balance: { $sum: { $subtract: ['$amount', { $ifNull: ['$refundedAmount', 0] }] } } } },
   ]);
-  const balance = result[0]?.balance ?? 0;
+  const balance = roundCents(result[0]?.balance ?? 0);
   res.json(new ApiResponse(200, { balance }, 'Balance fetched successfully'));
 });
 
@@ -761,10 +829,18 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
       break;
     }
 
+    // Also covers refunds made in the Stripe dashboard. A partial refund keeps
+    // the payment "succeeded" and records the amount; a full one marks it
+    // "refunded" (2026-11-19: every refund used to mark it refunded in full).
     case 'charge.refunded': {
       const charge = event.data.object as Stripe.Charge;
-      if (charge.payment_intent) {
-        await Payment.findOneAndUpdate({ stripePaymentIntentId: charge.payment_intent }, { status: 'refunded' });
+      const paymentIntentId =
+        typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
+      if (paymentIntentId) {
+        await Payment.findOneAndUpdate(
+          { stripePaymentIntentId: paymentIntentId },
+          refundUpdate(refundStateFromCharge(charge), new Date()),
+        );
       }
       break;
     }
@@ -811,7 +887,10 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
     .lean();
 
   const totalOwed = payments.filter(p => p.status === 'pending' || p.status === 'failed').reduce((s, p) => s + p.amount, 0);
-  const totalPaid = payments.filter(p => p.status === 'succeeded').reduce((s, p) => s + p.amount, 0);
+  // Paid minus anything refunded to them since.
+  const totalPaid = roundCents(
+    payments.filter(p => p.status === 'succeeded').reduce((s, p) => s + p.amount - (p.refundedAmount || 0), 0),
+  );
   const pendingCount = payments.filter(p => p.status === 'pending' || p.status === 'failed').length;
 
   res.json(new ApiResponse(200, { payments, stats: { totalOwed, totalPaid, pendingCount } }, 'Payments fetched successfully'));

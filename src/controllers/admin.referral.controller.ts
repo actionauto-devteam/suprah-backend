@@ -83,41 +83,49 @@ const getPendingWithdrawals = asyncHandler(async (req: Request, res: Response) =
 });
 
 // 3. Approve a Withdrawal Request
+// Explains why a withdrawal couldn't be claimed for approval or rejection.
+async function unclaimableWithdrawal(res: Response, transactionId: string) {
+    const existing = await Transaction.findById(transactionId).select('type status').lean();
+    if (!existing) {
+        return res.status(404).json(new ApiResponse(404, null, 'Transaction not found'));
+    }
+    if (existing.type !== 'withdrawal') {
+        return res.status(400).json(new ApiResponse(400, null, 'Transaction is not a pending withdrawal'));
+    }
+    return res.status(409).json(new ApiResponse(409, null, 'This withdrawal was already approved or rejected. Refresh to see its current status.'));
+}
+
 const approveWithdrawal = asyncHandler(async (req: Request, res: Response) => {
     const { transactionId } = req.params;
-
-    const transaction = await Transaction.findById(transactionId);
-
-    if (!transaction) {
+    if (!mongoose.isValidObjectId(transactionId)) {
         return res.status(404).json(new ApiResponse(404, null, 'Transaction not found'));
     }
 
-    if (transaction.type !== 'withdrawal' || transaction.status !== 'pending') {
-        return res.status(400).json(new ApiResponse(400, null, 'Transaction is not a pending withdrawal'));
-    }
-
-    const user = await User.findOne({
-        _id: transaction.userId
-    });
-    if (!user) {
-        return res.status(404).json(new ApiResponse(404, null, 'User no longer exists'));
-    }
-
-    if (user.walletBalance < transaction.amount) {
-        // Edge case: They spent/lost money since requesting
-        return res.status(400).json(new ApiResponse(400, null, 'User no longer has sufficient balance for this withdrawal'));
-    }
-
-    // A. Mark transaction as completed
-    transaction.status = 'completed';
-    await transaction.save();
-
-    // B. Deduct money from wallet
-    const updatedUser = await User.findByIdAndUpdate(
-        user._id,
-        { $inc: { walletBalance: -Math.abs(transaction.amount) } },
-        { new: true }
+    // A. Claim the request first (2026-11-19). Only one approval or rejection
+    // can win, so a double click or two admins at once can no longer take the
+    // money out of the customer's wallet twice.
+    const transaction = await Transaction.findOneAndUpdate(
+        { _id: transactionId, type: 'withdrawal', status: 'pending' },
+        { $set: { status: 'completed' } },
+        { new: true },
     );
+    if (!transaction) return unclaimableWithdrawal(res, transactionId);
+
+    // B. Deduct money from wallet, only if it is still there.
+    const amount = Math.abs(transaction.amount);
+    const updatedUser = await User.findOneAndUpdate(
+        { _id: transaction.userId, walletBalance: { $gte: amount } },
+        { $inc: { walletBalance: -amount } },
+        { new: true },
+    );
+    if (!updatedUser) {
+        // Put the request back so it can be reviewed again.
+        await Transaction.updateOne({ _id: transaction._id, status: 'completed' }, { $set: { status: 'pending' } });
+        const userExists = await User.exists({ _id: transaction.userId });
+        return userExists
+            ? res.status(400).json(new ApiResponse(400, null, 'User no longer has sufficient balance for this withdrawal'))
+            : res.status(404).json(new ApiResponse(404, null, 'User no longer exists'));
+    }
 
     // C. Write to Audit Log
     await AuditLog.create({
@@ -129,22 +137,31 @@ const approveWithdrawal = asyncHandler(async (req: Request, res: Response) => {
         changes: { transactionStatus: 'completed', deductedAmount: transaction.amount }
     });
 
-    safeCreateNotification({ userId: transaction.userId.toString(), organizationId: user.organizationId?.toString() || '', type: 'payout_processed', title: 'Withdrawal Approved', message: `Your withdrawal of $${transaction.amount.toFixed(2)} has been approved.` });
+    safeCreateNotification({ userId: transaction.userId.toString(), organizationId: updatedUser.organizationId?.toString() || '', type: 'payout_processed', title: 'Withdrawal Approved', message: `Your withdrawal of $${transaction.amount.toFixed(2)} has been approved.` });
 
-    res.json(new ApiResponse(200, { transaction, newBalance: updatedUser?.walletBalance }, 'Withdrawal approved and funds deducted'));
+    res.json(new ApiResponse(200, { transaction, newBalance: updatedUser.walletBalance }, 'Withdrawal approved and funds deducted'));
 });
 
 // 4. Reject a Withdrawal Request
 const rejectWithdrawal = asyncHandler(async (req: Request, res: Response) => {
     const { transactionId } = req.params;
-    const { reason = 'Denied by administrator' } = req.body;
-
-    const transaction = await Transaction.findById(transactionId);
-    if (!transaction || transaction.type !== 'withdrawal' || transaction.status !== 'pending') {
+    const rawReason = req.body?.reason;
+    const reason = typeof rawReason === 'string' && rawReason.trim()
+        ? rawReason.trim().slice(0, 500)
+        : 'Denied by administrator';
+    if (!mongoose.isValidObjectId(transactionId)) {
         return res.status(400).json(new ApiResponse(400, null, 'Invalid or non-pending withdrawal request'));
     }
 
-    transaction.status = 'rejected';
+    // Claimed the same way as an approval, so a request can't be both
+    // approved and rejected.
+    const transaction = await Transaction.findOneAndUpdate(
+        { _id: transactionId, type: 'withdrawal', status: 'pending' },
+        { $set: { status: 'rejected' } },
+        { new: true },
+    );
+    if (!transaction) return unclaimableWithdrawal(res, transactionId);
+
     transaction.note = `${transaction.note} (REJECTED: ${reason})`;
     await transaction.save();
 
