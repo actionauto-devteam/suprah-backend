@@ -23,6 +23,14 @@ import {
 } from '../utils/paymentRefund';
 import { isAwaitingPayment } from '../utils/customerPayments';
 import { claimFailed, claimPaid } from '../utils/paymentPaid';
+import {
+  KEPT_AMOUNT,
+  StripeDisputeLike,
+  disputeNotice,
+  disputeOutcome,
+  disputeUpdate,
+  keptAmount,
+} from '../utils/paymentDispute';
 import { fillMonthlyRevenue, lastMonths } from '../utils/paymentTrend';
 
 const stripe = new Stripe(config.stripe.secretKey, {
@@ -83,6 +91,42 @@ async function afterPaid(payment: any, source: string) {
   }).catch(() => {});
 
   await broadcastPaymentSuccess(payment);
+}
+
+/**
+ * Records a card dispute on its invoice and tells the dealership's admins
+ * when something changed (opened, won or lost). The same news arriving twice
+ * tells nobody twice.
+ */
+async function recordDispute(dispute: Stripe.Dispute) {
+  const piId = typeof dispute.payment_intent === 'string' ? dispute.payment_intent : dispute.payment_intent?.id;
+  const chargeId = typeof dispute.charge === 'string' ? dispute.charge : dispute.charge?.id;
+  const match = [
+    ...(piId ? [{ stripePaymentIntentId: piId }] : []),
+    ...(chargeId ? [{ stripeChargeId: chargeId }] : []),
+  ];
+  if (!match.length) return;
+
+  const details: StripeDisputeLike = { id: dispute.id, status: dispute.status, amount: dispute.amount, reason: dispute.reason };
+  // Returns the invoice as it was before this update, to tell what changed.
+  const before = await Payment.findOneAndUpdate({ $or: match }, disputeUpdate(details, new Date()), { new: false });
+  if (!before) {
+    logger.warn({ disputeId: dispute.id }, 'Stripe dispute for a payment Suprah does not know');
+    return;
+  }
+
+  const outcome = disputeOutcome(dispute.status);
+  if (before.disputeStatus === outcome && before.stripeDisputeId === dispute.id) return;
+
+  const notice = disputeNotice(before, outcome, details.amount / 100);
+  try {
+    await notifyOrgAdmins(before.organizationId.toString(), 'payment_failed', notice.title, notice.message, {
+      paymentId: before._id.toString(),
+      disputeStatus: outcome,
+      route: '/billing/payments',
+    });
+  } catch { /* the dispute is recorded even if the notice fails */ }
+  logger.info({ paymentId: before._id, disputeId: dispute.id, outcome }, 'Stripe dispute recorded');
 }
 
 async function broadcastPaymentSuccess(payment: any) {
@@ -306,15 +350,10 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
           _id: null,
           totalInvoices: { $sum: 1 },
           totalAmount: { $sum: '$amount' },
-          // Partly refunded payments stay "succeeded"; count only the part kept.
+          // Partly refunded payments stay "succeeded"; count only the part kept
+          // (and leave out a dispute the dealership lost).
           totalRevenue: {
-            $sum: {
-              $cond: [
-                { $eq: ['$status', 'succeeded'] },
-                { $subtract: ['$amount', { $ifNull: ['$refundedAmount', 0] }] },
-                0,
-              ],
-            },
+            $sum: { $cond: [{ $eq: ['$status', 'succeeded'] }, KEPT_AMOUNT, 0] },
           },
           paidInvoices: { $sum: { $cond: [{ $eq: ['$status', 'succeeded'] }, 1, 0] } },
           pendingAmount: {
@@ -798,7 +837,7 @@ const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
           _id: '$status',
           count: { $sum: 1 },
           totalAmount: { $sum: '$amount' },
-          refundedAmount: { $sum: { $ifNull: ['$refundedAmount', 0] } },
+          keptAmount: { $sum: KEPT_AMOUNT },
         },
       },
     ]),
@@ -807,7 +846,7 @@ const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
       {
         $group: {
           _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
-          revenue: { $sum: { $subtract: ['$amount', { $ifNull: ['$refundedAmount', 0] }] } },
+          revenue: { $sum: KEPT_AMOUNT },
         },
       },
     ]),
@@ -825,8 +864,8 @@ const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
     if (formatted[s._id]) {
       formatted[s._id] = { count: s.count, totalAmount: s.totalAmount };
       totalCount += s.count;
-      // Money actually kept: paid payments minus any part refunded later.
-      if (s._id === 'succeeded') totalRevenue = roundCents(s.totalAmount - (s.refundedAmount || 0));
+      // Money actually kept: paid payments minus any part refunded later or lost to a dispute.
+      if (s._id === 'succeeded') totalRevenue = roundCents(s.keptAmount ?? s.totalAmount);
     }
   });
 
@@ -842,8 +881,8 @@ const getBillingBalance = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const result = await Payment.aggregate([
     { $match: { organizationId: orgId, status: 'succeeded' } },
-    // Partly refunded payments count only the part the dealership kept.
-    { $group: { _id: null, balance: { $sum: { $subtract: ['$amount', { $ifNull: ['$refundedAmount', 0] }] } } } },
+    // Partly refunded payments count only the part the dealership kept; a lost dispute is left out.
+    { $group: { _id: null, balance: { $sum: KEPT_AMOUNT } } },
   ]);
   const balance = roundCents(result[0]?.balance ?? 0);
   res.json(new ApiResponse(200, { balance }, 'Balance fetched successfully'));
@@ -883,6 +922,15 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
         await afterPaid(payment, 'STRIPE_CHECKOUT');
         logger.info({ paymentId: payment._id, sessionId: session.id }, 'Stripe Checkout: payment success');
       }
+      break;
+    }
+
+    // A customer disputed a card payment with their bank (a chargeback), or
+    // the bank's review moved on or ended.
+    case 'charge.dispute.created':
+    case 'charge.dispute.updated':
+    case 'charge.dispute.closed': {
+      await recordDispute(event.data.object as Stripe.Dispute);
       break;
     }
 
@@ -975,7 +1023,7 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
   const totalOwed = payments.filter(p => p.status === 'pending' || p.status === 'failed').reduce((s, p) => s + p.amount, 0);
   // Paid minus anything refunded to them since.
   const totalPaid = roundCents(
-    payments.filter(p => p.status === 'succeeded').reduce((s, p) => s + p.amount - (p.refundedAmount || 0), 0),
+    payments.filter(p => p.status === 'succeeded').reduce((s, p) => s + keptAmount(p), 0),
   );
   // The same invoices as the "To pay" list on the customer's Suprah Pay page,
   // so the My Garage "Payments Due" tile and that list always agree.

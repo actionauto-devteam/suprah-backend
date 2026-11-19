@@ -53,6 +53,15 @@ export interface IPayment extends Document {
   refundedAmount?: number;
   refundedAt?: Date;
 
+  /** A card dispute (chargeback). Revenue counts the payment until the bank
+   *  decides; a lost dispute is left out like a refund. */
+  stripeDisputeId?: string;
+  disputeStatus?: 'open' | 'won' | 'lost';
+  disputedAmount?: number;
+  disputeReason?: string;
+  disputedAt?: Date;
+  disputeClosedAt?: Date;
+
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -125,6 +134,12 @@ const PaymentSchema: Schema<IPayment> = new Schema(
     dueDate: { type: Date },
     refundedAmount: { type: Number, min: 0 },
     refundedAt: { type: Date },
+    stripeDisputeId: { type: String, trim: true },
+    disputeStatus: { type: String, enum: ['open', 'won', 'lost'] },
+    disputedAmount: { type: Number, min: 0 },
+    disputeReason: { type: String, trim: true },
+    disputedAt: { type: Date },
+    disputeClosedAt: { type: Date },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   },
   { timestamps: true }

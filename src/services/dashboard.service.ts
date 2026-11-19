@@ -12,14 +12,32 @@ import DriverProfile from '../models/DriverProfile.model';
 import AnalyticsAggregate from '../models/AnalyticsAggregate.model';
 
 /**
- * Money a paid payment kept: its amount minus anything refunded since.
+ * Money a paid payment kept: its amount minus anything refunded since, and minus
+ * a dispute the dealership lost (2026-11-20).
  * A partly refunded payment stays "succeeded" (2026-11-19), so revenue counts
  * only the part the dealership kept; full refunds aren't "succeeded" at all.
  */
 export const KEPT_PAYMENT_AMOUNT = {
-    $subtract: [
-        { $convert: { input: '$amount', to: 'double', onError: 0, onNull: 0 } },
-        { $convert: { input: '$refundedAmount', to: 'double', onError: 0, onNull: 0 } },
+    $max: [
+        0,
+        {
+            $subtract: [
+                {
+                    $subtract: [
+                        { $convert: { input: '$amount', to: 'double', onError: 0, onNull: 0 } },
+                        { $convert: { input: '$refundedAmount', to: 'double', onError: 0, onNull: 0 } },
+                    ],
+                },
+                // A dispute the dealership lost is left out like a refund (2026-11-20).
+                {
+                    $cond: [
+                        { $eq: ['$disputeStatus', 'lost'] },
+                        { $convert: { input: '$disputedAmount', to: 'double', onError: 0, onNull: 0 } },
+                        0,
+                    ],
+                },
+            ],
+        },
     ],
 };
 
@@ -38,7 +56,7 @@ export class DashboardService {
         const livePayments = await Payment.find({ organizationId: orgId })
             .sort({ createdAt: -1 })
             .limit(10)
-            .select('customerName amount refundedAmount status description createdAt');
+            .select('customerName amount refundedAmount disputeStatus disputedAmount status description createdAt');
 
         return {
             stats,

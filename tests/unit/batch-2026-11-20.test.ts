@@ -48,6 +48,8 @@ import Payment from '../../src/models/Payment.model';
 import ReferralService from '../../src/services/referral.service';
 import activityService from '../../src/services/activity.service';
 import { safeCreateNotification } from '../../src/utils/safeNotification';
+import { notifyOrgAdmins } from '../../src/utils/safeNotification';
+import { KEPT_AMOUNT, disputeOutcome, keptAmount } from '../../src/utils/paymentDispute';
 
 const stripe = (jest.requireMock('stripe') as { instance: any }).instance;
 const payments = Payment as unknown as Record<string, jest.Mock>;
@@ -277,5 +279,79 @@ describe("leaving Stripe's payment page", () => {
       { _id: 'pay-1', stripeCheckoutSessionId: 'cs_old', status: 'processing' },
       { $set: { status: 'pending' } },
     );
+  });
+});
+
+// ─── Card disputes (chargebacks) ────────────────────────────────────────────
+describe('card disputes', () => {
+  it("reads Stripe's dispute status in Suprah's terms", () => {
+    expect(['needs_response', 'under_review', 'warning_needs_response', 'warning_under_review'].map(disputeOutcome))
+      .toEqual(['open', 'open', 'open', 'open']);
+    expect(['won', 'warning_closed', 'prevented'].map(disputeOutcome)).toEqual(['won', 'won', 'won']);
+    expect(disputeOutcome('lost')).toBe('lost');
+  });
+
+  it('keeps counting a disputed payment until the bank decides, and leaves out a lost one like a refund', () => {
+    expect(keptAmount({ amount: 25, disputeStatus: 'open', disputedAmount: 25 })).toBe(25);
+    expect(keptAmount({ amount: 25, disputeStatus: 'won', disputedAmount: 25 })).toBe(25);
+    expect(keptAmount({ amount: 25, disputeStatus: 'lost', disputedAmount: 25 })).toBe(0);
+    expect(keptAmount({ amount: 25, refundedAmount: 10, disputeStatus: 'lost', disputedAmount: 15 })).toBe(0);
+    expect(keptAmount({ amount: 25, refundedAmount: 10 })).toBe(15);
+    expect(keptAmount({ amount: 25, refundedAmount: 20, disputeStatus: 'lost', disputedAmount: 25 })).toBe(0);
+  });
+
+  const disputeUpdate = (type: string, status: string) =>
+    stripeUpdate({
+      type,
+      data: { object: { id: 'dp_1', status, amount: 2500, reason: 'fraudulent', payment_intent: 'pi_1', charge: 'ch_1' } },
+    });
+
+  it('records a new dispute on its invoice and tells the dealership admins once', async () => {
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded', invoiceNumber: 'INV-1' }));
+    await disputeUpdate('charge.dispute.created', 'needs_response');
+
+    const [filter, update, options] = payments.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ $or: [{ stripePaymentIntentId: 'pi_1' }, { stripeChargeId: 'ch_1' }] });
+    expect(update.$set).toMatchObject({ stripeDisputeId: 'dp_1', disputeStatus: 'open', disputedAmount: 25, disputeReason: 'fraudulent' });
+    expect(options).toEqual({ new: false });
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(
+      'org-1',
+      'payment_failed',
+      'Payment disputed',
+      "Test Customer's payment for invoice INV-1 ($25.00) was disputed with their bank. It still counts in your revenue while the bank reviews it.",
+      { paymentId: 'pay-1', disputeStatus: 'open', route: '/billing/payments' },
+    );
+
+    // Stripe telling the same thing again (e.g. evidence added) tells nobody twice.
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded', stripeDisputeId: 'dp_1', disputeStatus: 'open' }));
+    await disputeUpdate('charge.dispute.updated', 'under_review');
+    expect(notifyOrgAdmins).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells the admins when the bank decides, and a lost dispute is closed out", async () => {
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded', stripeDisputeId: 'dp_1', disputeStatus: 'open' }));
+    await disputeUpdate('charge.dispute.closed', 'lost');
+    const [, update] = payments.findOneAndUpdate.mock.calls[0];
+    expect(update.$set).toMatchObject({ disputeStatus: 'lost' });
+    expect(update.$set.disputeClosedAt).toBeInstanceOf(Date);
+    expect((notifyOrgAdmins as jest.Mock).mock.calls[0][2]).toBe('Dispute lost');
+  });
+
+  it('ignores a dispute for a payment Suprah does not know', async () => {
+    payments.findOneAndUpdate.mockResolvedValueOnce(null);
+    await disputeUpdate('charge.dispute.created', 'needs_response');
+    expect(notifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('every revenue total uses the money kept (refunds and lost disputes left out)', async () => {
+    payments.aggregate.mockResolvedValue([]);
+    await call(paymentController.getPaymentStats, { orgId: 'org-1' });
+    const [byStatus, monthly] = payments.aggregate.mock.calls.map((c) => c[0]);
+    expect(byStatus[1].$group.keptAmount).toEqual({ $sum: KEPT_AMOUNT });
+    expect(monthly[1].$group.revenue).toEqual({ $sum: KEPT_AMOUNT });
+
+    payments.aggregate.mockClear();
+    await call(paymentController.getBillingBalance, { orgId: 'org-1' });
+    expect(payments.aggregate.mock.calls[0][0][1].$group.balance).toEqual({ $sum: KEPT_AMOUNT });
   });
 });

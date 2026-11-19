@@ -442,12 +442,16 @@ describe('CRM dashboard revenue leaves out refunded money', () => {
   });
 
   it('counts each paid payment as its amount minus anything refunded', () => {
-    expect(KEPT_PAYMENT_AMOUNT).toEqual({
+    // Since 2026-11-20 a dispute the dealership lost is left out too (batch 3).
+    const kept = KEPT_PAYMENT_AMOUNT.$max[1] as any;
+    expect(KEPT_PAYMENT_AMOUNT.$max[0]).toBe(0);
+    expect(kept.$subtract[0]).toEqual({
       $subtract: [
         { $convert: { input: '$amount', to: 'double', onError: 0, onNull: 0 } },
         { $convert: { input: '$refundedAmount', to: 'double', onError: 0, onNull: 0 } },
       ],
     });
+    expect(kept.$subtract[1].$cond[0]).toEqual({ $eq: ['$disputeStatus', 'lost'] });
   });
 
   it.each(['1Y', '7D', '1M', '6M'])('uses it for the %s revenue chart, on paid payments only', async (period) => {
