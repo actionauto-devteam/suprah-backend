@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from "axios";
+import { wiseSettingsFrom } from "../utils/wiseSettings";
 
 interface WiseConfig {
   apiUrl: string;
@@ -205,10 +206,12 @@ export class WiseClient {
   }
 }
 
-// Export singleton instance
+// Export singleton instance. Outside production it falls back to Wise's new
+// test site; Wise retired the old one (api.sandbox.transferwise.tech).
+const settings = wiseSettingsFrom(process.env);
 export const wiseClient = new WiseClient({
-  apiUrl: process.env.WISE_API_URL || "https://api.sandbox.transferwise.tech",
-  clientId: process.env.WISE_CLIENT_ID || "",
-  clientSecret: process.env.WISE_CLIENT_SECRET || "",
-  redirectUri: process.env.WISE_REDIRECT_URI || "",
+  apiUrl: settings.apiUrl,
+  clientId: settings.clientId,
+  clientSecret: settings.clientSecret,
+  redirectUri: settings.redirectUri,
 });

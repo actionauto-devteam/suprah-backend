@@ -332,3 +332,97 @@ describe('reward withdrawals', () => {
     expect((await call(adminReferral.rejectWithdrawal, { params: { transactionId: id } })).status).toBe(409);
   });
 });
+
+// ─── Link Wise when Wise isn't set up ───────────────────────────────────────
+import logger from '../../src/utils/logger';
+import linkedAccountController from '../../src/controllers/linkedAccount.controller';
+import linkedAccountService from '../../src/services/linkedAccount.service';
+import {
+  RETIRED_WISE_HOSTS,
+  WISE_NOT_SET_UP_MESSAGE,
+  WISE_TEST_SITE,
+  wiseSettingsFrom,
+  wiseSetupProblem,
+} from '../../src/utils/wiseSettings';
+
+describe('Link Wise setup', () => {
+  const fakeWise = {
+    WISE_CLIENT_ID: 'test-client',
+    WISE_CLIENT_SECRET: 'test-secret',
+    WISE_REDIRECT_URI: 'http://localhost:5000/api/linked-accounts/wise/callback',
+  };
+  const saved = { ...process.env };
+  beforeEach(() => {
+    jest.spyOn(logger, 'warn').mockImplementation(() => undefined as any);
+    for (const key of Object.keys(process.env)) if (key.startsWith('WISE_')) delete process.env[key];
+  });
+  afterEach(() => {
+    process.env = { ...saved };
+    jest.restoreAllMocks();
+  });
+
+  it("falls back to Wise's new test site outside production, and to nothing in production", () => {
+    expect(wiseSettingsFrom({ NODE_ENV: 'development' })).toMatchObject(WISE_TEST_SITE);
+    expect(wiseSettingsFrom({ NODE_ENV: 'production' })).toMatchObject({ oauthUrl: '', apiUrl: '' });
+    expect(wiseSettingsFrom({ NODE_ENV: 'production', WISE_OAUTH_URL: ' https://wise.com/ ' }).oauthUrl).toBe('https://wise.com');
+  });
+
+  it('names the missing or retired settings without their values', () => {
+    expect(wiseSetupProblem(wiseSettingsFrom({ NODE_ENV: 'development' }))).toBe(
+      'missing Wise settings: WISE_CLIENT_ID, WISE_CLIENT_SECRET, WISE_REDIRECT_URI',
+    );
+    const retired = wiseSettingsFrom({ ...fakeWise, WISE_OAUTH_URL: 'https://sandbox.transferwise.tech' });
+    expect(wiseSetupProblem(retired)).toBe("WISE_OAUTH_URL points to Wise's retired test site (sandbox.transferwise.tech)");
+    expect(wiseSetupProblem(retired)).not.toContain('test-secret');
+    expect(RETIRED_WISE_HOSTS).toContain('api.sandbox.transferwise.tech');
+    expect(wiseSetupProblem(wiseSettingsFrom({ ...fakeWise, NODE_ENV: 'development' }))).toBeNull();
+  });
+
+  const startConnect = async () => {
+    const res: any = { statusCode: 200 };
+    res.status = jest.fn((code: number) => { res.statusCode = code; return res; });
+    res.json = jest.fn((body: unknown) => { res.body = body; return res; });
+    const next = jest.fn();
+    await linkedAccountController.initiateConnect(
+      { params: { provider: 'wise' }, user: { _id: 'user-1' } } as any,
+      res,
+      next,
+    );
+    return { res, next };
+  };
+
+  it('answers with a plain message instead of a Wise address when Wise is not set up', async () => {
+    process.env.NODE_ENV = 'production';
+    const { res, next } = await startConnect();
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toEqual({ authUrl: null, ready: false, message: WISE_NOT_SET_UP_MESSAGE });
+  });
+
+  it("sends staff to Wise's new test site when the settings are there", async () => {
+    Object.assign(process.env, { NODE_ENV: 'development', ...fakeWise });
+    const { res } = await startConnect();
+    const url = new URL(res.body.data.authUrl);
+    expect(url.origin + url.pathname).toBe('https://wise-sandbox.com/oauth/authorize');
+    expect(url.searchParams.get('client_id')).toBe('test-client');
+    expect(url.searchParams.get('state')).toBeTruthy();
+  });
+
+  it('refuses to finish linking when Wise is not set up', async () => {
+    process.env.NODE_ENV = 'production';
+    await expect(linkedAccountService.connectProvider('wise', 'code', 'user-1')).rejects.toMatchObject({
+      statusCode: 409,
+      message: WISE_NOT_SET_UP_MESSAGE,
+    });
+  });
+});
+
+// ─── My Garage "Payments Due" matches the "To pay" list ─────────────────────
+import { isAwaitingPayment } from '../../src/utils/customerPayments';
+
+describe('Payments Due count', () => {
+  it('counts the same invoices the customer sees under "To pay"', () => {
+    expect(['pending', 'failed', 'processing'].every(isAwaitingPayment)).toBe(true);
+    expect(['succeeded', 'refunded', 'cancelled', '', undefined, null].some(isAwaitingPayment)).toBe(false);
+  });
+});

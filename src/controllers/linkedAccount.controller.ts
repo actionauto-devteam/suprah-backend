@@ -21,6 +21,12 @@ const initiateConnect = asyncHandler(async (req: Request, res: Response) => {
       .status(400)
       .json(new ApiResponse(400, null, "Unsupported provider"));
   }
+  // Wise not set up on this site: answer with a plain message instead of
+  // sending staff to a Wise error page (authUrl stays null).
+  const notSetUp = linkedAccountService.wiseLinkProblem();
+  if (notSetUp) {
+    return res.json(new ApiResponse(200, { authUrl: null, ready: false, message: notSetUp }, notSetUp));
+  }
   const userId = (req.user as IUser)._id.toString();
   const state = linkedAccountService.signState(userId, provider);
   const authUrl = linkedAccountService.buildAuthorizeUrl(provider, state);
