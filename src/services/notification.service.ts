@@ -604,11 +604,13 @@ const markAllAsRead = async (userId: string, _orgId: string) => {
 const deleteNotification = async (notificationId: string, _orgId: string, userId: string) => {
   const notification = await Notification.findOneAndDelete({ _id: notificationId, userId });
   if (!notification) throw new ApiError(404, NOTIFICATION_GONE);
+  emitToUser(userId, 'notification:deleted', { notificationId });
   return notification;
 };
 
 const deleteAllRead = async (userId: string, _orgId: string) => {
   const result = await Notification.deleteMany({ userId, isRead: true });
+  emitToUser(userId, 'notification:deleteAllRead', { deletedCount: result.deletedCount });
   return { message: 'All read notifications deleted', deletedCount: result.deletedCount };
 };
 
