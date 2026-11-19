@@ -10,6 +10,7 @@ import { addLeadNoteAndNotify, resolveGroupMemberIds } from '../utils/leadNote';
 import { identityFromMetadata } from '../utils/aiAgentIdentity';
 import { aiHandoffTopicLabel, cleanAiHandoffTopicTeams, guessAiHandoffTopic } from '../constants/aiHandoffTopics';
 import { aiHandoffNoteText } from './aiHandoffRouting.service';
+import { samePersonIds } from '../utils/samePersonIds';
 import logger from '../utils/logger';
 
 export type LeadNoticeAudience = 'owner' | 'ring_team' | 'team' | 'admins' | 'nobody';
@@ -98,6 +99,7 @@ async function tagLeadTeam(organizationId: string, lead: any, input: LeadNoticeI
       authorName: identityFromMetadata(metadata).displayName,
       mentionedGroupIds: [team.id],
       suppressNotification: true,
+      recordMentions: false,
     });
   } catch (err) {
     logger.warn({ err, leadId: String(lead._id) }, '[LeadNotice] Could not add the team tag');
@@ -122,19 +124,6 @@ async function pickLeadNoticePeople(
   if (!lead) return null;
   const team = await tagLeadTeam(organizationId, lead, input);
   return team ? { audience: 'team', ids: team.memberIds } : null;
-}
-
-async function samePersonIds(organizationId: string, id: string): Promise<string[]> {
-  if (!id) return [];
-  const person: any = (await User.findOne({ _id: id, organizationId }).select('email').lean())
-    || (await CrmUser.findOne({ _id: id, organizationId }).select('email').lean());
-  const email = String(person?.email || '').trim().toLowerCase();
-  if (!email) return [id];
-  const [mainUsers, crmUsers] = await Promise.all([
-    User.find({ organizationId, email }).select('_id').lean(),
-    CrmUser.find({ organizationId, email }).select('_id').lean(),
-  ]);
-  return [...new Set([id, ...[...mainUsers, ...crmUsers].map((row: any) => String(row._id))])];
 }
 
 export async function notifyLeadPeople(input: LeadNoticeInput): Promise<LeadNoticeAudience> {

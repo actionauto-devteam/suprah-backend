@@ -133,6 +133,9 @@ const checkUserAvailability = async (
 
 export const SERVER_OWNED_APPOINTMENT_NOTICE_FIELDS = ['reminderSent', 'reminderSentAt', 'reminderSms', 'rescheduleNotice', 'customerEmailNotice'] as const;
 
+export const CUSTOMER_CONTACT_REQUIRED_MESSAGE = 'Add a phone number or an email for the customer.';
+const contactValue = (value: unknown) => String(value ?? '').trim();
+
 export function contactBlockedEmailReason(error: unknown): string | null {
   return isContactRestrictedError(error) ? error.message : null;
 }
@@ -197,6 +200,9 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
   }
 
   const isCustomerBooking = Boolean(data.customerBooking?.isCustomerBooking);
+  if (isCustomerBooking && !contactValue(data.customerBooking?.email) && !contactValue(data.customerBooking?.phone)) {
+    throw new ApiError(400, CUSTOMER_CONTACT_REQUIRED_MESSAGE);
+  }
   const salesperson = isCustomerBooking && data.salespersonUserId
     ? await resolveSalesperson(orgId, data.salespersonUserId)
     : null;
@@ -228,8 +234,8 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     customerBooking = {
       firstName: data.customerBooking.firstName.trim(),
       lastName: data.customerBooking.lastName.trim(),
-      email: data.customerBooking.email.toLowerCase().trim(),
-      phone: data.customerBooking.phone.trim(),
+      email: contactValue(data.customerBooking.email).toLowerCase(),
+      phone: contactValue(data.customerBooking.phone),
       isCustomerBooking: true,
       bookingHistory: {
         previousBookings: [],
@@ -280,7 +286,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
 
   let invitationBlockedReason: string | null = null;
   let customerInvitationSent = false;
-  if (customerBooking) {
+  if (customerBooking && customerBooking.email) {
     try {
       const token = jwt.sign(
         { appointmentId: appointment._id, email: customerBooking.email },
@@ -543,6 +549,13 @@ const updateAppointment = async (
   const previousStartTime = appointment.startTime;
   const previousEndTime = appointment.endTime;
   Object.assign(appointment, updateData);
+  if (appointment.customerBooking?.isCustomerBooking) {
+    appointment.customerBooking.email = contactValue(appointment.customerBooking.email).toLowerCase();
+    appointment.customerBooking.phone = contactValue(appointment.customerBooking.phone);
+    if (!appointment.customerBooking.email && !appointment.customerBooking.phone) {
+      throw new ApiError(400, CUSTOMER_CONTACT_REQUIRED_MESSAGE);
+    }
+  }
   if (salespersonChange) {
     const participantIdFor = (person: any) => person
       ? String(appointment.participantModel === 'CrmUser' ? person.crmUserId || '' : person.userId)
@@ -667,7 +680,7 @@ const updateAppointment = async (
   }
 
   // Send update email to customer booking
-  if (appointment.customerBooking?.isCustomerBooking) {
+  if (appointment.customerBooking?.isCustomerBooking && appointment.customerBooking.email) {
     const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       try {
@@ -765,7 +778,7 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
   }
 
   // Send cancellation email to customer booking
-  if (appointment.customerBooking?.isCustomerBooking) {
+  if (appointment.customerBooking?.isCustomerBooking && appointment.customerBooking.email) {
     const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       try {
@@ -829,7 +842,7 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
   }
 
   // Send cancellation email to customer booking
-  if (appointment.customerBooking?.isCustomerBooking) {
+  if (appointment.customerBooking?.isCustomerBooking && appointment.customerBooking.email) {
     const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       try {

@@ -31,8 +31,8 @@ class CustomerBookingService {
   ): Promise<DuplicateCheckResult> {
     const normalizedFirstName = this.normalizeName(customerData.firstName);
     const normalizedLastName = this.normalizeName(customerData.lastName);
-    const normalizedEmail = customerData.email.toLowerCase().trim();
-    const normalizedPhone = this.normalizePhone(customerData.phone);
+    const normalizedEmail = String(customerData.email ?? '').toLowerCase().trim();
+    const normalizedPhone = this.normalizePhone(String(customerData.phone ?? '').trim());
 
     const query: any = {
       organizationId: customerData.organizationId,
@@ -47,46 +47,37 @@ class CustomerBookingService {
 
     const orConditions = [];
 
-    orConditions.push({
-      'customerBooking.email': normalizedEmail,
-      $expr: {
-        $and: [
-          { $eq: [{ $toLower: '$customerBooking.firstName' }, normalizedFirstName] },
-          { $eq: [{ $toLower: '$customerBooking.lastName' }, normalizedLastName] }
-        ]
-      }
-    });
+    if (normalizedEmail) {
+      orConditions.push({
+        'customerBooking.email': normalizedEmail,
+        $expr: {
+          $and: [
+            { $eq: [{ $toLower: '$customerBooking.firstName' }, normalizedFirstName] },
+            { $eq: [{ $toLower: '$customerBooking.lastName' }, normalizedLastName] }
+          ]
+        }
+      });
+    }
 
-    orConditions.push({
-      $expr: {
-        $and: [
-          { $eq: [{ $toLower: '$customerBooking.firstName' }, normalizedFirstName] },
-          { $eq: [{ $toLower: '$customerBooking.lastName' }, normalizedLastName] },
-          {
-            $eq: [
-              { $replaceAll: { input: '$customerBooking.phone', find: ' ', replacement: '' } },
-              normalizedPhone.replace(/[\-\(\)]/g, '')
-            ]
-          }
-        ]
-      }
-    });
+    if (normalizedPhone) {
+      const savedPhone = ['-', '(', ')'].reduce<Record<string, unknown>>(
+        (input, find) => ({ $replaceAll: { input, find, replacement: '' } }),
+        { $replaceAll: { input: '$customerBooking.phone', find: ' ', replacement: '' } }
+      );
+      orConditions.push({
+        $expr: {
+          $and: [
+            { $eq: [{ $toLower: '$customerBooking.firstName' }, normalizedFirstName] },
+            { $eq: [{ $toLower: '$customerBooking.lastName' }, normalizedLastName] },
+            { $eq: [savedPhone, normalizedPhone] }
+          ]
+        }
+      });
+    }
 
-    orConditions.push({
-      'customerBooking.email': normalizedEmail,
-      $expr: {
-        $and: [
-          { $eq: [{ $toLower: '$customerBooking.firstName' }, normalizedFirstName] },
-          { $eq: [{ $toLower: '$customerBooking.lastName' }, normalizedLastName] },
-          {
-            $eq: [
-              { $replaceAll: { input: '$customerBooking.phone', find: ' ', replacement: '' } },
-              normalizedPhone.replace(/[\-\(\)]/g, '')
-            ]
-          }
-        ]
-      }
-    });
+    if (!orConditions.length) {
+      return { isDuplicate: false };
+    }
 
     query.$or = orConditions;
 
@@ -275,22 +266,24 @@ class CustomerBookingService {
       return;
     }
 
-    const { email, phone, firstName, lastName } = appointment.customerBooking;
+    const { email, firstName, lastName } = appointment.customerBooking;
+    const sameCustomer: Record<string, unknown>[] = [
+      {
+        $expr: {
+          $and: [
+            { $eq: [{ $toLower: '$customerBooking.firstName' }, firstName.toLowerCase()] },
+            { $eq: [{ $toLower: '$customerBooking.lastName' }, lastName.toLowerCase()] }
+          ]
+        }
+      }
+    ];
+    if (email) sameCustomer.unshift({ 'customerBooking.email': email });
 
     // Find all bookings for this customer
     const allBookings = await Appointment.find({
+      organizationId: appointment.organizationId,
       'customerBooking.isCustomerBooking': true,
-      $or: [
-        { 'customerBooking.email': email },
-        {
-          $expr: {
-            $and: [
-              { $eq: [{ $toLower: '$customerBooking.firstName' }, firstName.toLowerCase()] },
-              { $eq: [{ $toLower: '$customerBooking.lastName' }, lastName.toLowerCase()] }
-            ]
-          }
-        }
-      ]
+      $or: sameCustomer
     }).select('_id');
 
     const bookingIds = allBookings.map(b => b._id);
