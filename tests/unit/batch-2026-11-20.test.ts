@@ -16,6 +16,7 @@ jest.mock('../../src/models/Payment.model', () => ({
   __esModule: true,
   default: {
     findOneAndUpdate: jest.fn(),
+    findByIdAndUpdate: jest.fn(),
     findById: jest.fn(),
     findOne: jest.fn(),
     find: jest.fn(),
@@ -185,5 +186,96 @@ describe('a payment is marked paid exactly once', () => {
       user: { email: 'customer@example.com' },
     });
     expect(error?.statusCode).toBe(409);
+  });
+});
+
+// ─── Leaving Stripe's payment page puts the invoice back under "To pay" ─────
+describe("leaving Stripe's payment page", () => {
+  const customer = { _id: 'customer-1', email: 'customer@example.com' };
+  const earlierPage = (overrides: Record<string, unknown> = {}) => ({
+    id: 'cs_old', status: 'open', payment_status: 'unpaid', payment_intent: null, ...overrides,
+  });
+  const leave = () => call(paymentController.leaveCheckout, { params: { id: 'pay-1' }, user: customer });
+
+  it('closes the open Stripe page and puts the invoice back under To pay', async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValueOnce(earlierPage());
+    stripe.checkout.sessions.expire.mockResolvedValueOnce(earlierPage({ status: 'expired' }));
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'pending' }));
+
+    const { res } = await leave();
+    expect(stripe.checkout.sessions.expire).toHaveBeenCalledWith('cs_old');
+    expect(payments.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: 'pay-1', status: 'processing' },
+      { $set: { status: 'pending' } },
+      { new: true },
+    );
+    expect(res.body.data.status).toBe('pending');
+  });
+
+  it('marks it paid instead when Stripe says the page was paid after all', async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValueOnce(
+      earlierPage({ status: 'complete', payment_status: 'paid', payment_intent: 'pi_1' }),
+    );
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded' }));
+
+    const { res } = await leave();
+    expect(res.body.data.status).toBe('succeeded');
+    expect(stripe.checkout.sessions.expire).not.toHaveBeenCalled();
+    expect(safeCreateNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("can't change another customer's invoice", async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ customerEmail: 'someone@example.com', stripeCheckoutSessionId: 'cs_old' }));
+    const { error } = await leave();
+    expect(error?.statusCode).toBe(403);
+    expect(stripe.checkout.sessions.retrieve).not.toHaveBeenCalled();
+  });
+
+  const pay = () =>
+    call(paymentController.createCustomerCheckoutSession, { body: { paymentId: 'pay-1' }, user: customer });
+
+  it('Pay closes the earlier page before opening a new one', async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old', stripeCustomerId: 'cus_1' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValueOnce(earlierPage());
+    stripe.checkout.sessions.expire.mockResolvedValueOnce(earlierPage({ status: 'expired' }));
+    stripe.checkout.sessions.create.mockResolvedValueOnce({ id: 'cs_new', url: 'https://checkout.example/cs_new' });
+
+    const { res } = await pay();
+    expect(stripe.checkout.sessions.expire.mock.invocationCallOrder[0])
+      .toBeLessThan(stripe.checkout.sessions.create.mock.invocationCallOrder[0]);
+    expect(stripe.checkout.sessions.create.mock.calls[0][0].cancel_url).toMatch(/status=cancelled&invoice=pay-1$/);
+    expect(res.body.data.url).toBe('https://checkout.example/cs_new');
+  });
+
+  it('Pay never opens a second page for an invoice that was already paid', async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValueOnce(
+      earlierPage({ status: 'complete', payment_status: 'paid', payment_intent: 'pi_1' }),
+    );
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'succeeded' }));
+
+    const { error } = await pay();
+    expect(error?.statusCode).toBe(409);
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it("says to try again if Stripe's earlier page couldn't be closed", async () => {
+    payments.findById.mockResolvedValueOnce(invoice({ stripeCheckoutSessionId: 'cs_old' }));
+    stripe.checkout.sessions.retrieve.mockResolvedValue(earlierPage());
+    stripe.checkout.sessions.expire.mockRejectedValueOnce(new Error('Stripe is busy'));
+
+    const { error } = await pay();
+    expect(error?.statusCode).toBe(409);
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it("puts the invoice back when Stripe's page expires unpaid (only its latest page)", async () => {
+    await stripeUpdate({ type: 'checkout.session.expired', data: { object: { id: 'cs_old', metadata: { paymentId: 'pay-1' } } } });
+    expect(payments.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: 'pay-1', stripeCheckoutSessionId: 'cs_old', status: 'processing' },
+      { $set: { status: 'pending' } },
+    );
   });
 });

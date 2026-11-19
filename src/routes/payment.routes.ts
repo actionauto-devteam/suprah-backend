@@ -18,6 +18,7 @@ router.post('/create-customer-checkout', paymentController.createCustomerCheckou
 router.get('/checkout-session/:sessionId', paymentController.getCheckoutSessionStatus);
 
 router.post('/:id/cancel-mine', paymentController.cancelMyPayment);
+router.post('/:id/left-checkout', paymentController.leaveCheckout);
 
 // Everything below works on the dealership's own payment records (the list,
 // totals, sending requests, refunds), so only its staff may use it. Customers

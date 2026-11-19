@@ -476,7 +476,8 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
       source: payment.source || 'manual',
     },
     success_url: `${CUSTOMER_APP_URL}/customer/payments?status=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${CUSTOMER_APP_URL}/customer/payments?status=cancelled`,
+    // Coming back without paying puts this invoice back under "To pay".
+    cancel_url: `${CUSTOMER_APP_URL}/customer/payments?status=cancelled&invoice=${payment._id.toString()}`,
   });
 
   await Payment.findByIdAndUpdate(payment._id, {
@@ -486,6 +487,39 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
   });
 
   return session;
+}
+
+// ─── The invoice's earlier Stripe payment page ────────────────────────────────
+/**
+ * Before a new Stripe payment page opens, or when the customer comes back
+ * without paying, check the invoice's earlier page with Stripe: if it was paid
+ * the invoice is marked paid (once); if it's still open it is closed. So the
+ * same invoice can never be paid twice. Returns what was found.
+ */
+async function settleEarlierCheckout(payment: any): Promise<'paid' | 'closed' | 'none'> {
+  if (!payment.stripeCheckoutSessionId) return 'none';
+  let session = await stripe.checkout.sessions.retrieve(payment.stripeCheckoutSessionId);
+  if (session.status === 'open') {
+    try {
+      session = await stripe.checkout.sessions.expire(session.id);
+    } catch {
+      // It may have been paid at this very moment: look again.
+      session = await stripe.checkout.sessions.retrieve(session.id);
+    }
+  }
+  if (session.payment_status === 'paid') {
+    const piId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+    const claimed = await claimPaid(
+      { _id: payment._id },
+      { stripeCheckoutSessionId: session.id, ...(piId ? { stripePaymentIntentId: piId } : {}) },
+    );
+    if (claimed) await afterPaid(claimed, 'STRIPE_CHECKOUT_CHECK');
+    return 'paid';
+  }
+  if (session.status === 'open') {
+    throw new ApiError(409, 'Your earlier payment page is still open. Please try again in a moment.');
+  }
+  return 'closed';
 }
 
 // ─── Customer: Create Checkout Session (hosted Stripe Checkout) ───────────────
@@ -503,9 +537,40 @@ const createCustomerCheckoutSession = asyncHandler(async (req: Request, res: Res
   }
   if (payment.status === 'succeeded') throw new ApiError(400, 'This invoice has already been paid');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This invoice has been cancelled');
+  if (payment.status === 'refunded') throw new ApiError(400, 'This invoice has been refunded');
+
+  // A payment page was opened before: make sure it wasn't paid, and close it.
+  if ((await settleEarlierCheckout(payment)) === 'paid') {
+    throw new ApiError(409, 'This invoice was already paid. Refresh to see your receipt.');
+  }
 
   const session = await buildCheckoutSession(payment);
   res.json(new ApiResponse(200, { url: session.url, sessionId: session.id }, 'Checkout session created'));
+});
+
+// ─── Customer: came back from Stripe's page without paying ────────────────────
+const leaveCheckout = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?.email) throw new ApiError(401, 'User not authenticated');
+
+  const payment = await Payment.findById(req.params.id);
+  if (!payment) throw new ApiError(404, 'Invoice not found');
+  if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
+    throw new ApiError(403, 'You are not authorized to change this invoice');
+  }
+  if (payment.status !== 'processing' || !payment.stripeCheckoutSessionId) {
+    return res.json(new ApiResponse(200, { status: payment.status }, 'Nothing to change'));
+  }
+
+  if ((await settleEarlierCheckout(payment)) === 'paid') {
+    return res.json(new ApiResponse(200, { status: 'succeeded' }, 'This invoice was paid'));
+  }
+  const back = await Payment.findOneAndUpdate(
+    { _id: payment._id, status: 'processing' },
+    { $set: { status: 'pending' } },
+    { new: true },
+  );
+  res.json(new ApiResponse(200, { status: back?.status ?? 'pending' }, 'Invoice is back under To pay'));
 });
 
 // ─── Customer: poll a checkout session after returning from Stripe ────────────
@@ -821,6 +886,18 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
       break;
     }
 
+    // Stripe closed a payment page nobody paid on (it expires after 24 hours):
+    // if it was the invoice's latest page, the invoice goes back under "To pay".
+    case 'checkout.session.expired': {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const paymentId = session.metadata?.paymentId;
+      await Payment.findOneAndUpdate(
+        { ...(paymentId ? { _id: paymentId } : {}), stripeCheckoutSessionId: session.id, status: 'processing' },
+        { $set: { status: 'pending' } },
+      );
+      break;
+    }
+
     case 'payment_intent.succeeded': {
       const pi = event.data.object as Stripe.PaymentIntent;
       const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : pi.latest_charge?.id;
@@ -1130,5 +1207,6 @@ export default {
   // NEW — hosted Stripe Checkout
   createCustomerCheckoutSession,
   getCheckoutSessionStatus,
+  leaveCheckout,
   cancelMyPayment,
 };
