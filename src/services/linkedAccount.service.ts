@@ -6,6 +6,13 @@ import LinkedAccount, {
 } from "../models/LinkedAccount";
 import User from "../models/User.model";
 import { wiseClient } from "../lib/wise-client";
+import { ApiError } from "../utils/ApiError";
+import logger from "../utils/logger";
+import {
+  WISE_NOT_SET_UP_MESSAGE,
+  wiseSettingsFrom,
+  wiseSetupProblem,
+} from "../utils/wiseSettings";
 
 
 const STATE_SECRET =
@@ -54,6 +61,23 @@ export function verifyState(
 
 export const frontendUrl = () => FRONTEND_URL;
 
+/* ─────────────────────────── Wise setup ─────────────────────────────────── */
+/**
+ * The message staff see when Wise can't be linked on this site, or null when
+ * it can. The exact reason (which setting) goes to the server log only.
+ */
+export function wiseLinkProblem(): string | null {
+  const problem = wiseSetupProblem(wiseSettingsFrom(process.env));
+  if (!problem) return null;
+  logger.warn({ problem }, "Wise can't be linked on this site");
+  return WISE_NOT_SET_UP_MESSAGE;
+}
+
+function requireWiseSetup() {
+  if (wiseLinkProblem()) throw new ApiError(409, WISE_NOT_SET_UP_MESSAGE);
+  return wiseSettingsFrom(process.env);
+}
+
 /* ─────────────────────────── Authorize URL ──────────────────────────────── */
 export function buildAuthorizeUrl(
   provider: LinkedProvider,
@@ -62,10 +86,10 @@ export function buildAuthorizeUrl(
   if (provider !== "wise") {
     throw new Error(`Unsupported provider: ${provider}`);
   }
-  const base = process.env.WISE_OAUTH_URL || "https://sandbox.transferwise.tech";
-  const url = new URL(`${base}/oauth/authorize`);
-  url.searchParams.set("client_id", process.env.WISE_CLIENT_ID || "");
-  url.searchParams.set("redirect_uri", process.env.WISE_REDIRECT_URI || "");
+  const settings = requireWiseSetup();
+  const url = new URL(`${settings.oauthUrl}/oauth/authorize`);
+  url.searchParams.set("client_id", settings.clientId);
+  url.searchParams.set("redirect_uri", settings.redirectUri);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("state", state);
   return url.toString();
@@ -166,6 +190,7 @@ export async function connectProvider(
   }
 
   // 1. Exchange code
+  requireWiseSetup();
   const tokens = await wiseClient.exchangeCode(code);
 
   // 2. Profile + balances
@@ -343,6 +368,7 @@ export default {
   signState,
   verifyState,
   frontendUrl,
+  wiseLinkProblem,
   buildAuthorizeUrl,
   connectProvider,
   getStatus,
