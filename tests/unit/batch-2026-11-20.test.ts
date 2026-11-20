@@ -21,12 +21,40 @@ jest.mock('../../src/models/Payment.model', () => ({
     findOne: jest.fn(),
     find: jest.fn(),
     aggregate: jest.fn(),
+    countDocuments: jest.fn(),
   },
 }));
 jest.mock('../../src/models/User.model', () => ({
   __esModule: true,
-  default: { findOne: jest.fn(() => ({ select: () => Promise.resolve(null) })) },
+  default: {
+    findOne: jest.fn(() => ({ select: () => Promise.resolve(null) })),
+    find: jest.fn(),
+    countDocuments: jest.fn(),
+  },
 }));
+// The super admin screens' searches (admin.controller) load these.
+jest.mock('../../src/models/Organization.model', () => ({
+  __esModule: true,
+  default: { find: jest.fn(), countDocuments: jest.fn(), findById: jest.fn() },
+}));
+jest.mock('../../src/models/AuditLog.model', () => ({
+  __esModule: true,
+  default: { find: jest.fn(), countDocuments: jest.fn() },
+}));
+jest.mock('../../src/models/SystemLog.model', () => ({
+  SystemLog: { find: jest.fn(), countDocuments: jest.fn() },
+}));
+jest.mock('../../src/models/SyncLog.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/models/DriverProfile.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/models/DriverTrackingDevice.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/utils/metrics', () => ({
+  metrics: {}, getPercentile: jest.fn(), driverTrackerMetrics: {}, connectionMetrics: {},
+}));
+jest.mock('../../src/services/traccar.service', () => ({ traccarHealthSnapshot: jest.fn() }));
+jest.mock('../../src/services/googleGeocoding.service', () => ({ googleGeocodingHealthSnapshot: jest.fn() }));
+jest.mock('../../src/services/activeOrganizations.service', () => ({ invalidateActiveOrganizations: jest.fn() }));
+jest.mock('../../src/utils/cache.util', () => ({ invalidateUserCache: jest.fn() }));
+jest.mock('pidusage', () => jest.fn());
 jest.mock('../../src/services/referral.service', () => ({
   __esModule: true,
   default: { processPaymentReward: jest.fn() },
@@ -36,7 +64,9 @@ jest.mock('../../src/services/activity.service', () => ({
   __esModule: true,
   default: { createActivity: jest.fn(() => Promise.resolve()), logFinancialActivity: jest.fn() },
 }));
-jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null, emitToUser: jest.fn() }));
+jest.mock('../../src/utils/socketEmitter', () => ({
+  getSocketIO: () => null, emitToUser: jest.fn(), disconnectUserSockets: jest.fn(),
+}));
 jest.mock('../../src/socket/supraspace.socket', () => ({ getIO: () => null }));
 jest.mock('../../src/utils/safeNotification', () => ({
   safeCreateNotification: jest.fn(),
@@ -353,5 +383,85 @@ describe('card disputes', () => {
     payments.aggregate.mockClear();
     await call(paymentController.getBillingBalance, { orgId: 'org-1' });
     expect(payments.aggregate.mock.calls[0][0][1].$group.balance).toEqual({ $sum: KEPT_AMOUNT });
+  });
+});
+
+// ─── Follow-up fixes (2026-11-20) ────────────────────────────────────────────
+import * as adminController from '../../src/controllers/admin.controller';
+import Organization from '../../src/models/Organization.model';
+import User from '../../src/models/User.model';
+import AuditLog from '../../src/models/AuditLog.model';
+import { SystemLog } from '../../src/models/SystemLog.model';
+
+/** A stand-in database query: any chain of sort/skip/limit/select/populate/lean, answering `rows`. */
+function query(rows: unknown[] = []) {
+  const q: any = {};
+  for (const step of ['sort', 'skip', 'limit', 'select', 'populate', 'lean']) q[step] = jest.fn(() => q);
+  q.then = (done: (v: unknown) => unknown, failed: (e: unknown) => unknown) => Promise.resolve(rows).then(done, failed);
+  return q;
+}
+
+describe('searches treat typed text as plain text', () => {
+  const tricky = 'a(b+';
+
+  it('the Payments search and payment-method filter match special characters literally', async () => {
+    payments.find.mockReturnValue(query());
+    payments.countDocuments.mockResolvedValue(0);
+    payments.aggregate.mockResolvedValue([]);
+
+    const { error } = await call(paymentController.getPayments, {
+      orgId: 'org-1',
+      query: { search: `  ${tricky} `, paymentMethod: 'card(' },
+    });
+
+    expect(error).toBeUndefined();
+    const filter = payments.find.mock.calls.at(-1)[0];
+    expect(filter.organizationId).toBe('org-1');
+    const byName: RegExp = filter.$or[0].customerName;
+    expect(byName.test('Invoice for a(b+ c')).toBe(true);
+    expect(byName.test('aab')).toBe(false);
+    expect(filter.paymentMethod.test('Card(visa)')).toBe(true);
+  });
+
+  it('a search that is only spaces is ignored', async () => {
+    payments.find.mockReturnValue(query());
+    payments.countDocuments.mockResolvedValue(0);
+    payments.aggregate.mockResolvedValue([]);
+    await call(paymentController.getPayments, { orgId: 'org-1', query: { search: '   ' } });
+    expect(payments.find.mock.calls.at(-1)[0].$or).toBeUndefined();
+  });
+
+  const literal = (pattern: string) => new RegExp(pattern, 'i');
+
+  it('super admin Organizations and Users searches', async () => {
+    (Organization.find as jest.Mock).mockReturnValue(query());
+    (Organization.countDocuments as jest.Mock).mockResolvedValue(0);
+    (User.find as jest.Mock).mockReturnValue(query());
+    (User.countDocuments as jest.Mock).mockResolvedValue(0);
+
+    await call(adminController.getAllOrganizations, { query: { search: tricky } });
+    await call(adminController.getAllUsers, { query: { search: tricky } });
+
+    const orgFilter = (Organization.find as jest.Mock).mock.calls.at(-1)[0];
+    expect(literal(orgFilter.name.$regex).test('Dealer a(b+')).toBe(true);
+    const userFilter = (User.find as jest.Mock).mock.calls.at(-1)[0];
+    expect(literal(userFilter.$or[1].email.$regex).test('a(b+@example.com')).toBe(true);
+  });
+
+  it('super admin Logs and Audit logs searches', async () => {
+    (SystemLog.find as jest.Mock).mockReturnValue(query());
+    (SystemLog.countDocuments as jest.Mock).mockResolvedValue(0);
+    (AuditLog.find as jest.Mock).mockReturnValue(query());
+    (AuditLog.countDocuments as jest.Mock).mockResolvedValue(0);
+
+    const longText = 'payment failed (card declined) + retry';
+    const { error } = await call(adminController.getSystemLogs, { query: { search: longText } });
+    await call(adminController.getAuditLogs, { query: { search: tricky } });
+
+    expect(error).toBeUndefined();
+    const logFilter = (SystemLog.find as jest.Mock).mock.calls.at(-1)[0];
+    expect(literal(logFilter.$or[2].message.$regex).test(`x ${longText} y`)).toBe(true);
+    const auditFilter = (AuditLog.find as jest.Mock).mock.calls.at(-1)[0];
+    expect(literal(auditFilter.reason.$regex).test('reason a(b+')).toBe(true);
   });
 });

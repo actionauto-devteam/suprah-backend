@@ -23,6 +23,7 @@ import { isValidTier, TIER_SEAT_LIMITS, TIER_PRICES, TIER_LABELS } from '../conf
 import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
 import { disconnectUserSockets } from '../utils/socketEmitter';
 import { invalidateUserCache } from '../utils/cache.util';
+import { cleanSearchText, escapeSearchRegex } from '../utils/searchText';
 
 export const getAllOrganizations = asyncHandler(
   async (req: Request, res: Response) => {
@@ -32,8 +33,10 @@ export const getAllOrganizations = asyncHandler(
     const skip = (pageNum - 1) * limitNum;
 
     const filter: any = {};
-    if (search) {
-      filter.name = { $regex: search, $options: "i" };
+    // Typed text is matched as plain text, never run as a search pattern (2026-11-20).
+    const searchText = cleanSearchText(search, 100);
+    if (searchText) {
+      filter.name = { $regex: escapeSearchRegex(searchText), $options: "i" };
     }
 
     const [orgs, total] = await Promise.all([
@@ -72,10 +75,12 @@ export const getAllUsers = asyncHandler(async (req: Request, res: Response) => {
   const skip = (pageNum - 1) * limitNum;
 
   const filter: any = {};
-  if (search) {
+  const searchText = cleanSearchText(search, 100);
+  if (searchText) {
+    const pattern = escapeSearchRegex(searchText);
     filter.$or = [
-      { name: { $regex: search, $options: "i" } },
-      { email: { $regex: search, $options: "i" } },
+      { name: { $regex: pattern, $options: "i" } },
+      { email: { $regex: pattern, $options: "i" } },
     ];
   }
 
@@ -205,14 +210,13 @@ export const getSystemLogs = asyncHandler(async (req: Request, res: Response) =>
     if (to) filter.timestamp.$lte = new Date(to as string);
   }
 
-  if (search) {
-    const searchTerm = search as string;
-
+  const searchTerm = cleanSearchText(search, 200);
+  if (searchTerm) {
     if (searchTerm.includes('_') || searchTerm.length > 20) {
       filter.$or = [
         { 'req.id': searchTerm },
         { 'req.userId': searchTerm },
-        { message: { $regex: searchTerm, $options: 'i' } }
+        { message: { $regex: escapeSearchRegex(searchTerm), $options: 'i' } }
       ];
     } else {
       filter.$text = { $search: searchTerm };
@@ -620,8 +624,9 @@ export const getAuditLogs = asyncHandler(async (req: Request, res: Response) => 
   if (entityType) filter.entityType = entityType;
   if (action) filter.action = action;
   if (userId) filter.performedBy = userId;
-  if (search) {
-    filter.reason = { $regex: search, $options: "i" };
+  const searchText = cleanSearchText(search, 100);
+  if (searchText) {
+    filter.reason = { $regex: escapeSearchRegex(searchText), $options: "i" };
   }
 
   const [logs, total] = await Promise.all([

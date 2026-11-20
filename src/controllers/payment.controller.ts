@@ -32,6 +32,7 @@ import {
   keptAmount,
 } from '../utils/paymentDispute';
 import { fillMonthlyRevenue, lastMonths } from '../utils/paymentTrend';
+import { cleanSearchText, escapeSearchRegex } from '../utils/searchText';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-02-25.clover',
@@ -293,8 +294,11 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
   if (status && status !== 'all') filter.status = status;
   if (source && source !== 'all') filter.source = source;
 
-  if (search) {
-    const regex = new RegExp(search as string, 'i');
+  // Typed text is matched as plain text: characters like ( * + ? are searched
+  // for, not run as a search pattern (2026-11-20).
+  const searchText = cleanSearchText(search, 100);
+  if (searchText) {
+    const regex = new RegExp(escapeSearchRegex(searchText), 'i');
     filter.$or = [
       { customerName: regex },
       { customerEmail: regex },
@@ -330,7 +334,8 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  if (paymentMethod) filter.paymentMethod = new RegExp(paymentMethod as string, 'i');
+  const methodText = cleanSearchText(paymentMethod, 40);
+  if (methodText) filter.paymentMethod = new RegExp(escapeSearchRegex(methodText), 'i');
 
   const [payments, total, summaryRows] = await Promise.all([
     Payment.find(filter)
