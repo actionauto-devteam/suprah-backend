@@ -465,3 +465,45 @@ describe('searches treat typed text as plain text', () => {
     expect(literal(auditFilter.reason.$regex).test('reason a(b+')).toBe(true);
   });
 });
+
+describe("an invoice's status can't be set by hand", () => {
+  it('refuses to change the status and pays no referral reward', async () => {
+    const draft = invoice({ status: 'pending' });
+    payments.findOne.mockResolvedValue(draft);
+    (ReferralService.processPaymentReward as jest.Mock).mockClear();
+
+    const { error } = await call(paymentController.updatePayment, {
+      orgId: 'org-1', params: { id: 'pay-1' }, body: { status: 'succeeded' },
+    });
+
+    expect(error?.statusCode).toBe(400);
+    expect(draft.status).toBe('pending');
+    expect(draft.save).not.toHaveBeenCalled();
+    expect(ReferralService.processPaymentReward).not.toHaveBeenCalled();
+  });
+
+  it('still saves notes and the due date (sending the current status back is fine)', async () => {
+    const draft: any = invoice({ status: 'pending' });
+    payments.findOne.mockResolvedValue(draft);
+
+    const { error } = await call(paymentController.updatePayment, {
+      orgId: 'org-1', params: { id: 'pay-1' },
+      body: { status: 'pending', notes: 'Call before Friday', dueDate: '2026-12-01' },
+    });
+
+    expect(error).toBeUndefined();
+    expect(draft.notes).toBe('Call before Friday');
+    expect(draft.dueDate.toISOString().slice(0, 10)).toBe('2026-12-01');
+    expect(draft.save).toHaveBeenCalled();
+  });
+
+  it('turns away a due date that is not a date', async () => {
+    const draft = invoice({ status: 'pending' });
+    payments.findOne.mockResolvedValue(draft);
+    const { error } = await call(paymentController.updatePayment, {
+      orgId: 'org-1', params: { id: 'pay-1' }, body: { dueDate: 'next week-ish' },
+    });
+    expect(error?.statusCode).toBe(400);
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+});

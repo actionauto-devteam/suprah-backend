@@ -803,26 +803,28 @@ const updatePayment = asyncHandler(async (req: Request, res: Response) => {
   const payment = await Payment.findOne({ _id: id, organizationId: orgId });
   if (!payment) throw new ApiError(404, 'Payment not found');
 
-  const validStatuses = ['pending', 'processing', 'succeeded', 'failed', 'refunded', 'cancelled'];
-  const previousStatus = payment.status;
-
-  if (status !== undefined) {
-    if (!validStatuses.includes(status)) throw new ApiError(400, `Invalid status. Must be one of: ${validStatuses.join(', ')}`);
-    payment.status = status;
-    if (status === 'succeeded' && !payment.paidAt) payment.paidAt = new Date();
+  // Only the notes and the due date are edited here (2026-11-20). An invoice is
+  // marked paid by Stripe, and refunds and cancellations have their own
+  // actions, so a status can't be set by hand (it also paid referral rewards).
+  if (status !== undefined && status !== payment.status) {
+    throw new ApiError(
+      400,
+      "An invoice's status can't be changed here. Stripe marks it paid when the customer pays, and Refund and Cancel have their own buttons.",
+    );
   }
-  if (notes !== undefined) payment.notes = notes;
-  if (dueDate !== undefined) payment.dueDate = dueDate ? new Date(dueDate) : undefined;
+  if (notes !== undefined && notes !== null && typeof notes !== 'string') {
+    throw new ApiError(400, 'Notes must be text.');
+  }
+  let due: Date | undefined;
+  if (dueDate) {
+    due = new Date(dueDate);
+    if (Number.isNaN(due.getTime())) throw new ApiError(400, 'Enter a valid due date.');
+  }
+
+  if (notes !== undefined) payment.notes = notes ?? undefined;
+  if (dueDate !== undefined) payment.dueDate = due;
 
   await payment.save();
-
-  if (previousStatus !== 'succeeded' && payment.status === 'succeeded') {
-    try {
-      const performingUserId = (req.user as IUser)?._id?.toString();
-      await ReferralService.processPaymentReward(payment, performingUserId || 'MANUAL');
-    } catch (e) { logger.error({ err: e }, '[Referral] updatePayment'); }
-    await broadcastPaymentSuccess(payment);
-  }
 
   res.json(new ApiResponse(200, payment, 'Payment updated successfully'));
 });
