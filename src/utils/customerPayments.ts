@@ -11,7 +11,8 @@ export function isAwaitingPayment(status?: string | null): boolean {
 
 /**
  * The invoice details a customer's own screens show (2026-11-20): what they
- * owe, the items, the status, the dates, the receipt and any refund. Staff
+ * owe, the items, the status, the dates, the receipt, any refund and the
+ * dealership's note to them (customerNote). Staff
  * notes, who sent it, and Stripe's and Suprah's internal references stay with
  * the dealership.
  */
@@ -34,6 +35,7 @@ export const CUSTOMER_INVOICE_FIELDS = [
   'refundedAt',
   'createdAt',
   'aftermarketProductId',
+  'customerNote',
   'customerName',
   'customerEmail',
 ] as const;

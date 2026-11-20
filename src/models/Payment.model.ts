@@ -45,6 +45,8 @@ export interface IPayment extends Document {
 
   failureReason?: string;
   notes?: string;
+  /** Shown to the customer on their invoice; `notes` stay with the dealership (2026-11-20). */
+  customerNote?: string;
   paidAt?: Date;
   dueDate?: Date;
 
@@ -130,6 +132,7 @@ const PaymentSchema: Schema<IPayment> = new Schema(
 
     failureReason: { type: String, trim: true },
     notes: { type: String, trim: true },
+    customerNote: { type: String, trim: true, maxlength: 1000 },
     paidAt: { type: Date },
     dueDate: { type: Date },
     refundedAmount: { type: Number, min: 0 },

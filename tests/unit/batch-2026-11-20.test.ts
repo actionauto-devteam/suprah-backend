@@ -623,3 +623,55 @@ describe('the Wise link check has no built-in key', () => {
     expect(linkedAccountService.verifyState(forged)).toBeNull();
   });
 });
+
+import { customerNoteFrom, invoiceLinesFrom, taxRateFrom } from '../../src/utils/invoiceLines';
+
+describe('invoice lines: items and discounts', () => {
+  it('an item costs quantity × price and a discount takes its amount off', () => {
+    const result = invoiceLinesFrom([
+      { label: ' Carwash package ', kind: 'product', quantity: 2, unitPrice: 20 },
+      { label: 'Service fee', kind: 'fee', quantity: 1, unitPrice: 4.995 },
+      { label: '', kind: 'discount', quantity: 1, unitPrice: 5 },
+    ]);
+    expect(result).toEqual({
+      ok: true,
+      subtotal: 40,
+      lines: [
+        { label: 'Carwash package', kind: 'product', quantity: 2, unitPrice: 20, lineTotal: 40 },
+        { label: 'Service fee', kind: 'fee', quantity: 1, unitPrice: 5, lineTotal: 5 },
+        { label: 'Discount', kind: 'discount', quantity: 1, unitPrice: 5, lineTotal: -5 },
+      ],
+    });
+  });
+
+  it('turns away lines that would make a confusing or wrong invoice', () => {
+    expect(invoiceLinesFrom([])).toEqual({ ok: false, message: 'Add at least one item to the invoice.' });
+    expect(invoiceLinesFrom([{ label: 'Wash', quantity: 0, unitPrice: 20 }])).toEqual({
+      ok: false, message: 'Line 1: enter a quantity greater than 0.',
+    });
+    // A negative price used to slip a hidden discount onto an item line.
+    expect(invoiceLinesFrom([{ label: 'Wash', quantity: 1, unitPrice: -20 }])).toEqual({
+      ok: false, message: 'Line 1: enter a price of $0 or more.',
+    });
+    expect(invoiceLinesFrom([{ label: 'Wash', kind: 'gift', quantity: 1, unitPrice: 1 }])).toEqual({
+      ok: false, message: 'Line 1 has an unknown type.',
+    });
+    expect(invoiceLinesFrom([{ label: 'Wash', quantity: 1, unitPrice: 1_000_000 }]).ok).toBe(false);
+  });
+
+  it('tax must be 0–100% and the note to the customer is text up to 1,000 characters', () => {
+    expect(taxRateFrom('8.25')).toBe(8.25);
+    expect(taxRateFrom(undefined)).toBe(0);
+    expect(taxRateFrom(-1)).toBeNull();
+    expect(taxRateFrom(101)).toBeNull();
+    expect(customerNoteFrom('  Pick up after 3pm.  ')).toBe('Pick up after 3pm.');
+    expect(customerNoteFrom('   ')).toBeUndefined();
+    expect(customerNoteFrom({ $ne: null })).toBeNull();
+    expect(customerNoteFrom('x'.repeat(1001))).toBeNull();
+  });
+
+  it("the customer receives the dealership's note to them, but not its internal notes", () => {
+    const view = customerInvoiceView({ amount: 20, customerNote: 'Pick up after 3pm.', notes: 'VIP, call first' });
+    expect(view).toEqual({ amount: 20, customerNote: 'Pick up after 3pm.' });
+  });
+});
