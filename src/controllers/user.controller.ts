@@ -68,24 +68,46 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, user, 'User profile fetched successfully'));
 });
 
+/** The account fields a person can change on their own profile. */
+export const PROFILE_UPDATE_FIELDS = [
+    'name', 'avatar', 'theme', 'onlineStatus', 'customStatus', 'personalInfo', 'signatureDataUrl',
+] as const;
+
+/** Never sent back after a profile change. */
+const PRIVATE_ACCOUNT_FIELDS =
+    '-password -passwordHash -otpCode -otpExpiresAt -passwordResetToken -passwordResetExpires';
+
+/** Text fields must be text; photo, status and signature may also be cleared; personal info is an object. */
+export function profileValueOk(field: string, value: unknown): boolean {
+    if (field === 'personalInfo') return value !== null && typeof value === 'object' && !Array.isArray(value);
+    if (value === null) return field === 'avatar' || field === 'customStatus' || field === 'signatureDataUrl';
+    return typeof value === 'string';
+}
+
 const updateProfile = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
 
-    const sensitiveFields = [
-        'password', 'email', 'role', 'googleId', 'emailVerified',
-        'isApproved', 'onboardingCompleted', 'otpCode', 'otpExpiresAt',
-        'organizationId', 'organizationRole', 'dispatcherOrganizationIds', 'isActive', 'lastLogin',
-        '_id', '__v', 'createdAt', 'updatedAt'
-    ];
-
-    const safeData = { ...req.body };
-    sensitiveFields.forEach(field => delete safeData[field]);
+    // Only these fields can be changed here (2026-11-21). Everything else on
+    // the account (wallet balance and earnings, payout account, referral code,
+    // role and permissions, suspension, monitoring and password fields) is
+    // ignored, so nobody can change them on their own account. The website
+    // uses this route to save the Create Load signature; the main profile
+    // route (/api/profile) allows the same other fields.
+    const safeData: Record<string, unknown> = {};
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    for (const field of PROFILE_UPDATE_FIELDS) {
+        if (body[field] === undefined) continue;
+        if (!profileValueOk(field, body[field])) {
+            throw new ApiError(400, "That profile change isn't valid. Please refresh and try again.");
+        }
+        safeData[field] = body[field];
+    }
 
     const user = await User.findByIdAndUpdate(
         userId,
         { $set: safeData },
         { new: true, runValidators: true }
-    ).select('-password');
+    ).select(PRIVATE_ACCOUNT_FIELDS);
 
     if (user) {
         await activityService.logProfileUpdate(
