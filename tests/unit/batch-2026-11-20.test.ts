@@ -588,3 +588,38 @@ describe('customers receive only the invoice details their screens show', () => 
     expect(customerInvoiceView(null)).toBeNull();
   });
 });
+
+import linkedAccountService from '../../src/services/linkedAccount.service';
+import { WISE_NOT_SET_UP_MESSAGE, wiseSettingsFrom, wiseSetupProblem } from '../../src/utils/wiseSettings';
+
+describe('the Wise link check has no built-in key', () => {
+  const saved = process.env.LINKED_ACCOUNT_STATE_SECRET;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.LINKED_ACCOUNT_STATE_SECRET;
+    else process.env.LINKED_ACCOUNT_STATE_SECRET = saved;
+  });
+
+  it('without the setting, Wise counts as not set up and no link check can be made or accepted', () => {
+    delete process.env.LINKED_ACCOUNT_STATE_SECRET;
+    const settings = wiseSettingsFrom({
+      NODE_ENV: 'development', WISE_CLIENT_ID: 'c', WISE_CLIENT_SECRET: 's', WISE_REDIRECT_URI: 'http://localhost/cb',
+    });
+    expect(wiseSetupProblem(settings)).toBe('missing Wise settings: LINKED_ACCOUNT_STATE_SECRET');
+    expect(() => linkedAccountService.signState('user-1', 'wise')).toThrow(WISE_NOT_SET_UP_MESSAGE);
+
+    // A check made with some other key (for example one copied from old code) is turned away.
+    process.env.LINKED_ACCOUNT_STATE_SECRET = 'someone-elses-key';
+    const forged = linkedAccountService.signState('user-2', 'wise');
+    delete process.env.LINKED_ACCOUNT_STATE_SECRET;
+    expect(linkedAccountService.verifyState(forged)).toBeNull();
+  });
+
+  it('with the setting, a link check made here is accepted and one signed with another key is not', () => {
+    process.env.LINKED_ACCOUNT_STATE_SECRET = 'other-key';
+    const forged = linkedAccountService.signState('user-2', 'wise');
+    process.env.LINKED_ACCOUNT_STATE_SECRET = 'this-server-key';
+    const state = linkedAccountService.signState('user-1', 'wise');
+    expect(linkedAccountService.verifyState(state)).toEqual({ userId: 'user-1', provider: 'wise' });
+    expect(linkedAccountService.verifyState(forged)).toBeNull();
+  });
+});

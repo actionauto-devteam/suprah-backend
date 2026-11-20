@@ -356,11 +356,13 @@ describe('Link Wise setup', () => {
     WISE_CLIENT_ID: 'test-client',
     WISE_CLIENT_SECRET: 'test-secret',
     WISE_REDIRECT_URI: 'http://localhost:5000/api/linked-accounts/wise/callback',
+    LINKED_ACCOUNT_STATE_SECRET: 'test-link-check-key',
   };
   const saved = { ...process.env };
   beforeEach(() => {
     jest.spyOn(logger, 'warn').mockImplementation(() => undefined as any);
     for (const key of Object.keys(process.env)) if (key.startsWith('WISE_')) delete process.env[key];
+    delete process.env.LINKED_ACCOUNT_STATE_SECRET;
   });
   afterEach(() => {
     process.env = { ...saved };
@@ -375,7 +377,7 @@ describe('Link Wise setup', () => {
 
   it('names the missing or retired settings without their values', () => {
     expect(wiseSetupProblem(wiseSettingsFrom({ NODE_ENV: 'development' }))).toBe(
-      'missing Wise settings: WISE_CLIENT_ID, WISE_CLIENT_SECRET, WISE_REDIRECT_URI',
+      'missing Wise settings: WISE_CLIENT_ID, WISE_CLIENT_SECRET, WISE_REDIRECT_URI, LINKED_ACCOUNT_STATE_SECRET',
     );
     const retired = wiseSettingsFrom({ ...fakeWise, WISE_OAUTH_URL: 'https://sandbox.transferwise.tech' });
     expect(wiseSetupProblem(retired)).toBe("WISE_OAUTH_URL points to Wise's retired test site (sandbox.transferwise.tech)");

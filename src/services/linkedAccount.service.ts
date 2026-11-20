@@ -15,8 +15,15 @@ import {
 } from "../utils/wiseSettings";
 
 
-const STATE_SECRET =
-  process.env.LINKED_ACCOUNT_STATE_SECRET || "dev-insecure-state-secret-change-me";
+/**
+ * The key that signs the Wise link check, from the server setting
+ * LINKED_ACCOUNT_STATE_SECRET. There is no built-in value (2026-11-20): without
+ * the setting, Wise can't be linked, so a link check can't be made by anyone
+ * who has a copy of the code.
+ */
+function stateSecret(): string {
+  return wiseSettingsFrom(process.env).stateSecret;
+}
 const STATE_TTL_MS = 10 * 60 * 1000;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
@@ -27,9 +34,11 @@ export function signState(userId: string, provider: LinkedProvider): string {
     n: crypto.randomBytes(8).toString("hex"),
     e: Date.now() + STATE_TTL_MS,
   });
+  const secret = stateSecret();
+  if (!secret) throw new ApiError(409, WISE_NOT_SET_UP_MESSAGE);
   const b64 = Buffer.from(payload).toString("base64url");
   const sig = crypto
-    .createHmac("sha256", STATE_SECRET)
+    .createHmac("sha256", secret)
     .update(b64)
     .digest("base64url");
   return `${b64}.${sig}`;
@@ -41,8 +50,10 @@ export function verifyState(
   try {
     const [b64, sig] = state.split(".");
     if (!b64 || !sig) return null;
+    const secret = stateSecret();
+    if (!secret) return null;
     const expected = crypto
-      .createHmac("sha256", STATE_SECRET)
+      .createHmac("sha256", secret)
       .update(b64)
       .digest("base64url");
     if (
