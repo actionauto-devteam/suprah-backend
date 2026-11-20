@@ -31,6 +31,12 @@ export interface IOrganization extends Document {
         enabled?: boolean;
         /** Default sales tax rate in percent, set by the dealership's admins. */
         defaultTaxRate?: number;
+        /** The dealership's Stripe payout account (Stripe Connect), for Suprah's weekly payouts. */
+        stripeAccountId?: string;
+        /** Payouts cover customer payments paid from this moment (when the payout account was connected). */
+        payoutsStartAt?: Date;
+        /** Set while a payout is being sent, so only one is sent at a time. */
+        payoutClaimedAt?: Date | null;
         updatedAt?: Date;
         updatedBy?: mongoose.Types.ObjectId;
     };
@@ -103,6 +109,9 @@ const OrganizationSchema = new Schema<IOrganization>(
         suprahPay: {
             enabled: { type: Boolean },
             defaultTaxRate: { type: Number, min: 0, max: 100 },
+            stripeAccountId: { type: String, trim: true },
+            payoutsStartAt: { type: Date },
+            payoutClaimedAt: { type: Date },
             updatedAt: { type: Date },
             updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         },

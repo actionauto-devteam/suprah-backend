@@ -17,6 +17,7 @@ import {
   setDealershipSuprahPayForAdmin,
   updatePlatformSettingsForAdmin,
 } from "../controllers/suprahPaySettings.controller";
+import { checkPayoutForAdmin, listPayoutsForAdmin, sendPayoutForAdmin } from "../controllers/dealershipPayouts.controller";
 import auth from "../middleware/auth.middleware";
 import { requireSuperAdmin } from "../middleware/rbac.middleware";
 
@@ -32,6 +33,10 @@ router.get("/suprahpay/settings", getPlatformSettingsForAdmin);
 router.put("/suprahpay/settings", updatePlatformSettingsForAdmin);
 router.get("/suprahpay/dealerships", listDealershipsForAdmin);
 router.put("/suprahpay/dealerships/:id", setDealershipSuprahPayForAdmin);
+// Weekly payouts to dealerships: review the list, then Send per dealership.
+router.get("/suprahpay/payouts", listPayoutsForAdmin);
+router.post("/suprahpay/payouts/:orgId/send", sendPayoutForAdmin);
+router.post("/suprahpay/payouts/record/:payoutId/check", checkPayoutForAdmin);
 router.get("/users", adminController.getAllUsers);
 router.get("/stats", adminController.getSystemStats);
 router.get("/financials", adminController.getFinancialStats);

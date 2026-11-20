@@ -4,6 +4,11 @@ import auth from '../middleware/auth.middleware';
 import authorize from '../middleware/role.middleware';
 import { getDealershipSettings, updateDealershipSettings } from '../controllers/suprahPaySettings.controller';
 import { requireFinanceAccess } from '../utils/financeAccess';
+import {
+  connectDealershipPayoutAccount,
+  getDealershipPayoutAccount,
+  getDealershipPayouts,
+} from '../controllers/dealershipPayouts.controller';
 
 const router = express.Router();
 
@@ -42,6 +47,16 @@ router.put(
   '/settings',
   authorize(['super_admin', 'admin'], "Only your dealership's admins can change SuprahPay settings."),
   updateDealershipSettings,
+);
+
+// Suprah's weekly payouts to the dealership (2026-11-21): staff can see them;
+// only admins set up the Stripe payout account.
+router.get('/payouts', getDealershipPayouts);
+router.get('/payout-account', getDealershipPayoutAccount);
+router.post(
+  '/payout-account/connect',
+  authorize(['super_admin', 'admin'], "Only your dealership's admins can set up the payout account."),
+  connectDealershipPayoutAccount,
 );
 
 router.get('/', paymentController.getPayments);
