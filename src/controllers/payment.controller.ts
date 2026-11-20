@@ -21,7 +21,7 @@ import {
   remainingRefundable,
   roundCents,
 } from '../utils/paymentRefund';
-import { isAwaitingPayment } from '../utils/customerPayments';
+import { CUSTOMER_INVOICE_FIELDS, customerInvoiceView, isAwaitingPayment } from '../utils/customerPayments';
 import { claimFailed, claimPaid } from '../utils/paymentPaid';
 import {
   KEPT_AMOUNT,
@@ -649,7 +649,7 @@ const getCheckoutSessionStatus = asyncHandler(async (req: Request, res: Response
     }
   }
 
-  res.json(new ApiResponse(200, { status: current.status, payment: current }, 'Checkout status'));
+  res.json(new ApiResponse(200, { status: current.status, payment: customerInvoiceView(current) }, 'Checkout status'));
 });
 
 // ─── Confirm Payment (dealer, existing Elements path) ─────────────────────────
@@ -1022,7 +1022,10 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
   const user = req.user as IUser;
   if (!user?.email) throw new ApiError(401, 'User not authenticated');
 
+  // Only what the customer's screens show, plus the dispute amounts that
+  // "Total paid" needs (those two are left out of what is sent back).
   const payments = await Payment.find({ customerEmail: user.email.toLowerCase() })
+    .select([...CUSTOMER_INVOICE_FIELDS, 'disputeStatus', 'disputedAmount'].join(' '))
     .populate('aftermarketProductId', 'name media')
     .sort({ createdAt: -1 })
     .lean();
@@ -1036,7 +1039,11 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
   // so the My Garage "Payments Due" tile and that list always agree.
   const pendingCount = payments.filter(p => isAwaitingPayment(p.status)).length;
 
-  res.json(new ApiResponse(200, { payments, stats: { totalOwed, totalPaid, pendingCount } }, 'Payments fetched successfully'));
+  res.json(new ApiResponse(
+    200,
+    { payments: payments.map(customerInvoiceView), stats: { totalOwed, totalPaid, pendingCount } },
+    'Payments fetched successfully',
+  ));
 });
 
 // ─── Customer: Create Payment Intent (legacy Elements path, kept) ─────────────
@@ -1097,12 +1104,14 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
   if (!payment) throw new ApiError(404, 'Payment record not found');
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) throw new ApiError(403, 'Not authorized');
 
-  if (payment.status === 'succeeded') return res.json(new ApiResponse(200, payment, 'Payment already confirmed'));
+  if (payment.status === 'succeeded') return res.json(new ApiResponse(200, customerInvoiceView(payment), 'Payment already confirmed'));
 
   if (paymentIntent.status === 'succeeded') {
     const claimed = await claimPaid({ _id: payment._id }, await paidDetailsFromIntent(paymentIntent));
     // Stripe's own update got there first and already ran the follow-ups.
-    if (!claimed) return res.json(new ApiResponse(200, await Payment.findById(payment._id), 'Payment already confirmed'));
+    if (!claimed) {
+      return res.json(new ApiResponse(200, customerInvoiceView(await Payment.findById(payment._id)), 'Payment already confirmed'));
+    }
     payment = claimed;
 
     try { await ReferralService.processPaymentReward(payment, user._id.toString()); }
@@ -1121,19 +1130,19 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
     });
 
     await broadcastPaymentSuccess(payment);
-    return res.json(new ApiResponse(200, payment, 'Payment confirmed successfully'));
+    return res.json(new ApiResponse(200, customerInvoiceView(payment), 'Payment confirmed successfully'));
   }
 
   if (paymentIntent.status === 'requires_payment_method') {
     payment.status = 'failed';
     payment.failureReason = paymentIntent.last_payment_error?.message || 'Payment method failed';
     await payment.save();
-    return res.json(new ApiResponse(200, payment, 'Payment failed'));
+    return res.json(new ApiResponse(200, customerInvoiceView(payment), 'Payment failed'));
   }
 
   payment.status = paymentIntent.status === 'canceled' ? 'cancelled' : 'processing';
   await payment.save();
-  res.json(new ApiResponse(200, payment, `Payment status: ${paymentIntent.status}`));
+  res.json(new ApiResponse(200, customerInvoiceView(payment), `Payment status: ${paymentIntent.status}`));
 });
 
 // ─── Customer: Cancel an unpaid invoice ───────────────────────────────────────
@@ -1159,7 +1168,7 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'This invoice has been refunded.');
   }
   if (payment.status === 'cancelled') {
-    return res.json(new ApiResponse(200, payment, 'Invoice already cancelled'));
+    return res.json(new ApiResponse(200, customerInvoiceView(payment), 'Invoice already cancelled'));
   }
 
   // If a Checkout session exists, make sure it didn't just get paid.
@@ -1206,7 +1215,7 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
   );
   if (!cancelled) {
     const latest = await Payment.findById(payment._id);
-    if (latest?.status === 'cancelled') return res.json(new ApiResponse(200, latest, 'Invoice already cancelled'));
+    if (latest?.status === 'cancelled') return res.json(new ApiResponse(200, customerInvoiceView(latest), 'Invoice already cancelled'));
     throw new ApiError(409, 'This invoice was already paid, so it can’t be cancelled.');
   }
   payment.status = 'cancelled';
@@ -1239,7 +1248,7 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
     } catch { /* noop */ }
   }
 
-  res.json(new ApiResponse(200, payment, 'Invoice cancelled'));
+  res.json(new ApiResponse(200, customerInvoiceView(payment), 'Invoice cancelled'));
 });
 
 export default {

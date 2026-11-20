@@ -547,3 +547,44 @@ describe('only Suprah super admins change a dealership plan', () => {
     expect(org.save).toHaveBeenCalled();
   });
 });
+
+import { customerInvoiceView } from '../../src/utils/customerPayments';
+
+describe('customers receive only the invoice details their screens show', () => {
+  const stored = {
+    _id: 'pay-9', invoiceNumber: 'INV-2026-11-0009', description: 'Carwash package',
+    amount: 20, status: 'succeeded', currency: 'usd', lineItems: [{ label: 'Carwash', quantity: 1, unitPrice: 20, lineTotal: 20 }],
+    receiptUrl: 'https://pay.stripe.com/receipts/test', refundedAmount: 0, createdAt: '2026-11-20T00:00:00.000Z',
+    customerName: 'Test Customer', customerEmail: 'customer@example.com',
+    // Dealership-side details:
+    notes: 'Created from CRM lead 123', createdBy: 'staff-1', organizationId: 'org-1',
+    stripeCustomerId: 'cus_test', stripePaymentIntentId: 'pi_test', stripeCheckoutSessionId: 'cs_test',
+    failureReason: 'card_declined', disputeStatus: 'lost', disputedAmount: 5,
+  };
+  const HIDDEN = ['notes', 'createdBy', 'organizationId', 'stripeCustomerId', 'stripePaymentIntentId',
+    'stripeCheckoutSessionId', 'failureReason', 'disputeStatus', 'disputedAmount'];
+
+  it('the Suprah Pay list leaves out staff notes and internal references, and totals still count disputes', async () => {
+    const list = query([stored]);
+    payments.find.mockReturnValue(list);
+
+    const { res } = await call(paymentController.getMyPaymentsAsCustomer, { user: { email: 'Customer@Example.com' } });
+
+    const sent = res.body.data.payments[0];
+    for (const field of HIDDEN) expect(sent).not.toHaveProperty(field);
+    expect(sent).toMatchObject({ invoiceNumber: 'INV-2026-11-0009', amount: 20, status: 'succeeded', receiptUrl: stored.receiptUrl });
+    expect(res.body.data.stats.totalPaid).toBe(15); // $20 less the $5 dispute that was lost
+    expect(list.select.mock.calls[0][0]).toContain('disputedAmount');
+    expect(list.select.mock.calls[0][0]).not.toContain('notes');
+  });
+
+  it('the cancel and return-from-Stripe answers use the same view', async () => {
+    payments.findById.mockResolvedValue({ ...stored, status: 'cancelled', toObject() { return { ...stored, status: 'cancelled' }; } });
+    const { res } = await call(paymentController.cancelMyPayment, {
+      user: { email: 'customer@example.com' }, params: { id: 'pay-9' },
+    });
+    expect(res.body.data.status).toBe('cancelled');
+    for (const field of HIDDEN) expect(res.body.data).not.toHaveProperty(field);
+    expect(customerInvoiceView(null)).toBeNull();
+  });
+});
