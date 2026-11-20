@@ -20,6 +20,29 @@ jest.mock('../../src/utils/safeNotification', () => ({
   safeCreateNotification: jest.fn(),
   notifyOrgAdmins: jest.fn(),
 }));
+jest.mock('../../src/models/User.model', () => ({
+  __esModule: true,
+  default: { findOne: jest.fn(), updateOne: jest.fn(), find: jest.fn(), updateMany: jest.fn(), countDocuments: jest.fn() },
+}));
+jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/services/trayDevice.service', () => ({ revokeTrayDevicesForEmail: jest.fn() }));
+jest.mock('../../src/utils/cache.util', () => ({ invalidateUserCache: jest.fn() }));
+jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null, emitToUser: jest.fn(), disconnectUserSockets: jest.fn() }));
+// Signs in whoever the test names in the x-test-user header.
+jest.mock('../../src/middleware/auth.middleware', () => ({
+  __esModule: true,
+  default: () => (req: any, _res: any, next: any) => {
+    const who = JSON.parse(req.headers['x-test-user'] || 'null');
+    if (!who) return next(Object.assign(new Error('signed out'), { statusCode: 401 }));
+    req.user = who.user; req.orgId = who.orgId; req.orgRole = who.orgRole;
+    next();
+  },
+}));
+// The payment handlers just answer "ok": these tests check who gets through.
+jest.mock('../../src/controllers/payment.controller', () => {
+  const ok = (_req: any, res: any) => res.json({ ok: true });
+  return { __esModule: true, default: new Proxy({}, { get: () => ok }) };
+});
 
 import SystemConfig from '../../src/models/SystemConfig.model';
 import Organization from '../../src/models/Organization.model';
@@ -156,7 +179,7 @@ describe('SuprahPay settings: dealerships', () => {
     orgs.findById.mockReturnValue(leanResult({ subscription: { tier: 'suprah_origin' }, suprahPay: { defaultTaxRate: 7.25 } }));
     configs.findOne.mockReturnValue(leanResult(null));
     const { res } = await call(settingsController.getDealershipSettings, { user: STAFF, orgId: ORG_ID, orgRole: 'member' });
-    expect(res.body.data).toEqual({ enabled: true, defaultTaxRate: 7.25, maxPaymentAmount: 999_999.99, feePercent: 0, canEdit: false });
+    expect(res.body.data).toEqual({ enabled: true, defaultTaxRate: 7.25, maxPaymentAmount: 999_999.99, feePercent: 0, canEdit: false, canManagePayments: false });
 
     const denied = await call(settingsController.updateDealershipSettings, {
       user: STAFF, orgId: ORG_ID, orgRole: 'member', body: { defaultTaxRate: 5 },
@@ -180,5 +203,121 @@ describe('SuprahPay settings: dealerships', () => {
       user: ADMIN, orgId: ORG_ID, orgRole: 'admin', body: { defaultTaxRate: 120 },
     });
     expect(bad.error?.statusCode).toBe(400);
+  });
+});
+
+// ─── Finance access ──────────────────────────────────────────────────────────
+import express from 'express';
+import request from 'supertest';
+import User from '../../src/models/User.model';
+import paymentRoutes from '../../src/routes/payment.routes';
+import { crmUserHasFinanceAccess, hasFinanceAccess } from '../../src/utils/financeAccess';
+import { updateMemberFinanceAccess } from '../../src/controllers/organization.controller';
+
+const users = User as unknown as Record<string, jest.Mock>;
+/** A stand-in query you can .select() / .lean() / await. */
+const doc = (value: unknown) => {
+  const q: any = {};
+  q.select = jest.fn(() => q);
+  q.lean = jest.fn(() => Promise.resolve(value));
+  q.then = (done: any, failed: any) => Promise.resolve(value).then(done, failed);
+  return q;
+};
+
+describe('Finance access: who can send, cancel and refund', () => {
+  it('admins always can; staff only with Finance access for this dealership; customers never', () => {
+    expect(hasFinanceAccess({ role: 'super_admin' }, ORG_ID)).toBe(true);
+    expect(hasFinanceAccess({ role: 'admin' }, ORG_ID)).toBe(true);
+    expect(hasFinanceAccess({ role: 'employee' }, ORG_ID, 'admin')).toBe(true);
+    expect(hasFinanceAccess({ role: 'employee', financeOrganizationIds: [ORG_ID] }, ORG_ID)).toBe(true);
+    expect(hasFinanceAccess({ role: 'employee', financeOrganizationIds: ['64b7f0c2a1b2c3d4e5f6ffff'] }, ORG_ID)).toBe(false);
+    expect(hasFinanceAccess({ role: 'employee' }, ORG_ID)).toBe(false);
+    expect(hasFinanceAccess({ role: 'customer', financeOrganizationIds: [ORG_ID] }, ORG_ID)).toBe(false);
+    expect(hasFinanceAccess(null, ORG_ID)).toBe(false);
+  });
+
+  const app = express();
+  app.use(express.json());
+  app.use('/api/payments', paymentRoutes);
+  app.use((err: any, _req: any, res: any, _next: any) => res.status(err.statusCode || 500).json({ message: err.message }));
+  const as = (user: unknown, orgRole = 'member') => JSON.stringify({ user, orgId: ORG_ID, orgRole });
+
+  it('the server refuses staff without Finance access, whatever the website shows', async () => {
+    const staff = as({ _id: 's1', role: 'employee' });
+    const attempts: Array<['post' | 'patch', string]> = [
+      ['post', '/api/payments'],
+      ['post', `/api/payments/${ORG_ID}/refund`],
+      ['post', `/api/payments/${ORG_ID}/cancel`],
+      ['post', `/api/payments/${ORG_ID}/request`],
+      ['patch', `/api/payments/${ORG_ID}`],
+    ];
+    for (const [method, path] of attempts) {
+      const res = await request(app)[method](path).set('x-test-user', staff).send({});
+      expect(res.status).toBe(403);
+      expect(res.body.message).toMatch(/Finance access/);
+    }
+    // Viewing stays open to every staff member.
+    expect((await request(app).get('/api/payments').set('x-test-user', staff)).status).toBe(200);
+  });
+
+  it('admins and staff with Finance access get through; customers never do', async () => {
+    const finance = as({ _id: 's2', role: 'employee', financeOrganizationIds: [ORG_ID] });
+    const admin = as({ _id: 'a1', role: 'admin' }, 'admin');
+    for (const who of [finance, admin]) {
+      expect((await request(app).post(`/api/payments/${ORG_ID}/refund`).set('x-test-user', who).send({})).status).toBe(200);
+    }
+    const customer = as({ _id: 'c1', role: 'customer', financeOrganizationIds: [ORG_ID] });
+    expect((await request(app).post('/api/payments').set('x-test-user', customer).send({})).status).toBe(403);
+  });
+
+  it('CRM accounts: a CRM admin can; anyone else needs Finance access on their website account', async () => {
+    expect(await crmUserHasFinanceAccess({ role: 'admin', organizationId: ORG_ID })).toBe(true);
+    users.findOne.mockReturnValue(doc({ role: 'employee', financeOrganizationIds: [ORG_ID] }));
+    expect(await crmUserHasFinanceAccess({ role: 'manager', email: ' Staff@Example.com ', organizationId: ORG_ID })).toBe(true);
+    expect(users.findOne).toHaveBeenCalledWith({ email: 'staff@example.com', organizationId: ORG_ID });
+    users.findOne.mockReturnValue(doc({ role: 'employee' }));
+    expect(await crmUserHasFinanceAccess({ role: 'employee', email: 'staff@example.com', organizationId: ORG_ID })).toBe(false);
+    expect(await crmUserHasFinanceAccess({ role: 'manager', organizationId: ORG_ID })).toBe(false);
+  });
+});
+
+describe('Finance access: given on the Members page by dealership admins', () => {
+  const MEMBER_ID = '64b7f0c2a1b2c3d4e5f60999';
+  const org = { name: 'Test Motors', ownerId: { toString: () => 'owner-1' } };
+
+  it('a staff member cannot give it; bad ids or values are refused', async () => {
+    orgs.findById.mockReturnValue(doc(org));
+    let r = await call(updateMemberFinanceAccess, {
+      user: { _id: 'staff-1', role: 'employee' }, orgId: ORG_ID, orgRole: 'member',
+      params: { id: ORG_ID, userId: MEMBER_ID }, body: { enabled: true },
+    });
+    expect(r.error?.statusCode).toBe(403);
+    r = await call(updateMemberFinanceAccess, { user: ADMIN, orgId: ORG_ID, orgRole: 'admin', params: { id: ORG_ID, userId: 'x' }, body: { enabled: true } });
+    expect(r.error?.statusCode).toBe(400);
+    r = await call(updateMemberFinanceAccess, { user: ADMIN, orgId: ORG_ID, orgRole: 'admin', params: { id: ORG_ID, userId: MEMBER_ID }, body: { enabled: 'yes' } });
+    expect(r.error?.statusCode).toBe(400);
+    expect(users.updateOne).not.toHaveBeenCalled();
+  });
+
+  it('an admin gives it to a staff member of their own dealership', async () => {
+    orgs.findById.mockReturnValue(doc(org));
+    users.findOne.mockReturnValue(doc({ _id: MEMBER_ID, name: 'Sam', role: 'employee', organizationRole: 'member', financeOrganizationIds: [] }));
+    const { res, error } = await call(updateMemberFinanceAccess, {
+      user: ADMIN, orgId: ORG_ID, orgRole: 'admin', params: { id: ORG_ID, userId: MEMBER_ID }, body: { enabled: true },
+    });
+    expect(error).toBeUndefined();
+    expect(users.findOne).toHaveBeenCalledWith({ _id: MEMBER_ID, organizationId: ORG_ID });
+    expect(users.updateOne).toHaveBeenCalledWith({ _id: MEMBER_ID, organizationId: ORG_ID }, { $addToSet: { financeOrganizationIds: ORG_ID } });
+    expect(res.body.data.hasFinanceAccess).toBe(true);
+  });
+
+  it('admins already have it, so it is not given to them', async () => {
+    orgs.findById.mockReturnValue(doc(org));
+    users.findOne.mockReturnValue(doc({ _id: MEMBER_ID, role: 'admin', organizationRole: 'admin' }));
+    const { error } = await call(updateMemberFinanceAccess, {
+      user: ADMIN, orgId: ORG_ID, orgRole: 'admin', params: { id: ORG_ID, userId: MEMBER_ID }, body: { enabled: true },
+    });
+    expect(error?.statusCode).toBe(400);
+    expect(users.updateOne).not.toHaveBeenCalled();
   });
 });

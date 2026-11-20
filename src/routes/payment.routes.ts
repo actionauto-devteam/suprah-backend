@@ -3,6 +3,7 @@ import paymentController from '../controllers/payment.controller';
 import auth from '../middleware/auth.middleware';
 import authorize from '../middleware/role.middleware';
 import { getDealershipSettings, updateDealershipSettings } from '../controllers/suprahPaySettings.controller';
+import { requireFinanceAccess } from '../utils/financeAccess';
 
 const router = express.Router();
 
@@ -44,15 +45,17 @@ router.put(
 );
 
 router.get('/', paymentController.getPayments);
-router.post('/', paymentController.createPayment);
+// Sending, editing, cancelling and refunding need Finance access (2026-11-21);
+// every staff member can still view payments.
+router.post('/', requireFinanceAccess, paymentController.createPayment);
 
-router.post('/create-intent', paymentController.createPaymentIntent);
-router.post('/confirm', paymentController.confirmPayment);
+router.post('/create-intent', requireFinanceAccess, paymentController.createPaymentIntent);
+router.post('/confirm', requireFinanceAccess, paymentController.confirmPayment);
 
 router.get('/:id', paymentController.getPaymentById);
-router.patch('/:id', paymentController.updatePayment);
-router.post('/:id/cancel', paymentController.cancelPayment);
-router.post('/:id/refund', paymentController.refundPayment);
-router.post('/:id/request', paymentController.requestPaymentFromCustomer);
+router.patch('/:id', requireFinanceAccess, paymentController.updatePayment);
+router.post('/:id/cancel', requireFinanceAccess, paymentController.cancelPayment);
+router.post('/:id/refund', requireFinanceAccess, paymentController.refundPayment);
+router.post('/:id/request', requireFinanceAccess, paymentController.requestPaymentFromCustomer);
 
 export default router;

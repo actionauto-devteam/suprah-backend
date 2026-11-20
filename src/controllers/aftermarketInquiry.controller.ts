@@ -22,6 +22,7 @@ import {
   invoiceLinesFrom,
   taxRateFrom,
 } from "../utils/invoiceLines";
+import { FINANCE_ACCESS_MESSAGE, crmUserHasFinanceAccess } from "../utils/financeAccess";
 
 
 async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
@@ -381,6 +382,8 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, "Not authenticated");
   if (!actor.organizationId) throw new ApiError(403, "No organization context.");
+  // Sending an invoice needs Finance access (2026-11-21).
+  if (!(await crmUserHasFinanceAccess(actor))) throw new ApiError(403, FINANCE_ACCESS_MESSAGE);
 
   const { inquiryId } = req.params;
   const { lineItems, taxRate = 0, dueDate, notes, customerNote, description } = req.body as {

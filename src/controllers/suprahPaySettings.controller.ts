@@ -8,6 +8,7 @@ import AuditLog from '../models/AuditLog.model';
 import activityService from '../services/activity.service';
 import { notifyOrgAdmins } from '../utils/safeNotification';
 import logger from '../utils/logger';
+import { hasFinanceAccess } from '../utils/financeAccess';
 import {
   STRIPE_MAX_PAYMENT,
   dealershipTaxRate,
@@ -157,6 +158,8 @@ export const getDealershipSettings = asyncHandler(async (req: Request, res: Resp
     maxPaymentAmount: platform.maxPaymentAmount,
     feePercent: platform.feePercent,
     canEdit: isDealershipAdmin(req),
+    /** Can send payment requests and invoices, cancel and refund (Finance access). */
+    canManagePayments: hasFinanceAccess(req.user as never, orgId, req.orgRole),
   }, 'SuprahPay settings'));
 });
 
@@ -200,5 +203,6 @@ export const updateDealershipSettings = asyncHandler(async (req: Request, res: R
     maxPaymentAmount: platform.maxPaymentAmount,
     feePercent: platform.feePercent,
     canEdit: true,
+    canManagePayments: true,
   }, 'SuprahPay settings saved'));
 });
