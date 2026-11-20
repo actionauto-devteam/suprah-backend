@@ -55,6 +55,9 @@ jest.mock('../../src/services/googleGeocoding.service', () => ({ googleGeocoding
 jest.mock('../../src/services/activeOrganizations.service', () => ({ invalidateActiveOrganizations: jest.fn() }));
 jest.mock('../../src/utils/cache.util', () => ({ invalidateUserCache: jest.fn() }));
 jest.mock('pidusage', () => jest.fn());
+// Plan changes (organization.controller) load these too.
+jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/services/trayDevice.service', () => ({ revokeTrayDevicesForEmail: jest.fn() }));
 jest.mock('../../src/services/referral.service', () => ({
   __esModule: true,
   default: { processPaymentReward: jest.fn() },
@@ -505,5 +508,42 @@ describe("an invoice's status can't be set by hand", () => {
     });
     expect(error?.statusCode).toBe(400);
     expect(draft.save).not.toHaveBeenCalled();
+  });
+});
+
+import { updateOwnOrganizationSubscription } from '../../src/controllers/organization.controller';
+
+describe('only Suprah super admins change a dealership plan', () => {
+  const orgs = Organization as unknown as Record<string, jest.Mock>;
+  const dealership = () => ({
+    _id: 'org-1', name: 'Test Motors', ownerId: 'owner-1',
+    subscription: { tier: 'suprah_go', status: 'active' },
+    save: jest.fn(),
+  });
+
+  it("turns away the dealership's own admin and owner, without loading the dealership", async () => {
+    orgs.findById.mockClear();
+    for (const user of [{ _id: 'admin-1', role: 'admin' }, { _id: 'owner-1', role: 'admin' }]) {
+      const { error } = await call(updateOwnOrganizationSubscription, {
+        user, orgId: 'org-1', orgRole: 'admin',
+        params: { id: 'org-1' }, body: { tier: 'suprah_premium_ultra' },
+      });
+      expect(error?.statusCode).toBe(403);
+      expect(error?.message).toMatch(/Ask your Suprah contact/);
+    }
+    expect(orgs.findById).not.toHaveBeenCalled();
+  });
+
+  it('a super admin can still change it', async () => {
+    const org = dealership();
+    orgs.findById.mockResolvedValue(org);
+    const { error, res } = await call(updateOwnOrganizationSubscription, {
+      user: { _id: 'sa-1', role: 'super_admin' },
+      params: { id: 'org-1' }, body: { tier: 'suprah_premium' },
+    });
+    expect(error).toBeUndefined();
+    expect(res.statusCode).toBe(200);
+    expect(org.subscription.tier).toBe('suprah_premium');
+    expect(org.save).toHaveBeenCalled();
   });
 });
