@@ -9,7 +9,7 @@ import WebChatMessage from '../models/WebChatMessage.model';
 import UserActivity from '../models/UserActivity.model';
 import { CallLog, CommunicationMessage } from '../models/communication.model';
 import { UserBadge, BADGE_DEFINITIONS } from '../models/Badge.model';
-import { LEAD_STATUS_CATEGORIES } from '../constants/leadStatus';
+import { LEAD_STATUS_CATEGORIES, countedLeadFilter } from '../constants/leadStatus';
 import { isGenuineDemoLead } from '../constants/leadSource';
 import { computeScore, DEFAULT_KPI_WEIGHTS } from './kpiEngine.service';
 import { COMPANY_TZ, addDaysToDateStr, getCompanyDayRange, toCompanyDateStr, zoneOffsetMinutes } from '../utils/companyTimezone';
@@ -426,7 +426,7 @@ export async function loadPeriodData(orgId: string, start: Date, end: Date): Pro
     UserActivity.find({ organizationId: { $in: orgIds }, title: 'Lead Replied', createdAt: range })
       .select('userId metadata.leadId createdAt')
       .lean(),
-    Lead.find({ organizationId: orgObjectId, createdAt: range, 'combinedInto.leadId': { $exists: false } })
+    Lead.find({ organizationId: orgObjectId, createdAt: range, ...countedLeadFilter() })
       .select('assignedTo source phone createdAt')
       .lean(),
     Lead.find({ organizationId: orgObjectId, statusHistory: { $elemMatch: { to: { $in: SOLD_STATUSES }, changedAt: range } } })

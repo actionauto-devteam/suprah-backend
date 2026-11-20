@@ -48,7 +48,7 @@ import { recordPurchaseFromSoldLeadSafely } from './customerPurchase.service';
 import CrmLeadGroup from '../models/CrmLeadGroup.model';
 import CrmUser from '../models/CrmUser.model';
 import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
-import { isContactRestrictedStatus } from '../constants/leadStatus';
+import { NOT_A_LEAD_STATUS, isContactRestrictedStatus } from '../constants/leadStatus';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 
@@ -138,7 +138,7 @@ function leadEvent(lead: any, eventKey: string, triggerAt: Date): EngineEvent {
 }
 
 function leadMatches(event: string, lead: any): boolean {
-  if (lead.source === 'Demo' || lead.intakeIdentity === 'unverified') return false;
+  if (lead.source === 'Demo' || lead.intakeIdentity === 'unverified' || lead.status === NOT_A_LEAD_STATUS) return false;
   if (event === 'website_form_lead') return ['Website Inquiry', 'Website Booking'].includes(lead.source) || lead.channel === 'web';
   if (event === 'adf_lead_received') return lead.channel === 'adf' || lead.source === 'Third-Party Lead';
   if (event === 'email_lead_received') return lead.channel === 'email' || lead.source === 'Email Inquiry';
@@ -157,7 +157,7 @@ async function collectEvents(orgId: string, event: string, since: Date, now: Dat
   }
   if (event === 'lead_status_changed' || event === 'lead_assigned') {
     const path = event === 'lead_status_changed' ? 'statusHistory' : 'assignmentHistory';
-    const leads = await Lead.find({ organizationId: { $in: orgIds }, updatedAt: { $gt: since }, [`${path}.changedAt`]: { $gt: since, $lte: now } })
+    const leads = await Lead.find({ organizationId: { $in: orgIds }, updatedAt: { $gt: since }, status: { $ne: NOT_A_LEAD_STATUS }, [`${path}.changedAt`]: { $gt: since, $lte: now } })
       .select(`${LEAD_FIELDS} ${path}`)
       .limit(RECORD_LIMIT)
       .lean();
@@ -881,6 +881,14 @@ async function processRun(run: ICrmAutomationRun, now: Date) {
     const fresh = await CrmAutomationRun.findById(run._id).select('status stopAfterMessage').lean();
     if (fresh?.status === 'stopped') return;
     if (fresh?.stopAfterMessage) run.stopAfterMessage = true;
+    if (mongoose.isValidObjectId(run.contact?.leadId) && await Lead.exists({ _id: run.contact.leadId, status: NOT_A_LEAD_STATUS })) {
+      run.status = 'stopped';
+      run.reason = 'Marked as not a lead';
+      run.nextRunAt = null;
+      run.leaseUntil = null;
+      await run.save();
+      return;
+    }
     if (step.type === 'branch') {
       const choice = await chooseBranchPath(run, step);
       run.steps = [...run.steps.slice(0, run.stepIndex + 1), ...choice.steps];

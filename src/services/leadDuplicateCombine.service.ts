@@ -380,6 +380,7 @@ export async function combineInfoForLead(organizationId: string, lead: any) {
         leadId: String(lead.combinedInto.leadId),
         name: main ? [main.firstName, main.lastName].filter(Boolean).join(' ').trim() || 'Lead' : 'Lead',
         at: lead.combinedInto.at,
+        via: lead.combinedInto.via === 'link' ? 'link' : 'combine',
       },
     };
   }

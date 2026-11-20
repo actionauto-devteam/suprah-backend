@@ -59,6 +59,7 @@ describe('lead lifecycle status classification', () => {
       'In Finance',
       'Online Financing',
       'Closed',
+      'Not a Lead',
     ]);
     expect(NURTURE_ELIGIBLE_STATUSES).toContain('Declined');
     expect(NURTURE_ELIGIBLE_STATUSES).toContain('No Longer Interested');

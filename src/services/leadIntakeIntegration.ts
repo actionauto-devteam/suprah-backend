@@ -6,6 +6,7 @@ import { postalAddressLine } from '../utils/customerArea';
 import { InquirySourceIds, claimInquirySideEffect, finishInquirySideEffect } from './leadInquiry.service';
 import { LeadIntakeRequest, LeadIntakeResult } from './leadIntake.service';
 import logger from '../utils/logger';
+import { NOT_A_LEAD_STATUS } from '../constants/leadStatus';
 
 export function vehicleFromAdf(vehicle: ParsedADFLead['vehicle'] | null | undefined) {
   if (!vehicle) return undefined;
@@ -71,7 +72,7 @@ export async function startNewLeadAutomations(
   if (!claim) return;
   try {
     const lead: any = await Lead.findOne({ _id: result.leadId, organizationId }).lean();
-    if (!lead || lead.intakeIdentity === 'unverified') {
+    if (!lead || lead.intakeIdentity === 'unverified' || lead.status === NOT_A_LEAD_STATUS) {
       await finishInquirySideEffect(result.inquiryId, 'alexReply', owner, { state: 'skipped' });
       return;
     }

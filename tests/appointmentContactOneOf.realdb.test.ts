@@ -39,6 +39,7 @@ import UserActivity from '../src/models/UserActivity.model';
 import appointmentService, { CUSTOMER_CONTACT_REQUIRED_MESSAGE } from '../src/services/appointment.service';
 import customerBookingService from '../src/services/customerbooking.service';
 import appointmentController from '../src/controllers/appointment.controller';
+import { setAppointmentForLead } from '../src/controllers/lead.controller';
 import { getAppointmentsDashboard } from '../src/controllers/appointmentDashboard.controller';
 
 const orgId = new mongoose.Types.ObjectId();
@@ -227,5 +228,39 @@ describe('Real-DB: customer appointments need a phone or an email, not both (loc
       expect(response.statusCode).toBe(400);
     }
     expect(await Appointment.countDocuments({})).toBe(before);
+  });
+
+  it('booking does not reopen a website chat card that was added to the customer\'s lead; a normal lead still becomes Appointment Set', async () => {
+    const base = { organizationId: orgId, createdBy: bethUser, source: 'Third-Party Lead', channel: 'email', isRead: true };
+    const linked: any = await Lead.create({
+      ...base, firstName: 'Lia', lastName: 'Linked', email: 'lia.linked@example.com', status: 'Closed',
+      combinedInto: { leadId: new mongoose.Types.ObjectId(), at: new Date(), previousStatus: 'New', via: 'link' },
+    });
+    const plain: any = await Lead.create({ ...base, firstName: 'Pia', lastName: 'Plain', email: 'pia.plain@example.com', status: 'New' });
+    await appointmentService.createAppointment(String(bethCrm), ORG, booking({ firstName: 'Lia', lastName: 'Linked', email: 'lia.linked@example.com', phone: '' }, { leadId: String(linked._id) }));
+    await appointmentService.createAppointment(String(bethCrm), ORG, booking({ firstName: 'Lia', lastName: 'Linked', email: 'lia.linked@example.com', phone: '' }));
+    await appointmentService.createAppointment(String(bethCrm), ORG, booking({ firstName: 'Pia', lastName: 'Plain', email: 'pia.plain@example.com', phone: '' }, { leadId: String(plain._id) }));
+    expect((await Lead.findById(linked._id).lean() as any).status).toBe('Closed');
+    expect((await Lead.findById(plain._id).lean() as any).status).toBe('Appointment Set');
+  });
+
+  it('the lead appointment route also keeps a linked chat card closed, but still saves the appointment on it', async () => {
+    const linked: any = await Lead.create({
+      organizationId: orgId, createdBy: bethUser, source: 'Third-Party Lead', channel: 'email', isRead: true,
+      firstName: 'Lou', lastName: 'Linked', email: 'lou.linked@example.com', status: 'Closed',
+      combinedInto: { leadId: new mongoose.Types.ObjectId(), at: new Date(), previousStatus: 'New', via: 'link' },
+    });
+    const day = new Date();
+    day.setUTCDate(day.getUTCDate() + 6);
+    const response = await callHandler(setAppointmentForLead, {
+      params: { id: String(linked._id) },
+      body: { date: day.toISOString().slice(0, 10), time: '10:00', notes: 'Test drive' },
+      user: { _id: bethUser },
+      orgId: ORG,
+    });
+    expect(response.statusCode).toBe(200);
+    const after: any = await Lead.findById(linked._id).lean();
+    expect(after.status).toBe('Closed');
+    expect(after.appointment).toMatchObject({ time: '10:00' });
   });
 });

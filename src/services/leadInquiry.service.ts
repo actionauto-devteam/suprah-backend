@@ -13,6 +13,7 @@ import Lead from '../models/lead.model';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 
 export const INQUIRY_CONTENT_WINDOW_MS = 15 * 60 * 1000;
+export const SAME_EMAIL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_PROCESSING_LEASE_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_RETRY_BASE_MS = 60_000;
@@ -21,6 +22,8 @@ const DEFAULT_SIDE_EFFECT_LEASE_MS = 120_000;
 export interface InquirySourceIds {
   gmailMessageId?: string;
   gmailThreadId?: string;
+  emailMessageId?: string;
+  mailbox?: string;
   providerInquiryKey?: string;
   adfPayloadHash?: string;
   smsProviderMessageId?: string;
@@ -71,6 +74,8 @@ function sourceIdsFor(input: InquirySourceIds = {}) {
   const ids: Record<string, unknown> = {
     gmailMessageId: optionalString(input.gmailMessageId),
     gmailThreadId: optionalString(input.gmailThreadId),
+    emailMessageId: optionalString(input.emailMessageId)?.toLowerCase(),
+    mailbox: optionalString(input.mailbox)?.toLowerCase(),
     providerInquiryKey: optionalString(input.providerInquiryKey),
     adfPayloadHash: optionalString(input.adfPayloadHash),
     smsProviderMessageId: optionalString(input.smsProviderMessageId),
@@ -197,7 +202,7 @@ export type InquiryDuplicateResult =
   | {
       duplicate: true;
       identity: InquiryIdentityStrength;
-      kind: 'source_event' | 'legacy_lead' | 'content_window';
+      kind: 'source_event' | 'legacy_lead' | 'content_window' | 'same_email_message';
       inquiryId?: string;
       leadId?: string;
     };
@@ -209,6 +214,11 @@ export async function detectInquiryDuplicate(input: InquiryDuplicateCheckInput):
   if (sameEvent && String(sameEvent._id) !== ownId) {
     return { duplicate: true, identity, kind: 'source_event', inquiryId: String(sameEvent._id) };
   }
+  const sameEmail = await findSameEmailMessage(input.organizationId, input.sourceIds?.emailMessageId, {
+    excludeId: input.eventId,
+    now: input.now,
+  });
+  if (sameEmail) return { duplicate: true, identity, kind: 'same_email_message', inquiryId: String(sameEmail._id) };
   const legacy = await findLegacyLeadSourceDuplicate(input.organizationId, {
     gmailMessageId: input.sourceIds?.gmailMessageId,
     ingestionFingerprint: input.legacyIngestionFingerprint,
@@ -223,6 +233,23 @@ export async function detectInquiryDuplicate(input: InquiryDuplicateCheckInput):
     if (recent) return { duplicate: true, identity, kind: 'content_window', inquiryId: String(recent._id) };
   }
   return { duplicate: false, identity };
+}
+
+export async function findSameEmailMessage(
+  organizationId: string,
+  emailMessageId: string | null | undefined,
+  options: { excludeId?: unknown; now?: Date } = {},
+): Promise<ILeadInquiry | null> {
+  const key = optionalString(emailMessageId)?.toLowerCase();
+  if (!key) return null;
+  const now = options.now || new Date();
+  const filter: Record<string, unknown> = {
+    organizationId,
+    'sourceIds.emailMessageId': key,
+    createdAt: { $gte: new Date(now.getTime() - SAME_EMAIL_WINDOW_MS) },
+  };
+  if (options.excludeId) filter._id = { $ne: options.excludeId };
+  return LeadInquiry.findOne(filter).sort({ createdAt: 1 });
 }
 
 export async function findRecentContentDuplicate(
