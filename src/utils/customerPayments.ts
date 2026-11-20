@@ -36,6 +36,8 @@ export const CUSTOMER_INVOICE_FIELDS = [
   'createdAt',
   'aftermarketProductId',
   'customerNote',
+  'purpose',
+  'dealershipName',
   'customerName',
   'customerEmail',
 ] as const;

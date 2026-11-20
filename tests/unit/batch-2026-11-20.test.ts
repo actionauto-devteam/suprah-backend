@@ -12,6 +12,11 @@ jest.mock('stripe', () => {
   };
   return { __esModule: true, default: jest.fn(() => instance), instance };
 });
+// SuprahPay settings (2026-11-21): the defaults (no stored settings).
+jest.mock('../../src/models/SystemConfig.model', () => ({
+  __esModule: true,
+  default: { findOne: jest.fn(() => ({ select: () => ({ lean: () => Promise.resolve(null) }) })) },
+}));
 jest.mock('../../src/models/Payment.model', () => ({
   __esModule: true,
   default: {

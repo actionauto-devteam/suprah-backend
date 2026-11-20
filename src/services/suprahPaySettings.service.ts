@@ -1,4 +1,7 @@
+import mongoose from 'mongoose';
 import SystemConfig from '../models/SystemConfig.model';
+import Organization from '../models/Organization.model';
+import { ApiError } from '../utils/ApiError';
 
 /**
  * SuprahPay settings (2026-11-21).
@@ -147,3 +150,44 @@ export function taxRateSetting(raw: unknown): number | null {
 
 export const SUPRAHPAY_OFF_MESSAGE =
   "SuprahPay isn't turned on for your dealership yet. Ask your Suprah contact to turn it on.";
+
+/* ─────────────────────── Checks when a payment is made ───────────────────── */
+
+export interface DealershipForPayments {
+  name: string;
+  defaultTaxRate: number;
+  feePercent: number;
+  maxPaymentAmount: number;
+}
+
+/**
+ * Loads what a new invoice needs from the dealership and Suprah's settings,
+ * and refuses when SuprahPay isn't on for the dealership (2026-11-21).
+ */
+export async function dealershipForPayments(orgId: string | undefined | null): Promise<DealershipForPayments> {
+  if (!orgId || !mongoose.isValidObjectId(orgId)) throw new ApiError(400, 'Choose a dealership first.');
+  const [org, platform] = await Promise.all([
+    Organization.findById(orgId).select('name subscription.tier suprahPay').lean(),
+    getPlatformSettings(),
+  ]);
+  if (!org) throw new ApiError(404, "Your dealership couldn't be found.");
+  if (!suprahPayOn(org)) throw new ApiError(403, SUPRAHPAY_OFF_MESSAGE);
+  return {
+    name: String(org.name || ''),
+    defaultTaxRate: dealershipTaxRate(org),
+    feePercent: platform.feePercent,
+    maxPaymentAmount: platform.maxPaymentAmount,
+  };
+}
+
+const dollars = (n: number) =>
+  `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** Why an amount can't be paid online, or null when it can. */
+export function paymentLimitProblem(amount: number, maxPaymentAmount: number): string | null {
+  if (!Number.isFinite(amount) || amount <= 0) return 'The amount must be more than $0.';
+  if (amount > maxPaymentAmount) {
+    return `This is more than SuprahPay's limit of ${dollars(maxPaymentAmount)} for one payment. Split it into smaller payments, or contact Suprah.`;
+  }
+  return null;
+}
