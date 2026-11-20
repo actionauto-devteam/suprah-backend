@@ -2,6 +2,7 @@ import express from 'express';
 import paymentController from '../controllers/payment.controller';
 import auth from '../middleware/auth.middleware';
 import authorize from '../middleware/role.middleware';
+import { getDealershipSettings, updateDealershipSettings } from '../controllers/suprahPaySettings.controller';
 
 const router = express.Router();
 
@@ -33,6 +34,14 @@ router.use(
 router.get('/stats', paymentController.getPaymentStats);
 router.get('/balance', paymentController.getBillingBalance);
 router.get('/pending', paymentController.getPendingPayments);
+
+// The dealership's SuprahPay settings (2026-11-21): any staff can read them; admins change them.
+router.get('/settings', getDealershipSettings);
+router.put(
+  '/settings',
+  authorize(['super_admin', 'admin'], "Only your dealership's admins can change SuprahPay settings."),
+  updateDealershipSettings,
+);
 
 router.get('/', paymentController.getPayments);
 router.post('/', paymentController.createPayment);

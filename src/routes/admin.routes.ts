@@ -11,6 +11,12 @@ import {
   dismissDealershipInquiry,
 } from "../controllers/dealershipInquiry.controller";
 import { adminAdjustPoints } from "../controllers/membership.controller";
+import {
+  getPlatformSettingsForAdmin,
+  listDealershipsForAdmin,
+  setDealershipSuprahPayForAdmin,
+  updatePlatformSettingsForAdmin,
+} from "../controllers/suprahPaySettings.controller";
 import auth from "../middleware/auth.middleware";
 import { requireSuperAdmin } from "../middleware/rbac.middleware";
 
@@ -20,6 +26,12 @@ router.use(auth());
 router.use(requireSuperAdmin);
 
 router.get("/organizations", adminController.getAllOrganizations);
+
+// SuprahPay (2026-11-21): Suprah's fee, the largest payment, and the switch per dealership.
+router.get("/suprahpay/settings", getPlatformSettingsForAdmin);
+router.put("/suprahpay/settings", updatePlatformSettingsForAdmin);
+router.get("/suprahpay/dealerships", listDealershipsForAdmin);
+router.put("/suprahpay/dealerships/:id", setDealershipSuprahPayForAdmin);
 router.get("/users", adminController.getAllUsers);
 router.get("/stats", adminController.getSystemStats);
 router.get("/financials", adminController.getFinancialStats);
