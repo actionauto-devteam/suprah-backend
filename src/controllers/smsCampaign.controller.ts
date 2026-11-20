@@ -5,10 +5,10 @@ import { ApiError } from '../utils/ApiError';
 import Lead from '../models/lead.model';
 import SmsCampaign from '../models/SmsCampaign.model';
 import SmsCampaignRecipient from '../models/SmsCampaignRecipient.model';
-import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
+import { LEAD_STATUS_VALUES, NOT_A_LEAD_STATUS, countedLeadFilter } from '../constants/leadStatus';
 
 const MAX_RECIPIENTS = 500;
-const VALID_STATUSES = LEAD_STATUS_VALUES;
+const VALID_STATUSES = LEAD_STATUS_VALUES.filter((status) => status !== NOT_A_LEAD_STATUS);
 const OPT_OUT_REMINDER = 'reply stop';
 
 function parseStatuses(raw: unknown): string[] {
@@ -21,6 +21,7 @@ function audienceQuery(orgId: string, statuses: string[]) {
   const query: Record<string, unknown> = {
     organizationId: orgId,
     phone: { $exists: true, $ne: '' },
+    ...countedLeadFilter(),
   };
   if (statuses.length > 0) query.status = { $in: statuses };
   return query;

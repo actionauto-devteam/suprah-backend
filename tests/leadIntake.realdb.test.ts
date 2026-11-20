@@ -240,7 +240,7 @@ describe('Real-DB: lead intake lifecycle (local MongoDB only)', () => {
     expect(untouched).toMatchObject({ status: 'Closed', isRead: true, inquiryCount: 1 });
     const fresh: any = await Lead.findById(result.leadId).lean();
     expect(fresh.intakeSlots).toEqual(expect.arrayContaining([`phone:${phone}|after:${old._id}@${closedAt.getTime()}`]));
-    const again: any = await submitLeadInquiry(inquiry({ phone, email }));
+    const again: any = await submitLeadInquiry(inquiry({ phone, email }, { comments: 'Can I see it on Saturday?' }));
     expect(again).toMatchObject({ status: 'associated', created: false, leadId: result.leadId });
   });
 
@@ -314,12 +314,24 @@ describe('Real-DB: lead intake lifecycle (local MongoDB only)', () => {
   it('handles several different inquiries from one new customer at the same moment as one lead', async () => {
     const phone = nextPhone();
     const email = nextEmail();
-    await Promise.all([1, 2, 3, 4, 5].map(() => submitLeadInquiry(inquiry({ phone, email }))));
+    await Promise.all([1, 2, 3, 4, 5].map((n) => submitLeadInquiry(inquiry({ phone, email }, { comments: `Question ${n}: is the Tacoma still available?` }))));
     await recoverLeadIntake({ organizationId: ORG });
     expect(await leadsFor({ phone })).toBe(1);
     const lead: any = await Lead.findOne({ organizationId: orgId, phone }).lean();
     expect(lead.inquiryCount).toBe(5);
     expect(await LeadInquiry.countDocuments({ 'contact.normalizedPhone': phone, 'association.state': 'associated' })).toBe(5);
+  });
+
+  it('folds the same request sent several times at the same moment into one inquiry on one lead', async () => {
+    const phone = nextPhone();
+    const email = nextEmail();
+    await Promise.all([1, 2, 3, 4, 5].map(() => submitLeadInquiry(inquiry({ phone, email }))));
+    await recoverLeadIntake({ organizationId: ORG });
+    expect(await leadsFor({ phone })).toBe(1);
+    const lead: any = await Lead.findOne({ organizationId: orgId, phone }).lean();
+    expect(lead.inquiryCount).toBe(1);
+    expect(await LeadInquiry.countDocuments({ 'contact.normalizedPhone': phone, 'association.state': 'associated' })).toBe(1);
+    expect(await LeadInquiry.countDocuments({ 'contact.normalizedPhone': phone, 'association.reason': 'duplicate_same_request' })).toBe(4);
   });
 
   it('keeps inquiries safe while paused and replays them when intake is resumed', async () => {

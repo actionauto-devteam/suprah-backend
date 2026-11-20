@@ -9,7 +9,7 @@ import customerBookingService from './customerbooking.service';
 import { isSmsOptedOut, notifyCustomerOfReschedule } from './communication.service';
 import { ApiError } from '../utils/ApiError';
 import { resolveSmsDestination } from '../utils/smsDestination';
-import { CONTACT_RESTRICTED_STATUSES } from '../constants/leadStatus';
+import { CONTACT_RESTRICTED_STATUSES, NOT_A_LEAD_STATUS } from '../constants/leadStatus';
 import { checkContactForSend, contactRestrictionMessage, isContactRestrictedError } from './contactRestriction.service';
 import {
   SMS_OPTED_OUT_NOTICE_REASON,
@@ -279,7 +279,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
 
   if (data.leadId) {
     await Lead.updateOne(
-      { _id: data.leadId, organizationId: orgId, status: { $nin: CONTACT_RESTRICTED_STATUSES } },
+      { _id: data.leadId, organizationId: orgId, status: { $nin: CONTACT_RESTRICTED_STATUSES }, 'combinedInto.leadId': { $exists: false } },
       { status: 'Appointment Set' },
     );
   }
@@ -371,7 +371,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
       const leadEmail = data.customerBooking?.email || (data as any).email;
       if (leadEmail) {
         const updatedLead = await Lead.findOneAndUpdate(
-          { email: leadEmail, organizationId: orgId, status: { $nin: CONTACT_RESTRICTED_STATUSES } },
+          { email: leadEmail, organizationId: orgId, status: { $nin: [...CONTACT_RESTRICTED_STATUSES, NOT_A_LEAD_STATUS] }, 'combinedInto.leadId': { $exists: false } },
           { status: 'Appointment Set' },
           { new: true }
         );

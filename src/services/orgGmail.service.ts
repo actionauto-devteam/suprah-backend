@@ -8,10 +8,11 @@ import { normalizeIdentityEmail } from '../utils/contactIdentity';
 import { postalAddressLine } from '../utils/customerArea';
 import { decrypt, encrypt } from '../utils/crypto';
 import { ApiError } from '../utils/ApiError';
-import { parseEmailBody, extractADFFromBody, parseADF, detectChannel } from '../utils/adfParser';
+import { parseEmailBody, extractADFFromBody, parseADF, detectChannel, isADFContent } from '../utils/adfParser';
 import { getSocketIO } from '../utils/socketEmitter';
 import { withRetry } from '../utils/withRetry';
 import { LEAD_SOURCE } from '../constants/leadSource';
+import { NOT_A_LEAD_STATUS } from '../constants/leadStatus';
 import { resolveLeadStore } from '../utils/leadStore';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { triggerAiReplyForNewInquiry } from './communication.service';
@@ -27,21 +28,52 @@ import { notificationTemplates } from '../utils/notificationTemplates';
 import { forgetRevokedPreviousMailbox, isPreviousMailboxReadable, previousMailboxClient } from './previousMailbox.service';
 
 const RECHECK_SKIPPED_MESSAGE_MS = 10 * 60 * 1000;
+const SKIPPED_NON_LEAD_RECHECK_MS = 25 * 60 * 60 * 1000;
+const STAFF_EMAILS_CACHE_MS = 5 * 60 * 1000;
 const recentlyCheckedMessages = new Map<string, number>();
+const staffEmailsCache = new Map<string, { at: number; emails: Set<string> }>();
 
 export function wasMessageCheckedRecently(orgId: string, messageId: string) {
     const until = recentlyCheckedMessages.get(`${orgId}:${messageId}`);
     return until !== undefined && until > Date.now();
 }
 
-export function rememberCheckedMessage(orgId: string, messageId: string) {
+export function rememberCheckedMessage(orgId: string, messageId: string, forMs: number = RECHECK_SKIPPED_MESSAGE_MS) {
     const now = Date.now();
     if (recentlyCheckedMessages.size >= 20000) {
         for (const [key, until] of recentlyCheckedMessages) {
             if (until <= now) recentlyCheckedMessages.delete(key);
         }
     }
-    recentlyCheckedMessages.set(`${orgId}:${messageId}`, now + RECHECK_SKIPPED_MESSAGE_MS);
+    recentlyCheckedMessages.set(`${orgId}:${messageId}`, now + forMs);
+}
+
+const STAFF_USER_ROLES = ['employee', 'admin', 'super_admin'];
+
+async function staffEmailsFor(orgId: string): Promise<Set<string>> {
+    const cached = staffEmailsCache.get(orgId);
+    if (cached && cached.at > Date.now() - STAFF_EMAILS_CACHE_MS) return cached.emails;
+    if (!mongoose.isValidObjectId(orgId)) return new Set<string>();
+    try {
+        const [{ default: CrmUser }, { default: User }] = await Promise.all([
+            import('../models/CrmUser.model'),
+            import('../models/User.model'),
+        ]);
+        const [crmUsers, users] = await Promise.all([
+            CrmUser.find({ organizationId: orgId, isActive: { $ne: false } }).select('email').lean(),
+            User.find({ organizationId: orgId, role: { $in: STAFF_USER_ROLES }, isActive: { $ne: false } }).select('email').lean(),
+        ]);
+        const emails = new Set(
+            [...crmUsers, ...users]
+                .map((person: any) => normalizeIdentityEmail(person?.email))
+                .filter(Boolean) as string[],
+        );
+        staffEmailsCache.set(orgId, { at: Date.now(), emails });
+        return emails;
+    } catch (err) {
+        console.warn(`[OrgSync] Could not load team emails for org ${orgId}:`, err);
+        return cached?.emails || new Set<string>();
+    }
 }
 
 function isCustomerWrittenEmail(message: any, leadSourceEmail?: string | null): boolean {
@@ -55,7 +87,7 @@ function isCustomerWrittenEmail(message: any, leadSourceEmail?: string | null): 
 
 export async function notifyCustomerEmailReply(orgId: string, message: any, leadSourceEmail?: string | null, intakeHandled = false): Promise<boolean> {
     if (!message?.threadId) return false;
-    const lead: any = await Lead.findOne({ organizationId: orgId, $or: [{ threadId: message.threadId }, { previousThreadIds: message.threadId }], 'combinedInto.leadId': { $exists: false } }).select('_id firstName lastName phone email assignedTo createdAt messageId').lean();
+    const lead: any = await Lead.findOne({ organizationId: orgId, $or: [{ threadId: message.threadId }, { previousThreadIds: message.threadId }], 'combinedInto.leadId': { $exists: false }, status: { $ne: NOT_A_LEAD_STATUS } }).select('_id firstName lastName phone email assignedTo createdAt messageId').lean();
     if (!lead) return false;
     const at = new Date(Number(message.internalDate) || Date.now());
     const touched = await Lead.updateOne(
@@ -139,16 +171,16 @@ class OrgGmailService {
 
         let result = { total: 0, synced: 0 };
         let failure: unknown = null;
-        try {
-            result = await this.syncMailbox(orgId, config, false);
-        } catch (error) {
-            failure = error;
-        }
         const previous = config.previousMailbox;
         if (previous && isPreviousMailboxReadable(previous)) {
             await this.syncMailbox(orgId, config, true)
                 .catch((error) => forgetRevokedPreviousMailbox(orgId, previous, error))
                 .catch(() => undefined);
+        }
+        try {
+            result = await this.syncMailbox(orgId, config, false);
+        } catch (error) {
+            failure = error;
         }
         if (failure) throw failure;
         return result;
@@ -250,6 +282,10 @@ class OrgGmailService {
                 }
                 details.sort((a, b) => Number(a.internalDate || 0) - Number(b.internalDate || 0));
                 let intakeCreated = 0;
+                const ownAddresses = [config.gmailAddress, config.previousMailbox?.gmailAddress]
+                    .map((address) => normalizeIdentityEmail(address))
+                    .filter(Boolean) as string[];
+                const staffEmails = fromPrevious ? new Set<string>() : await staffEmailsFor(orgId);
                 for (const message of details) {
                     try {
                         const rawBody = this.extractBody(message);
@@ -264,9 +300,27 @@ class OrgGmailService {
                             leadSourceEmail: config.leadSourceEmail,
                             systemUserId,
                             allowNewInquiry: !config.leadSourceEmail || newInquiryIds.has(message.id),
+                            mailbox: fromPrevious ? config.previousMailbox?.gmailAddress : config.gmailAddress,
+                            plainEmailLeads: !fromPrevious,
+                            ownAddresses,
+                            staffEmails,
+                            notLeadSenders: config.notLeadSenders || [],
                         });
-                        if (result.status === 'skipped') rememberCheckedMessage(orgId, message.id);
+                        if (result.status === 'skipped') {
+                            const reason = (result as { reason?: string }).reason;
+                            rememberCheckedMessage(orgId, message.id, reason === 'not_a_lead_email' ? SKIPPED_NON_LEAD_RECHECK_MS : undefined);
+                            if (reason === 'lead_source_notice' || reason === 'own_mailbox') {
+                                await this.markLeadSourceNoticeRead(gmail, orgId, message, reason);
+                            }
+                        }
                         if (result.status === 'inactive' || result.status === 'skipped') continue;
+                        if (result.status === 'sorted' || result.status === 'dismissed') {
+                            await gmail.users.messages.batchModify({
+                                userId: 'me',
+                                requestBody: { ids: [message.id], removeLabelIds: ['UNREAD'] },
+                            });
+                            continue;
+                        }
                         if (result.status === 'associated' && result.created) intakeCreated++;
                         await notifyCustomerEmailReply(orgId, message, config.leadSourceEmail, true);
                         await gmail.users.messages.batchModify({
@@ -321,6 +375,11 @@ class OrgGmailService {
                     // Use parseEmailBody which gracefully falls back to plain text
                     const { parsedContent, channel, adfData } = await parseEmailBody(rawBody, subject, from);
                     const senderAddress = normalizeIdentityEmail(from.match(/<([^<>]+)>/)?.[1] || from);
+                    if (!adfData && senderAddress && senderAddress === normalizeIdentityEmail(config.leadSourceEmail) && !isADFContent(rawBody.toLowerCase())) {
+                        rememberCheckedMessage(orgId, msg.id!);
+                        await this.markLeadSourceNoticeRead(gmail, orgId, detail.data);
+                        continue;
+                    }
 
                     const sourceSubmittedAt = detail.data.internalDate
                         ? new Date(Number(detail.data.internalDate))
@@ -524,6 +583,13 @@ class OrgGmailService {
         );
 
         return details;
+    }
+
+    private async markLeadSourceNoticeRead(gmail: any, orgId: string, message: any, reason = 'lead_source_notice'): Promise<void> {
+        const what = reason === 'own_mailbox' ? 'an email sent from our own mailbox' : 'a lead-source email with no lead data';
+        console.log(`[OrgSync] Skipped ${what} for org ${orgId}: ${message?.id} "${gmailHeader(message, 'subject')}"`);
+        await gmail.users.messages.batchModify({ userId: 'me', requestBody: { ids: [message.id], removeLabelIds: ['UNREAD'] } })
+            .catch((error: unknown) => console.error(`[OrgSync] Could not mark the skipped lead-source email ${message?.id} read for org ${orgId}:`, error));
     }
 
     private extractBody(message: any): string {

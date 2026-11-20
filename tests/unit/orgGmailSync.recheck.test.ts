@@ -135,7 +135,7 @@ describe('orgGmail.service syncLeadsForOrg — every-minute sync does not re-rea
     expect(mockLeadFindOneAndUpdate).toHaveBeenCalledTimes(2);
   });
 
-  it('with lead intake on: a non-lead email is not re-read every minute, and a new lead email is imported and marked read', async () => {
+  it('with lead intake on: a non-lead email is not re-read every minute or every 10 minutes, and a new lead email is imported and marked read', async () => {
     mockIntakeMode.mockResolvedValue('active');
     mockGmailList.mockResolvedValue({ data: { messages: [{ id: 'newsletter-1' }, { id: 'lead-email-1' }] } });
     mockGmailGet.mockImplementation(async ({ id }: { id: string }) => ({ data: { id, threadId: `t-${id}`, internalDate: String(now), payload: textPayload(`body ${id}`) } }));
@@ -154,6 +154,10 @@ describe('orgGmail.service syncLeadsForOrg — every-minute sync does not re-rea
     expect(fetchedIds()).toEqual(['newsletter-1', 'lead-email-1']);
 
     now = start + 10 * 60_000 + 1;
+    await orgGmailService.syncLeadsForOrg('org-1');
+    expect(fetchedIds()).toEqual(['newsletter-1', 'lead-email-1']);
+
+    now = start + 25 * 60 * 60_000 + 1;
     await orgGmailService.syncLeadsForOrg('org-1');
     expect(fetchedIds()).toEqual(['newsletter-1', 'lead-email-1', 'newsletter-1']);
   });

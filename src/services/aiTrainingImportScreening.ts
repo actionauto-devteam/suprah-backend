@@ -1,4 +1,5 @@
 import { isDemoPhone } from '../utils/demoPhone';
+import { FREE_MAIL_DOMAINS } from '../utils/freeMailDomains';
 import { hasGuaranteedAvailabilityLanguage, MONEY_SAFETY_REASONS, validateOutboundMessage } from '../utils/aiOutboundSafety';
 import { findProtectedTopicInText, findSafetyBypassInText } from './aiTrainingRules.service';
 import {
@@ -21,10 +22,7 @@ export interface BusinessContactSets {
 
 export const EMPTY_BUSINESS_CONTACTS: BusinessContactSets = { phones: new Set(), emails: new Set(), domains: new Set() };
 
-export const FREE_MAIL_DOMAINS = new Set([
-  'gmail.com', 'googlemail.com', 'yahoo.com', 'ymail.com', 'hotmail.com', 'outlook.com', 'live.com', 'msn.com',
-  'icloud.com', 'me.com', 'mac.com', 'aol.com', 'proton.me', 'protonmail.com', 'gmx.com', 'mail.com', 'zoho.com',
-]);
+export { FREE_MAIL_DOMAINS };
 
 export const BARE_DOMAIN_PATTERN = /(^|[^@\w.-])((?:[a-z0-9-]+\.)+(?:com|net|org|io|us|co|biz|info|app|auto|cars))\b/gi;
 const CARD_PATTERN = /\b(?:\d[ -]?){12,18}\d\b/g;

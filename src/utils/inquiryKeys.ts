@@ -42,6 +42,77 @@ export function inquiryVehicleKey(vehicle?: InquiryVehicleInput | null): string 
   return parts.length ? `ymm:${parts.join('|')}` : '';
 }
 
+const alnum = (value: unknown) => clean(value).replace(/[^a-z0-9]+/g, '');
+
+export type InquiryVehicleMatch = 'same' | 'different' | 'unknown';
+
+export function compareInquiryVehicles(a?: InquiryVehicleInput | null, b?: InquiryVehicleInput | null): InquiryVehicleMatch {
+  const vinA = alnum(a?.vin);
+  const vinB = alnum(b?.vin);
+  if (vinA && vinB) return vinA === vinB ? 'same' : 'different';
+  const stockA = alnum(a?.stock);
+  const stockB = alnum(b?.stock);
+  if (stockA && stockB) return stockA === stockB ? 'same' : 'different';
+  const ymmA = [alnum(a?.year), alnum(a?.make), alnum(a?.model)];
+  const ymmB = [alnum(b?.year), alnum(b?.make), alnum(b?.model)];
+  if (ymmA.every(Boolean) && ymmB.every(Boolean)) {
+    const shorter = Math.min(ymmA[2].length, ymmB[2].length);
+    const sameModel = ymmA[2] === ymmB[2] || (shorter >= 3 && (ymmA[2].startsWith(ymmB[2]) || ymmB[2].startsWith(ymmA[2])));
+    return ymmA[0] === ymmB[0] && ymmA[1] === ymmB[1] && sameModel ? 'same' : 'different';
+  }
+  return 'unknown';
+}
+
+export function inquiryNamesVehicle(vehicle?: InquiryVehicleInput | null): boolean {
+  return [vehicle?.vin, vehicle?.stock, vehicle?.year, vehicle?.make, vehicle?.model].some((part) => Boolean(alnum(part)));
+}
+
+export function inquiryNamesUnit(vehicle?: InquiryVehicleInput | null): boolean {
+  return Boolean(alnum(vehicle?.vin) || alnum(vehicle?.stock));
+}
+
+export function sameInquiryUnit(a?: InquiryVehicleInput | null, b?: InquiryVehicleInput | null): boolean {
+  const vinA = alnum(a?.vin);
+  const vinB = alnum(b?.vin);
+  if (vinA && vinB) return vinA === vinB;
+  const stockA = alnum(a?.stock);
+  const stockB = alnum(b?.stock);
+  return Boolean(stockA && stockB && stockA === stockB);
+}
+
+const words = (value: unknown) => clean(value).replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+export function inquiryHasText(value: unknown): boolean {
+  return Boolean(words(value));
+}
+
+export function inquiryTextAddsNothing(earlier: unknown, later: unknown): boolean {
+  const before = words(earlier);
+  const after = words(later);
+  if (!after) return true;
+  if (!before) return false;
+  return before === after || (after.length >= 12 && before.includes(after));
+}
+
+export const SAME_REQUEST_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+export const CLOSED_LEAD_COPY_WINDOW_MS = 30 * 60 * 1000;
+
+function laterAddsUnit(earlier?: InquiryVehicleInput | null, later?: InquiryVehicleInput | null): boolean {
+  const vinBefore = alnum(earlier?.vin);
+  const vinAfter = alnum(later?.vin);
+  if (vinAfter) return !vinBefore;
+  return Boolean(alnum(later?.stock) && !alnum(earlier?.stock));
+}
+
+export function isSameRequest(earlier: any, later: any): boolean {
+  const vehicles = compareInquiryVehicles(earlier?.vehicle, later?.vehicle);
+  if (vehicles === 'different') return false;
+  if (vehicles === 'same') return !laterAddsUnit(earlier?.vehicle, later?.vehicle) && inquiryTextAddsNothing(earlier?.comments, later?.comments);
+  if (inquiryNamesVehicle(earlier?.vehicle) || inquiryNamesVehicle(later?.vehicle)) return false;
+  return inquiryHasText(later?.comments) && inquiryTextAddsNothing(earlier?.comments, later?.comments);
+}
+
 const TIME_OF_DAY = /\d{1,2}:\d{2}/;
 const EXPLICIT_ZONE = /(z|[+-]\d{2}:?\d{2})$/i;
 

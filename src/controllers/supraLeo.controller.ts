@@ -8,6 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import Lead from '../models/lead.model';
+import { countedLeadFilter } from '../constants/leadStatus';
 import { IUser } from '../models/User.model';
 import SupraLeoChat from '../models/SupraLeoChat.model';
 import CrmUser from '../models/CrmUser.model';
@@ -1187,8 +1188,8 @@ export const transcribeChunk = asyncHandler(async (req: Request, res: Response) 
 export const getStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const [leadCount, unreadCount, chatDoc] = await Promise.all([
-    Lead.countDocuments({ organizationId: user.organizationId }),
-    Lead.countDocuments({ organizationId: user.organizationId, isRead: false }),
+    Lead.countDocuments({ organizationId: user.organizationId, ...countedLeadFilter() }),
+    Lead.countDocuments({ organizationId: user.organizationId, isRead: false, ...countedLeadFilter() }),
     SupraLeoChat.findOne({ userId: user._id, organizationId: user.organizationId }).select('messageCount lastActivityAt'),
   ]);
 

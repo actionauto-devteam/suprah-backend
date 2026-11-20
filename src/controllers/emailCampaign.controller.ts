@@ -10,7 +10,7 @@ import MarketingContact from '../models/MarketingContact.model';
 import { buildMarketingContactQuery } from './marketingContact.controller';
 import EmailOptOut from '../models/EmailOptOut.model';
 import Organization from '../models/Organization.model';
-import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
+import { LEAD_STATUS_VALUES, NOT_A_LEAD_STATUS, countedLeadFilter } from '../constants/leadStatus';
 import { hasSendPermission } from '../services/marketingContact.service';
 import { sanitizeEmailHtml, htmlToPlainText } from '../utils/emailHtmlSanitizer';
 import emailService, { campaignGreetingNameFor } from '../services/email.service';
@@ -18,7 +18,7 @@ import storageService, { BucketType } from '../services/storage.service';
 import logger from '../utils/logger';
 
 const MAX_RECIPIENTS = 500;
-const VALID_STATUSES = LEAD_STATUS_VALUES;
+const VALID_STATUSES = LEAD_STATUS_VALUES.filter((status) => status !== NOT_A_LEAD_STATUS);
 
 function parseStatuses(raw: unknown): string[] {
   const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : [];
@@ -30,6 +30,7 @@ function audienceQuery(orgId: string, statuses: string[]) {
   const query: Record<string, unknown> = {
     organizationId: orgId,
     email: { $exists: true, $ne: '' },
+    ...countedLeadFilter(),
   };
   if (statuses.length > 0) query.status = { $in: statuses };
   return query;

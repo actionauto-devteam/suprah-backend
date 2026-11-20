@@ -9,6 +9,7 @@ import WebChatMessage from '../models/WebChatMessage.model';
 import { CallLog, CommunicationMessage, Conversation } from '../models/communication.model';
 import { CallRecording } from '../models/CallRecording.model';
 import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
+import { SAME_REQUEST_WINDOW_MS, inquiryHasText, inquiryTextAddsNothing, isSameRequest } from '../utils/inquiryKeys';
 import { ApiError } from '../utils/ApiError';
 import { cacheService } from './cache.service';
 import { describeSmsFailure } from '../utils/smsFailure';
@@ -296,8 +297,10 @@ export async function loadConversationItems(organizationId: string, lead: any, o
   const recordingByCall = new Map(recordings.map((recording) => [String(recording.callLogId), recording]));
 
   const items: ConversationItem[] = [];
+  const chatTexts = new Set((chats as any[]).filter((chat) => chat.direction === 'inbound').map((chat) => String(chat.body || '').trim()));
   for (const message of sms as any[]) {
     const inbound = message.direction === 'inbound';
+    if (inbound && message.origin === 'inquiry' && chatTexts.has(String(message.body || '').trim())) continue;
     items.push({
       id: `sms:${message._id}`,
       kind: 'message',
@@ -379,11 +382,25 @@ export async function loadConversationItems(organizationId: string, lead: any, o
   }
 
   let hasOriginal = false;
-  for (const inquiry of inquiries as any[]) {
+  const inboundShown = items
+    .filter((item) => item.kind === 'message' && item.direction === 'inbound')
+    .map((item) => ({ at: new Date(item.occurredAt).getTime(), body: item.body, channel: item.channel }));
+  const shownNear = (text: string, at: number, channels?: string[]) => inboundShown.some((message) =>
+    (!channels || channels.includes(message.channel))
+    && Math.abs(message.at - at) <= SAME_REQUEST_WINDOW_MS
+    && inquiryHasText(text)
+    && inquiryTextAddsNothing(message.body, text));
+  const shownRequests: any[] = [];
+  const inquiriesOldestFirst = [...(inquiries as any[])].sort((a, b) => new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime());
+  for (const inquiry of inquiriesOldestFirst) {
     if (['sms', 'call'].includes(inquiry.kind)) continue;
     const gmailId = inquiry.sourceIds?.gmailMessageId;
+    const receivedAtMs = new Date(inquiry.receivedAt).getTime();
     if (inquiry.kind === 'email_reply') {
       if (gmailId && threadIds.has(gmailId)) continue;
+      const replyText = stripQuotedReply(String(inquiry.comments || ''));
+      if (shownNear(replyText, receivedAtMs, ['email'])) continue;
+      inboundShown.push({ at: receivedAtMs, body: replyText, channel: 'email' });
       items.push({
         id: `email:inquiry:${inquiry._id}`,
         kind: 'message',
@@ -399,13 +416,22 @@ export async function loadConversationItems(organizationId: string, lead: any, o
     }
     const isOriginal = String(inquiry._id) === String(lead.sourceInquiryId || '');
     if (isOriginal) hasOriginal = true;
+    const comments = String(inquiry.comments || '');
+    const repeatOfShown = !isOriginal && shownRequests.some((earlier) =>
+      Math.abs(new Date(earlier.receivedAt).getTime() - receivedAtMs) <= SAME_REQUEST_WINDOW_MS && isSameRequest(earlier, inquiry));
+    shownRequests.push(inquiry);
+    if (repeatOfShown) continue;
+    const shownAsMessage = !isOriginal && (
+      (inquiry.kind === 'webchat_session' && chatTexts.has(comments.trim()))
+      || shownNear(comments, receivedAtMs)
+    );
     items.push({
       id: `inquiry:${inquiry._id}`,
       kind: 'inquiry',
       channel: 'inquiry',
       direction: 'inbound',
       occurredAt: toIso(inquiry.receivedAt),
-      body: String(inquiry.comments || ''),
+      body: shownAsMessage ? '' : comments,
       subject: inquiry.subject || undefined,
       author: { name: customerName, kind: 'customer' },
       inquiry: {
@@ -509,7 +535,7 @@ export async function listEarlierConversations(organizationId: string, lead: any
   const same = await sameCustomerLeadIds(organizationId, lead);
   if (!same.available) return { available: false, reason: same.reason, leads: [], unlinkedCount: 0 };
   const leads = same.leadIds.length
-    ? await Lead.find({ _id: { $in: same.leadIds }, organizationId }).select('firstName lastName status source channel createdAt updatedAt combinedInto').sort({ createdAt: -1 }).limit(10).lean()
+    ? await Lead.find({ _id: { $in: same.leadIds }, organizationId, 'combinedInto.via': { $ne: 'link' } }).select('firstName lastName status source channel createdAt updatedAt combinedInto').sort({ createdAt: -1 }).limit(10).lean()
     : [];
   let unlinkedCount = 0;
   if (same.phoneSafe && lead.phone) {

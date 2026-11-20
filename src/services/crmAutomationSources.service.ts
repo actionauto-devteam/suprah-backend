@@ -4,7 +4,7 @@ import Vehicle from '../models/Vehicle.model';
 import CrmAutomationRun from '../models/CrmAutomationRun.model';
 import { CallRecording } from '../models/CallRecording.model';
 import { CallLog, CommunicationMessage, Conversation } from '../models/communication.model';
-import { CONTACT_RESTRICTED_STATUSES, NURTURE_ELIGIBLE_STATUSES, classifyLeadLifecycle } from '../constants/leadStatus';
+import { CONTACT_RESTRICTED_STATUSES, NOT_A_LEAD_STATUS, NURTURE_ELIGIBLE_STATUSES, classifyLeadLifecycle } from '../constants/leadStatus';
 import { COMPANY_TZ, zoneOffsetMinutes } from '../utils/companyTimezone';
 import { matchesVehicle } from '../utils/vehicleMatch';
 import { dialedKey, dialedNumberLocations } from './crmAutomationCalls.service';
@@ -211,7 +211,8 @@ export async function dateTriggerLeads(orgId: string): Promise<any[]> {
     organizationId: { $in: orgIdVariants(orgId) },
     source: { $ne: 'Demo' },
     intakeIdentity: { $ne: 'unverified' },
-    status: { $nin: CONTACT_RESTRICTED_STATUSES },
+    status: { $nin: [...CONTACT_RESTRICTED_STATUSES, NOT_A_LEAD_STATUS] },
+    'combinedInto.leadId': { $exists: false },
     $or: [{ phone: { $exists: true, $ne: '' } }, { email: { $exists: true, $ne: '' } }],
   })
     .select('_id firstName lastName phone email')

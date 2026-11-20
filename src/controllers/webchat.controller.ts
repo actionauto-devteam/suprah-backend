@@ -605,6 +605,28 @@ async function createWebchatLead(input: WebchatConversationInput, sessionId: mon
   return { lead, viaIntake: false };
 }
 
+const STALE_START_CLAIM_MS = 2 * 60 * 1000;
+
+async function claimWebchatStart(orgId: unknown, clientRequestId: string): Promise<{ existing: any; ownedId: unknown }> {
+  const key = { organizationId: orgId, kind: 'webchat_session', claimKey: clientRequestId };
+  const insert = () => IntakeClaim.findOneAndUpdate(
+    key,
+    { $setOnInsert: { ...key, expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) } },
+    { new: true, upsert: true, includeResultMetadata: true },
+  );
+  const first = await insert();
+  if (!first.lastErrorObject?.updatedExisting) return { existing: null, ownedId: first.value?._id || null };
+  const claim: any = first.value;
+  const createdAt = claim?.createdAt ? new Date(claim.createdAt).getTime() : NaN;
+  if (claim?.leadId || !(Date.now() - createdAt > STALE_START_CLAIM_MS)) return { existing: claim, ownedId: null };
+  const released = await IntakeClaim.deleteOne({ _id: claim._id, leadId: null });
+  if (released.deletedCount !== 1) return { existing: claim, ownedId: null };
+  const second = await insert();
+  return second.lastErrorObject?.updatedExisting
+    ? { existing: second.value, ownedId: null }
+    : { existing: null, ownedId: second.value?._id || null };
+}
+
 async function createWebchatConversation(input: WebchatConversationInput) {
   const sessionId = input.sessionId || new mongoose.Types.ObjectId();
   const { lead, viaIntake } = await createWebchatLead(input, sessionId);
@@ -866,22 +888,14 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
     throw new ApiError(400, 'This dealership is not yet set up to receive chats');
   }
 
+  let ownedClaimId: unknown = null;
   if (clientRequestId) {
-    const claimResult = await IntakeClaim.findOneAndUpdate(
-      { organizationId: orgId, kind: 'webchat_session', claimKey: clientRequestId },
-      {
-        $setOnInsert: {
-          organizationId: orgId,
-          kind: 'webchat_session',
-          claimKey: clientRequestId,
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        },
-      },
-      { new: true, upsert: true, includeResultMetadata: true },
-    );
+    const claim = await claimWebchatStart(orgId, clientRequestId);
+    const existingClaim: any = claim.existing;
+    ownedClaimId = claim.ownedId;
 
-    if (claimResult.lastErrorObject?.updatedExisting) {
-      const existingLeadId = claimResult.value?.leadId;
+    if (existingClaim) {
+      const existingLeadId = existingClaim.leadId;
       const existingSession = existingLeadId
         ? await WebChatSession.findOne({ leadId: existingLeadId }).sort({ createdAt: -1 })
         : null;
@@ -914,6 +928,9 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
       throw new ApiError(409, 'This request is already being processed.');
     }
   }
+  const ownClaim = clientRequestId
+    ? { organizationId: orgId, kind: 'webchat_session', claimKey: clientRequestId, ...(ownedClaimId ? { _id: ownedClaimId } : {}), leadId: null }
+    : null;
 
   let created: Awaited<ReturnType<typeof createWebchatConversation>>;
   try {
@@ -930,18 +947,18 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
       pageUrl: pageUrl ? String(pageUrl) : undefined,
     });
   } catch (err) {
-    if (clientRequestId) {
-      await IntakeClaim.deleteOne({ organizationId: orgId, kind: 'webchat_session', claimKey: clientRequestId }).catch(() => undefined);
+    if (ownClaim) {
+      await IntakeClaim.deleteOne(ownClaim).catch(() => undefined);
     }
     throw err;
   }
   const { lead, session, token, chatMessage, check } = created;
 
-  if (clientRequestId) {
-    await IntakeClaim.updateOne(
-      { organizationId: orgId, kind: 'webchat_session', claimKey: clientRequestId },
-      { $set: { leadId: lead._id } },
-    );
+  if (ownClaim) {
+    const owned = await IntakeClaim.updateOne(ownClaim, { $set: { leadId: lead._id } });
+    if (ownedClaimId && !owned?.matchedCount) {
+      logger.warn({ leadId: lead._id, sessionId: session._id }, '[Webchat] The chat started after its request claim was released to a newer try');
+    }
   }
 
   logger.info({ leadId: lead._id, sessionId: session._id }, 'Website chat started');

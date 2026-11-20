@@ -11,6 +11,7 @@ import Invitation from "../models/Invitation.model";
 import Vehicle from "../models/Vehicle.model";
 import UserActivity from "../models/UserActivity.model";
 import Lead from "../models/lead.model";
+import { countedLeadFilter } from "../constants/leadStatus";
 import logger from "../utils/logger";
 
 const dayKey = (value: Date | string) => new Date(value).toISOString().slice(0, 10);
@@ -195,7 +196,7 @@ const getOrganizationDetail = asyncHandler(async (req: Request, res: Response) =
       { $group: { _id: "$role", count: { $sum: 1 } } },
     ]),
     Vehicle.countDocuments({ organizationId }).catch(() => 0),
-    Lead.countDocuments({ organizationId }).catch(() => 0),
+    Lead.countDocuments({ organizationId, ...countedLeadFilter() }).catch(() => 0),
     Invitation.countDocuments({ organizationId, status: "pending" }).catch(() => 0),
   ]);
 

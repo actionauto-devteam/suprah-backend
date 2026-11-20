@@ -131,6 +131,10 @@ function sentEmail(callIndex = 0) {
   return { threadId: body.threadId, raw };
 }
 
+function adfBody(first: string, last: string, vehicle = '<vehicle interest="buy"><year>2020</year><make>Honda</make><model>Civic</model></vehicle>') {
+  return `<?xml version="1.0"?><?adf version="1.0"?><adf><prospect><requestdate>2026-11-19T10:00:00-07:00</requestdate>${vehicle}<customer><contact><name part="first">${first}</name><name part="last">${last}</name><email>${first.toLowerCase()}.${last.toLowerCase()}@example.com</email></contact></customer></prospect></adf>`;
+}
+
 function gmailMessage(input: { id: string; threadId: string; from: string; subject?: string; body?: string; at?: Date; sent?: boolean }) {
   const at = input.at || new Date();
   const body = input.body || 'Is it still available?';
@@ -476,7 +480,7 @@ describe('Real-DB: switching the dealership email account (local MongoDB only)',
         followUp: { lastCustomerActivityAt: new Date(Date.now() - 10 * DAY) },
       });
       const repliedAt = new Date(Date.now() - 60000);
-      const leadEmail = gmailMessage({ id: `prev-dc-${++serial}`, threadId: `old-prev-dc-${serial}`, from: `DealersCloud <${DEALERSCLOUD}>`, subject: 'New Internet Lead', body: 'Name: Sam Stone' });
+      const leadEmail = gmailMessage({ id: `prev-dc-${++serial}`, threadId: `old-prev-dc-${serial}`, from: `DealersCloud <${DEALERSCLOUD}>`, subject: 'New Internet Lead', body: adfBody('Sam', 'Stone') });
       const reply = gmailMessage({ id: `prev-reply-${++serial}`, threadId: 'old-prev-thread-1', from: `Pat Lee <${lead.email}>`, body: 'Yes, I still want it.', at: repliedAt });
       unreadIn(PREVIOUS_REFRESH).push(leadEmail, reply);
 
@@ -494,7 +498,7 @@ describe('Real-DB: switching the dealership email account (local MongoDB only)',
     it('when the old and the new account both get the same DealersCloud email, only one lead is made', async () => {
       await usePreviousMailbox();
       const n = ++serial;
-      const body = `Name: Dana Double ${n}\nVehicle: 2020 Honda Civic`;
+      const body = adfBody('Dana', `Double${n}`);
       unreadIn(MAIN_REFRESH).push(gmailMessage({ id: `main-dc-${n}`, threadId: `main-dc-thread-${n}`, from: `DealersCloud <${DEALERSCLOUD}>`, subject: 'New Internet Lead', body }));
       unreadIn(PREVIOUS_REFRESH).push(gmailMessage({ id: `prev-dc-${n}`, threadId: `old-dc-thread-${n}`, from: `DealersCloud <${DEALERSCLOUD}>`, subject: 'New Internet Lead', body }));
 
@@ -508,7 +512,7 @@ describe('Real-DB: switching the dealership email account (local MongoDB only)',
 
     it('without a previous account the sync works exactly as before: each email becomes its own lead', async () => {
       const n = ++serial;
-      const body = `Name: Sam Same ${n}\nVehicle: 2018 Ford F-150`;
+      const body = adfBody('Sam', `Same${n}`, '<vehicle interest="buy"><year>2018</year><make>Ford</make><model>F-150</model></vehicle>');
       unreadIn(MAIN_REFRESH).push(
         gmailMessage({ id: `main-dc-a-${n}`, threadId: `main-dc-thread-a-${n}`, from: `DealersCloud <${DEALERSCLOUD}>`, subject: 'New Internet Lead', body }),
         gmailMessage({ id: `main-dc-b-${n}`, threadId: `main-dc-thread-b-${n}`, from: `DealersCloud <${DEALERSCLOUD}>`, subject: 'New Internet Lead', body }),

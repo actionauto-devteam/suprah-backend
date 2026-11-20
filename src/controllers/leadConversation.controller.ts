@@ -21,7 +21,7 @@ export const getLeadConversation = asyncHandler(async (req: Request, res: Respon
   });
   if (data.combine) {
     const user = (req as any).user || (req as any).crmUser;
-    data.combine.canUndo = await isOrganizationAdmin(user, orgId).catch(() => false);
+    data.combine.canUndo = data.combine.combinedInto?.via === 'link' ? false : await isOrganizationAdmin(user, orgId).catch(() => false);
   }
   res.json(new ApiResponse(200, data, 'Conversation'));
 });
