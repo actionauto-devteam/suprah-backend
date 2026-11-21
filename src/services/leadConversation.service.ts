@@ -138,6 +138,12 @@ interface EmailEntry {
   attachments: string[];
 }
 
+export function personNameOf(fromName: unknown): string {
+  const name = String(fromName || '').trim();
+  if (!name || name.includes('@') || /=\?[^?]+\?[bq]\?/i.test(name)) return '';
+  return name;
+}
+
 export function parseGmailThreadMessages(messages: any[], ownAddresses: string[]): EmailEntry[] {
   const own = new Set(ownAddresses.map((address) => normalizeIdentityEmail(address)).filter(Boolean) as string[]);
   return (messages || []).map((message: any) => {
@@ -361,6 +367,12 @@ export async function loadConversationItems(organizationId: string, lead: any, o
   }
 
   const foreignIds = new Set((foreignGmail as any[]).map((entry) => entry.sourceIds?.gmailMessageId).filter(Boolean));
+  const sentEmails = (emails as EmailEntry[]).filter((email) => email.direction === 'outbound');
+  const senderNames = sentEmails.length
+    ? await import('./leadHandling.service')
+      .then(({ emailReplySenders }) => emailReplySenders(organizationId, leadId, sentEmails))
+      .catch(() => new Map<string, string>())
+    : new Map<string, string>();
   const threadIds = new Set<string>();
   for (const email of emails as EmailEntry[]) {
     threadIds.add(email.gmailId);
@@ -374,7 +386,9 @@ export async function loadConversationItems(organizationId: string, lead: any, o
       occurredAt: email.occurredAt,
       body: email.body,
       subject: email.subject || undefined,
-      author: email.direction === 'inbound' ? { name: email.fromName || customerName, kind: 'customer' } : { name: email.fromName || 'Your dealership', kind: 'staff' },
+      author: email.direction === 'inbound'
+        ? { name: email.fromName || customerName, kind: 'customer' }
+        : { name: senderNames.get(email.gmailId) || personNameOf(email.fromName) || email.fromName || 'Your dealership', kind: 'staff' },
       status: deliveryStatus(email.direction === 'inbound' ? 'received' : 'sent'),
       attachments: email.attachments.length ? email.attachments : undefined,
       messageId: email.gmailId,

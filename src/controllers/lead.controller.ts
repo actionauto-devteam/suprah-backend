@@ -82,7 +82,7 @@ import { clearLeadConversationEmailCache, withoutOtherLeadsEmails } from '../ser
 import { extractGmailText } from '../utils/gmailMessageParser';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { LeadReplyRecipientError, resolveLeadReplyRecipient } from '../utils/leadReplyRecipient';
-import { cleanEmailSubject, encodeEmailHeader, resolveLeadEmailSubject } from '../utils/leadEmailSubject';
+import { cleanEmailSubject, encodeEmailHeader, formatEmailFrom, resolveLeadEmailSubject } from '../utils/leadEmailSubject';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
 import { getLeadHandlers, leadIdsHandledBy, recordLeadHandling } from '../services/leadHandling.service';
 import {
@@ -365,13 +365,19 @@ export async function sendLeadReplyEmail(
     ? String(lead.threadId)
     : null;
 
-  const replyingUser = forcedSenderEmail ? null : await User.findById(userId);
+  const staffSender = !forcedSenderEmail && mongoose.isValidObjectId(String(userId || ''));
+  const replyingUser: any = staffSender ? await User.findById(userId).select('name email').lean() : null;
+  const replyingCrmUser: any = staffSender && !replyingUser?.name
+    ? await CrmUser.findById(userId).select('fullName email').lean()
+    : null;
 
-  const senderDisplay =
+  const senderAddress =
     forcedSenderEmail ||
-    replyingUser?.email ||
     config?.gmailAddress ||
+    replyingUser?.email ||
+    replyingCrmUser?.email ||
     'actionautoutah.dev@gmail.com';
+  const senderName = staffSender ? replyingUser?.name || replyingCrmUser?.fullName || '' : '';
 
   const recipientEmail =
     verifiedRecipient ||
@@ -387,7 +393,7 @@ export async function sendLeadReplyEmail(
   const { subject } = resolveLeadEmailSubject(lead, options.subject);
 
   const commonHeaders = [
-    `From: ${senderDisplay}`,
+    `From: ${formatEmailFrom(senderName, senderAddress)}`,
     `To: ${recipientEmail}`,
     `Subject: ${encodeEmailHeader(subject)}`,
     ...(mailboxThreadId && lead.messageId
@@ -955,7 +961,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
       'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
       'centralIngestion labels followUp statusHistory notes assignedTo assignedAt assignmentUnseenBy aiSummary aiSummaryGeneratedAt ' +
       'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt ' +
-      'firstContactBy firstContactVia campaignSentAt';
+      'firstContactBy firstContactVia campaignSentAt openedBy';
 
     let leads: any[];
     if (sortBy === "waiting_longest") {
@@ -1201,7 +1207,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'parsedContent threadId messageId isRead isPending channel ' +
         'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
         'centralIngestion labels followUp statusHistory notes assignedTo assignedAt assignmentUnseenBy aiSummary aiSummaryGeneratedAt ' +
-        'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt combinedInto'
+        'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt combinedInto openedBy'
       )
       .lean();
 
@@ -2073,6 +2079,30 @@ export const markAsRead = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[ERROR] Error marking as read:', error);
     res.status(500).json({ message: 'Error marking inquiry as read' });
+  }
+};
+
+const MAX_LEAD_OPENERS = 50;
+
+export const markLeadOpened = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const orgId = req.orgId;
+    if (!orgId || !mongoose.isValidObjectId(String(id))) return res.status(404).json({ message: 'Lead not found' });
+    const actor: any = (req as any).crmUser || (req as any).user;
+    const staff = await resolveCrmStaff(String(orgId), actor).catch(() => null);
+    const userId = String(staff?.userId || staff?.actorId || '');
+    if (!mongoose.isValidObjectId(userId)) return res.json({ recorded: false });
+    const name = String(staff?.name || '').trim().slice(0, 120);
+    const result = await Lead.updateOne(
+      { _id: id, organizationId: orgId, openedBy: { $type: 'array' }, 'openedBy.userId': { $ne: userId } },
+      { $push: { openedBy: { $each: [{ userId, ...(name ? { name } : {}), at: new Date() }], $slice: MAX_LEAD_OPENERS } } },
+      { timestamps: false },
+    );
+    res.json({ recorded: result.modifiedCount > 0 });
+  } catch (error) {
+    console.error('[ERROR] Error recording that a lead was opened:', error);
+    res.status(500).json({ message: 'Error recording that the lead was opened' });
   }
 };
 

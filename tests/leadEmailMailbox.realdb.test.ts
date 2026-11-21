@@ -354,6 +354,26 @@ describe('Real-DB: switching the dealership email account (local MongoDB only)',
       expect(after.previousThreadIds).toBeUndefined();
     });
 
+    it('a reply from a team member goes out under their name with the connected mailbox address', async () => {
+      const lead = await makeLead({ threadId: 'live-thread-name', messageId: 'live-message-name', emailThreadSubject: 'Tacoma inquiry' });
+
+      await sendEmail(lead._id).expect(200);
+
+      const sent = sentEmail(mockMessagesSend.mock.calls.length - 1);
+      expect(sent.raw).toMatch(new RegExp(`^From: "Erin Employee" <${NEW_MAILBOX.replace(/\./g, '\\.')}>\\r$`, 'm'));
+      expect(sent.raw).not.toMatch(/From: .*mailbox-emp-/);
+    });
+
+    it('an AI email reply keeps the plain connected mailbox address', async () => {
+      const lead = await makeLead({ threadId: 'live-thread-ai', messageId: 'live-message-ai', emailThreadSubject: 'Tacoma inquiry' });
+      const fresh: any = await Lead.findById(lead._id).lean();
+
+      await sendLeadReplyEmail(fresh, 'Hi Pat, it is still here.', 'ai-agent', ORG, [], NEW_MAILBOX);
+
+      const sent = sentEmail(mockMessagesSend.mock.calls.length - 1);
+      expect(sent.raw).toMatch(new RegExp(`^From: ${NEW_MAILBOX.replace(/\./g, '\\.')}\\r$`, 'm'));
+    });
+
     it('a lead with no email thread yet gets the new thread saved, as before', async () => {
       const lead = await makeLead();
       await sendEmail(lead._id).expect(200);
