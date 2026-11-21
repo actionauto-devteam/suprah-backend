@@ -4,7 +4,6 @@ import config from '../config';
 import logger from '../utils/logger';
 import { ApiError } from '../utils/ApiError';
 import type { IMeeting } from '../models/Meeting.model';
-import { CrmPushService } from './crmPush.service';
 
 /* ── Passwords ────────────────────────────────────────────────────────────────
  * Room passwords are stored as scrypt hashes (built into Node — no new
@@ -204,15 +203,22 @@ export function serializeHostRoom(m: any, host?: { _id?: any; fullName?: string 
 
 /* ── Notifications ────────────────────────────────────────────────────────── */
 
-/** Push the rep's devices when a new customer joins the line. Best-effort. */
+/**
+ * Push the rep's devices when a new customer joins the line. Best-effort.
+ * crmPush.service configures web-push (VAPID) at import time, so it is loaded
+ * lazily here — importing the Meet controller must never require push config.
+ */
 export function notifyHostCustomerQueued(meeting: IMeeting, customerName: string) {
-  void CrmPushService.sendToUsers([String(meeting.hostCrmUserId)], {
-    source: 'Suprah Meet',
-    title: 'Customer waiting in Deal Desk',
-    body: `${customerName} is in line for “${meeting.title}”.`,
-    tag: `suprah-meet-dealdesk:${meeting.code}`,
-    data: { url: '/crm/suprah-meet/deal-desk', priority: 'high', soundProfile: 'attention' },
-  }, { ttlSeconds: 300, timeoutMs: 10_000 }).catch((error: unknown) => {
+  void (async () => {
+    const { CrmPushService } = await import('./crmPush.service');
+    await CrmPushService.sendToUsers([String(meeting.hostCrmUserId)], {
+      source: 'Suprah Meet',
+      title: 'Customer waiting in Deal Desk',
+      body: `${customerName} is in line for “${meeting.title}”.`,
+      tag: `suprah-meet-dealdesk:${meeting.code}`,
+      data: { url: '/crm/suprah-meet/deal-desk', priority: 'high', soundProfile: 'attention' },
+    }, { ttlSeconds: 300, timeoutMs: 10_000 });
+  })().catch((error: unknown) => {
     logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] Deal Desk queue push failed');
   });
 }
