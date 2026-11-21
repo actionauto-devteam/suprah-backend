@@ -15,6 +15,13 @@ import { getIO } from "../socket/supraspace.socket";
 import { emitToUser } from "../utils/socketEmitter";
 import notificationService from "../services/notification.service";
 import logger from "../utils/logger";
+import {
+  CUSTOMER_NOTE_MAX,
+  MAX_INVOICE_TOTAL,
+  customerNoteFrom,
+  invoiceLinesFrom,
+  taxRateFrom,
+} from "../utils/invoiceLines";
 
 
 async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
@@ -376,17 +383,34 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
   if (!actor.organizationId) throw new ApiError(403, "No organization context.");
 
   const { inquiryId } = req.params;
-  const { lineItems, taxRate = 0, dueDate, notes, description } = req.body as {
+  const { lineItems, taxRate = 0, dueDate, notes, customerNote, description } = req.body as {
     lineItems?: Array<Partial<IPaymentLineItem>>;
     taxRate?: number;
     dueDate?: string;
+    /** For the dealership's team only. */
     notes?: string;
+    /** Shown to the customer on their invoice (2026-11-20). */
+    customerNote?: string;
     description?: string;
   };
 
-  if (!Array.isArray(lineItems) || lineItems.length === 0) {
-    throw new ApiError(400, "At least one line item is required");
+  // Check the lines, tax, due date and note before anything is looked up (2026-11-20).
+  const checked = invoiceLinesFrom(lineItems);
+  if (!checked.ok) throw new ApiError(400, checked.message);
+  const rate = taxRateFrom(taxRate);
+  if (rate === null) throw new ApiError(400, "Enter a tax rate from 0% to 100%.");
+  const noteToCustomer = customerNoteFrom(customerNote);
+  if (noteToCustomer === null) {
+    throw new ApiError(400, `Keep the note to the customer under ${CUSTOMER_NOTE_MAX} characters.`);
   }
+  const due = dueDate ? new Date(dueDate) : undefined;
+  if (due && Number.isNaN(due.getTime())) throw new ApiError(400, "Enter a valid due date.");
+
+  const subtotal = checked.subtotal;
+  const taxAmount = Math.round(Math.max(0, subtotal) * rate) / 100;
+  const amount = Math.round((subtotal + taxAmount) * 100) / 100;
+  if (amount <= 0) throw new ApiError(400, "The invoice total must be more than $0.");
+  if (amount > MAX_INVOICE_TOTAL) throw new ApiError(400, "The invoice total can't be more than $999,999.99.");
 
   const inquiry = await AftermarketInquiry.findOne({
     _id: inquiryId,
@@ -402,26 +426,6 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
     throw new ApiError(409, `An invoice (${existing.invoiceNumber || existing._id}) already exists for this inquiry.`);
   }
 
-  // Normalise line items + compute totals.
-  const normalized: IPaymentLineItem[] = lineItems.map((li) => {
-    const quantity = Math.max(0, Number(li.quantity) || 0);
-    const unitPrice = Number(li.unitPrice) || 0;
-    const raw = quantity * unitPrice;
-    const kind = (li.kind || "product") as IPaymentLineItem["kind"];
-    const lineTotal = kind === "discount" ? -Math.abs(raw) : raw;
-    return {
-      label: String(li.label || "").trim() || "Item",
-      kind,
-      quantity,
-      unitPrice,
-      lineTotal: Math.round(lineTotal * 100) / 100,
-    };
-  });
-
-  const subtotal = Math.round(normalized.reduce((s, li) => s + li.lineTotal, 0) * 100) / 100;
-  const taxAmount = Math.round(Math.max(0, subtotal) * (Number(taxRate) || 0)) / 100;
-  const amount = Math.round((subtotal + taxAmount) * 100) / 100;
-  if (amount <= 0) throw new ApiError(400, "Invoice total must be greater than zero");
 
   const payment = await Payment.create({
     organizationId: actor.organizationId.toString(),
@@ -431,17 +435,18 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
     customerEmail: inquiry.customerEmail.toLowerCase(),
     amount,
     subtotal,
-    taxRate: Number(taxRate) || 0,
+    taxRate: rate,
     taxAmount,
-    lineItems: normalized,
+    lineItems: checked.lines,
     currency: "usd",
-    description: description?.trim() || `Aftermarket: ${inquiry.productName}`,
+    description: (typeof description === "string" && description.trim()) || `Aftermarket: ${inquiry.productName}`,
     status: "pending",
     source: "aftermarket",
     aftermarketProductId: inquiry.productId,
     inquiryId: inquiry._id,
-    dueDate: dueDate ? new Date(dueDate) : undefined,
-    notes,
+    dueDate: due,
+    notes: typeof notes === "string" ? notes.trim() || undefined : undefined,
+    customerNote: noteToCustomer,
     createdBy: actor._id,
   });
 

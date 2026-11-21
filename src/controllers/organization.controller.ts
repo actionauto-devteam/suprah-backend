@@ -14,7 +14,7 @@ import { DRIVER_ACTIVE_LOAD_STATUSES } from '../services/driverReviewAccess.serv
 import { revokeTrayDevicesForEmail } from '../services/trayDevice.service';
 import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
 import { removeMemberFromOrganization } from '../services/memberRemoval.service';
-import { isValidTier, isPurchasableTier, TIER_SEAT_LIMITS, TIER_LABELS } from '../config/subscriptionTiers';
+import { isValidTier, TIER_SEAT_LIMITS, TIER_LABELS } from '../config/subscriptionTiers';
 
 export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
     const organizations = await Organization.find({ status: { $ne: 'suspended' } })
@@ -151,6 +151,13 @@ export const updateOwnOrganizationSubscription = asyncHandler(async (req: Reques
     const { id } = req.params;
     const { tier } = req.body;
 
+    // Plans aren't billed yet, so only Suprah super admins change a dealership's
+    // plan (they do it from Admin, Organizations). Matches the website's Plans
+    // page, which says switching isn't live (2026-11-20).
+    if (req.user?.role !== 'super_admin') {
+        throw new ApiError(403, "Plan changes aren't live yet. Ask your Suprah contact to change your plan.");
+    }
+
     if (!isValidTier(tier)) {
         throw new ApiError(400, 'Invalid subscription tier');
     }
@@ -158,18 +165,6 @@ export const updateOwnOrganizationSubscription = asyncHandler(async (req: Reques
     const org = await Organization.findById(id);
     if (!org) {
         throw new ApiError(404, 'Organization not found');
-    }
-
-    const isSuperAdmin = req.user?.role === 'super_admin';
-    const isOrgAdmin = req.orgId === id && req.orgRole === 'admin';
-    const isOwner = org.ownerId.toString() === req.user?._id.toString();
-
-    if (!isSuperAdmin && !isOrgAdmin && !isOwner) {
-        throw new ApiError(403, 'Only the owner or admins can change the subscription plan');
-    }
-
-    if (!isPurchasableTier(tier) && !isSuperAdmin) {
-        throw new ApiError(403, 'This plan can only be assigned by Suprah staff');
     }
 
     const previousTier = org.subscription?.tier;

@@ -13,6 +13,8 @@ export interface WiseSettings {
   clientId: string;
   clientSecret: string;
   redirectUri: string;
+  /** Signs the Wise link check; there is no built-in fallback (2026-11-20). */
+  stateSecret: string;
 }
 
 export const WISE_TEST_SITE = {
@@ -39,6 +41,7 @@ const SETTING_NAMES: Record<keyof WiseSettings, string> = {
   clientId: 'WISE_CLIENT_ID',
   clientSecret: 'WISE_CLIENT_SECRET',
   redirectUri: 'WISE_REDIRECT_URI',
+  stateSecret: 'LINKED_ACCOUNT_STATE_SECRET',
 };
 
 type Env = Record<string, string | undefined>;
@@ -54,6 +57,7 @@ export function wiseSettingsFrom(env: Env): WiseSettings {
     clientId: text(env.WISE_CLIENT_ID),
     clientSecret: text(env.WISE_CLIENT_SECRET),
     redirectUri: text(env.WISE_REDIRECT_URI),
+    stateSecret: text(env.LINKED_ACCOUNT_STATE_SECRET),
   };
 }
 

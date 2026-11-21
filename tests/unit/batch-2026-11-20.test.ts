@@ -21,12 +21,43 @@ jest.mock('../../src/models/Payment.model', () => ({
     findOne: jest.fn(),
     find: jest.fn(),
     aggregate: jest.fn(),
+    countDocuments: jest.fn(),
   },
 }));
 jest.mock('../../src/models/User.model', () => ({
   __esModule: true,
-  default: { findOne: jest.fn(() => ({ select: () => Promise.resolve(null) })) },
+  default: {
+    findOne: jest.fn(() => ({ select: () => Promise.resolve(null) })),
+    find: jest.fn(),
+    countDocuments: jest.fn(),
+  },
 }));
+// The super admin screens' searches (admin.controller) load these.
+jest.mock('../../src/models/Organization.model', () => ({
+  __esModule: true,
+  default: { find: jest.fn(), countDocuments: jest.fn(), findById: jest.fn() },
+}));
+jest.mock('../../src/models/AuditLog.model', () => ({
+  __esModule: true,
+  default: { find: jest.fn(), countDocuments: jest.fn() },
+}));
+jest.mock('../../src/models/SystemLog.model', () => ({
+  SystemLog: { find: jest.fn(), countDocuments: jest.fn() },
+}));
+jest.mock('../../src/models/SyncLog.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/models/DriverProfile.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/models/DriverTrackingDevice.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/utils/metrics', () => ({
+  metrics: {}, getPercentile: jest.fn(), driverTrackerMetrics: {}, connectionMetrics: {},
+}));
+jest.mock('../../src/services/traccar.service', () => ({ traccarHealthSnapshot: jest.fn() }));
+jest.mock('../../src/services/googleGeocoding.service', () => ({ googleGeocodingHealthSnapshot: jest.fn() }));
+jest.mock('../../src/services/activeOrganizations.service', () => ({ invalidateActiveOrganizations: jest.fn() }));
+jest.mock('../../src/utils/cache.util', () => ({ invalidateUserCache: jest.fn() }));
+jest.mock('pidusage', () => jest.fn());
+// Plan changes (organization.controller) load these too.
+jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/services/trayDevice.service', () => ({ revokeTrayDevicesForEmail: jest.fn() }));
 jest.mock('../../src/services/referral.service', () => ({
   __esModule: true,
   default: { processPaymentReward: jest.fn() },
@@ -36,7 +67,9 @@ jest.mock('../../src/services/activity.service', () => ({
   __esModule: true,
   default: { createActivity: jest.fn(() => Promise.resolve()), logFinancialActivity: jest.fn() },
 }));
-jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null, emitToUser: jest.fn() }));
+jest.mock('../../src/utils/socketEmitter', () => ({
+  getSocketIO: () => null, emitToUser: jest.fn(), disconnectUserSockets: jest.fn(),
+}));
 jest.mock('../../src/socket/supraspace.socket', () => ({ getIO: () => null }));
 jest.mock('../../src/utils/safeNotification', () => ({
   safeCreateNotification: jest.fn(),
@@ -353,5 +386,292 @@ describe('card disputes', () => {
     payments.aggregate.mockClear();
     await call(paymentController.getBillingBalance, { orgId: 'org-1' });
     expect(payments.aggregate.mock.calls[0][0][1].$group.balance).toEqual({ $sum: KEPT_AMOUNT });
+  });
+});
+
+// ─── Follow-up fixes (2026-11-20) ────────────────────────────────────────────
+import * as adminController from '../../src/controllers/admin.controller';
+import Organization from '../../src/models/Organization.model';
+import User from '../../src/models/User.model';
+import AuditLog from '../../src/models/AuditLog.model';
+import { SystemLog } from '../../src/models/SystemLog.model';
+
+/** A stand-in database query: any chain of sort/skip/limit/select/populate/lean, answering `rows`. */
+function query(rows: unknown[] = []) {
+  const q: any = {};
+  for (const step of ['sort', 'skip', 'limit', 'select', 'populate', 'lean']) q[step] = jest.fn(() => q);
+  q.then = (done: (v: unknown) => unknown, failed: (e: unknown) => unknown) => Promise.resolve(rows).then(done, failed);
+  return q;
+}
+
+describe('searches treat typed text as plain text', () => {
+  const tricky = 'a(b+';
+
+  it('the Payments search and payment-method filter match special characters literally', async () => {
+    payments.find.mockReturnValue(query());
+    payments.countDocuments.mockResolvedValue(0);
+    payments.aggregate.mockResolvedValue([]);
+
+    const { error } = await call(paymentController.getPayments, {
+      orgId: 'org-1',
+      query: { search: `  ${tricky} `, paymentMethod: 'card(' },
+    });
+
+    expect(error).toBeUndefined();
+    const filter = payments.find.mock.calls.at(-1)[0];
+    expect(filter.organizationId).toBe('org-1');
+    const byName: RegExp = filter.$or[0].customerName;
+    expect(byName.test('Invoice for a(b+ c')).toBe(true);
+    expect(byName.test('aab')).toBe(false);
+    expect(filter.paymentMethod.test('Card(visa)')).toBe(true);
+  });
+
+  it('a search that is only spaces is ignored', async () => {
+    payments.find.mockReturnValue(query());
+    payments.countDocuments.mockResolvedValue(0);
+    payments.aggregate.mockResolvedValue([]);
+    await call(paymentController.getPayments, { orgId: 'org-1', query: { search: '   ' } });
+    expect(payments.find.mock.calls.at(-1)[0].$or).toBeUndefined();
+  });
+
+  const literal = (pattern: string) => new RegExp(pattern, 'i');
+
+  it('super admin Organizations and Users searches', async () => {
+    (Organization.find as jest.Mock).mockReturnValue(query());
+    (Organization.countDocuments as jest.Mock).mockResolvedValue(0);
+    (User.find as jest.Mock).mockReturnValue(query());
+    (User.countDocuments as jest.Mock).mockResolvedValue(0);
+
+    await call(adminController.getAllOrganizations, { query: { search: tricky } });
+    await call(adminController.getAllUsers, { query: { search: tricky } });
+
+    const orgFilter = (Organization.find as jest.Mock).mock.calls.at(-1)[0];
+    expect(literal(orgFilter.name.$regex).test('Dealer a(b+')).toBe(true);
+    const userFilter = (User.find as jest.Mock).mock.calls.at(-1)[0];
+    expect(literal(userFilter.$or[1].email.$regex).test('a(b+@example.com')).toBe(true);
+  });
+
+  it('super admin Logs and Audit logs searches', async () => {
+    (SystemLog.find as jest.Mock).mockReturnValue(query());
+    (SystemLog.countDocuments as jest.Mock).mockResolvedValue(0);
+    (AuditLog.find as jest.Mock).mockReturnValue(query());
+    (AuditLog.countDocuments as jest.Mock).mockResolvedValue(0);
+
+    const longText = 'payment failed (card declined) + retry';
+    const { error } = await call(adminController.getSystemLogs, { query: { search: longText } });
+    await call(adminController.getAuditLogs, { query: { search: tricky } });
+
+    expect(error).toBeUndefined();
+    const logFilter = (SystemLog.find as jest.Mock).mock.calls.at(-1)[0];
+    expect(literal(logFilter.$or[2].message.$regex).test(`x ${longText} y`)).toBe(true);
+    const auditFilter = (AuditLog.find as jest.Mock).mock.calls.at(-1)[0];
+    expect(literal(auditFilter.reason.$regex).test('reason a(b+')).toBe(true);
+  });
+});
+
+describe("an invoice's status can't be set by hand", () => {
+  it('refuses to change the status and pays no referral reward', async () => {
+    const draft = invoice({ status: 'pending' });
+    payments.findOne.mockResolvedValue(draft);
+    (ReferralService.processPaymentReward as jest.Mock).mockClear();
+
+    const { error } = await call(paymentController.updatePayment, {
+      orgId: 'org-1', params: { id: 'pay-1' }, body: { status: 'succeeded' },
+    });
+
+    expect(error?.statusCode).toBe(400);
+    expect(draft.status).toBe('pending');
+    expect(draft.save).not.toHaveBeenCalled();
+    expect(ReferralService.processPaymentReward).not.toHaveBeenCalled();
+  });
+
+  it('still saves notes and the due date (sending the current status back is fine)', async () => {
+    const draft: any = invoice({ status: 'pending' });
+    payments.findOne.mockResolvedValue(draft);
+
+    const { error } = await call(paymentController.updatePayment, {
+      orgId: 'org-1', params: { id: 'pay-1' },
+      body: { status: 'pending', notes: 'Call before Friday', dueDate: '2026-12-01' },
+    });
+
+    expect(error).toBeUndefined();
+    expect(draft.notes).toBe('Call before Friday');
+    expect(draft.dueDate.toISOString().slice(0, 10)).toBe('2026-12-01');
+    expect(draft.save).toHaveBeenCalled();
+  });
+
+  it('turns away a due date that is not a date', async () => {
+    const draft = invoice({ status: 'pending' });
+    payments.findOne.mockResolvedValue(draft);
+    const { error } = await call(paymentController.updatePayment, {
+      orgId: 'org-1', params: { id: 'pay-1' }, body: { dueDate: 'next week-ish' },
+    });
+    expect(error?.statusCode).toBe(400);
+    expect(draft.save).not.toHaveBeenCalled();
+  });
+});
+
+import { updateOwnOrganizationSubscription } from '../../src/controllers/organization.controller';
+
+describe('only Suprah super admins change a dealership plan', () => {
+  const orgs = Organization as unknown as Record<string, jest.Mock>;
+  const dealership = () => ({
+    _id: 'org-1', name: 'Test Motors', ownerId: 'owner-1',
+    subscription: { tier: 'suprah_go', status: 'active' },
+    save: jest.fn(),
+  });
+
+  it("turns away the dealership's own admin and owner, without loading the dealership", async () => {
+    orgs.findById.mockClear();
+    for (const user of [{ _id: 'admin-1', role: 'admin' }, { _id: 'owner-1', role: 'admin' }]) {
+      const { error } = await call(updateOwnOrganizationSubscription, {
+        user, orgId: 'org-1', orgRole: 'admin',
+        params: { id: 'org-1' }, body: { tier: 'suprah_premium_ultra' },
+      });
+      expect(error?.statusCode).toBe(403);
+      expect(error?.message).toMatch(/Ask your Suprah contact/);
+    }
+    expect(orgs.findById).not.toHaveBeenCalled();
+  });
+
+  it('a super admin can still change it', async () => {
+    const org = dealership();
+    orgs.findById.mockResolvedValue(org);
+    const { error, res } = await call(updateOwnOrganizationSubscription, {
+      user: { _id: 'sa-1', role: 'super_admin' },
+      params: { id: 'org-1' }, body: { tier: 'suprah_premium' },
+    });
+    expect(error).toBeUndefined();
+    expect(res.statusCode).toBe(200);
+    expect(org.subscription.tier).toBe('suprah_premium');
+    expect(org.save).toHaveBeenCalled();
+  });
+});
+
+import { customerInvoiceView } from '../../src/utils/customerPayments';
+
+describe('customers receive only the invoice details their screens show', () => {
+  const stored = {
+    _id: 'pay-9', invoiceNumber: 'INV-2026-11-0009', description: 'Carwash package',
+    amount: 20, status: 'succeeded', currency: 'usd', lineItems: [{ label: 'Carwash', quantity: 1, unitPrice: 20, lineTotal: 20 }],
+    receiptUrl: 'https://pay.stripe.com/receipts/test', refundedAmount: 0, createdAt: '2026-11-20T00:00:00.000Z',
+    customerName: 'Test Customer', customerEmail: 'customer@example.com',
+    // Dealership-side details:
+    notes: 'Created from CRM lead 123', createdBy: 'staff-1', organizationId: 'org-1',
+    stripeCustomerId: 'cus_test', stripePaymentIntentId: 'pi_test', stripeCheckoutSessionId: 'cs_test',
+    failureReason: 'card_declined', disputeStatus: 'lost', disputedAmount: 5,
+  };
+  const HIDDEN = ['notes', 'createdBy', 'organizationId', 'stripeCustomerId', 'stripePaymentIntentId',
+    'stripeCheckoutSessionId', 'failureReason', 'disputeStatus', 'disputedAmount'];
+
+  it('the Suprah Pay list leaves out staff notes and internal references, and totals still count disputes', async () => {
+    const list = query([stored]);
+    payments.find.mockReturnValue(list);
+
+    const { res } = await call(paymentController.getMyPaymentsAsCustomer, { user: { email: 'Customer@Example.com' } });
+
+    const sent = res.body.data.payments[0];
+    for (const field of HIDDEN) expect(sent).not.toHaveProperty(field);
+    expect(sent).toMatchObject({ invoiceNumber: 'INV-2026-11-0009', amount: 20, status: 'succeeded', receiptUrl: stored.receiptUrl });
+    expect(res.body.data.stats.totalPaid).toBe(15); // $20 less the $5 dispute that was lost
+    expect(list.select.mock.calls[0][0]).toContain('disputedAmount');
+    expect(list.select.mock.calls[0][0]).not.toContain('notes');
+  });
+
+  it('the cancel and return-from-Stripe answers use the same view', async () => {
+    payments.findById.mockResolvedValue({ ...stored, status: 'cancelled', toObject() { return { ...stored, status: 'cancelled' }; } });
+    const { res } = await call(paymentController.cancelMyPayment, {
+      user: { email: 'customer@example.com' }, params: { id: 'pay-9' },
+    });
+    expect(res.body.data.status).toBe('cancelled');
+    for (const field of HIDDEN) expect(res.body.data).not.toHaveProperty(field);
+    expect(customerInvoiceView(null)).toBeNull();
+  });
+});
+
+import linkedAccountService from '../../src/services/linkedAccount.service';
+import { WISE_NOT_SET_UP_MESSAGE, wiseSettingsFrom, wiseSetupProblem } from '../../src/utils/wiseSettings';
+
+describe('the Wise link check has no built-in key', () => {
+  const saved = process.env.LINKED_ACCOUNT_STATE_SECRET;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.LINKED_ACCOUNT_STATE_SECRET;
+    else process.env.LINKED_ACCOUNT_STATE_SECRET = saved;
+  });
+
+  it('without the setting, Wise counts as not set up and no link check can be made or accepted', () => {
+    delete process.env.LINKED_ACCOUNT_STATE_SECRET;
+    const settings = wiseSettingsFrom({
+      NODE_ENV: 'development', WISE_CLIENT_ID: 'c', WISE_CLIENT_SECRET: 's', WISE_REDIRECT_URI: 'http://localhost/cb',
+    });
+    expect(wiseSetupProblem(settings)).toBe('missing Wise settings: LINKED_ACCOUNT_STATE_SECRET');
+    expect(() => linkedAccountService.signState('user-1', 'wise')).toThrow(WISE_NOT_SET_UP_MESSAGE);
+
+    // A check made with some other key (for example one copied from old code) is turned away.
+    process.env.LINKED_ACCOUNT_STATE_SECRET = 'someone-elses-key';
+    const forged = linkedAccountService.signState('user-2', 'wise');
+    delete process.env.LINKED_ACCOUNT_STATE_SECRET;
+    expect(linkedAccountService.verifyState(forged)).toBeNull();
+  });
+
+  it('with the setting, a link check made here is accepted and one signed with another key is not', () => {
+    process.env.LINKED_ACCOUNT_STATE_SECRET = 'other-key';
+    const forged = linkedAccountService.signState('user-2', 'wise');
+    process.env.LINKED_ACCOUNT_STATE_SECRET = 'this-server-key';
+    const state = linkedAccountService.signState('user-1', 'wise');
+    expect(linkedAccountService.verifyState(state)).toEqual({ userId: 'user-1', provider: 'wise' });
+    expect(linkedAccountService.verifyState(forged)).toBeNull();
+  });
+});
+
+import { customerNoteFrom, invoiceLinesFrom, taxRateFrom } from '../../src/utils/invoiceLines';
+
+describe('invoice lines: items and discounts', () => {
+  it('an item costs quantity × price and a discount takes its amount off', () => {
+    const result = invoiceLinesFrom([
+      { label: ' Carwash package ', kind: 'product', quantity: 2, unitPrice: 20 },
+      { label: 'Service fee', kind: 'fee', quantity: 1, unitPrice: 4.995 },
+      { label: '', kind: 'discount', quantity: 1, unitPrice: 5 },
+    ]);
+    expect(result).toEqual({
+      ok: true,
+      subtotal: 40,
+      lines: [
+        { label: 'Carwash package', kind: 'product', quantity: 2, unitPrice: 20, lineTotal: 40 },
+        { label: 'Service fee', kind: 'fee', quantity: 1, unitPrice: 5, lineTotal: 5 },
+        { label: 'Discount', kind: 'discount', quantity: 1, unitPrice: 5, lineTotal: -5 },
+      ],
+    });
+  });
+
+  it('turns away lines that would make a confusing or wrong invoice', () => {
+    expect(invoiceLinesFrom([])).toEqual({ ok: false, message: 'Add at least one item to the invoice.' });
+    expect(invoiceLinesFrom([{ label: 'Wash', quantity: 0, unitPrice: 20 }])).toEqual({
+      ok: false, message: 'Line 1: enter a quantity greater than 0.',
+    });
+    // A negative price used to slip a hidden discount onto an item line.
+    expect(invoiceLinesFrom([{ label: 'Wash', quantity: 1, unitPrice: -20 }])).toEqual({
+      ok: false, message: 'Line 1: enter a price of $0 or more.',
+    });
+    expect(invoiceLinesFrom([{ label: 'Wash', kind: 'gift', quantity: 1, unitPrice: 1 }])).toEqual({
+      ok: false, message: 'Line 1 has an unknown type.',
+    });
+    expect(invoiceLinesFrom([{ label: 'Wash', quantity: 1, unitPrice: 1_000_000 }]).ok).toBe(false);
+  });
+
+  it('tax must be 0–100% and the note to the customer is text up to 1,000 characters', () => {
+    expect(taxRateFrom('8.25')).toBe(8.25);
+    expect(taxRateFrom(undefined)).toBe(0);
+    expect(taxRateFrom(-1)).toBeNull();
+    expect(taxRateFrom(101)).toBeNull();
+    expect(customerNoteFrom('  Pick up after 3pm.  ')).toBe('Pick up after 3pm.');
+    expect(customerNoteFrom('   ')).toBeUndefined();
+    expect(customerNoteFrom({ $ne: null })).toBeNull();
+    expect(customerNoteFrom('x'.repeat(1001))).toBeNull();
+  });
+
+  it("the customer receives the dealership's note to them, but not its internal notes", () => {
+    const view = customerInvoiceView({ amount: 20, customerNote: 'Pick up after 3pm.', notes: 'VIP, call first' });
+    expect(view).toEqual({ amount: 20, customerNote: 'Pick up after 3pm.' });
   });
 });
