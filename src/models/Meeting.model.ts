@@ -20,9 +20,28 @@ export interface IMeetingWaiting {
   guestId?: string;
   guestEmail?: string;
   avatar?: string;
-  status: 'waiting' | 'admitted' | 'denied';
+  /** 'left' = a Deal Desk customer stepped out of the line on their own. */
+  status: 'waiting' | 'admitted' | 'denied' | 'left';
   requestedAt: Date;
   respondedAt?: Date;
+  /** Deal Desk queue heartbeat — lets reps see who is still on the page. */
+  lastSeenAt?: Date;
+  source?: 'dealdesk';
+}
+
+export type MeetingRoomType = 'standard' | 'dealdesk';
+
+export interface IMeetingDealDesk {
+  description?: string;
+  /** scrypt hash. `select: false` — load explicitly with +dealDesk.passwordHash. */
+  passwordHash?: string;
+  passwordUpdatedAt?: Date;
+  /** Listed on the public Deal Desk page and accepting new customers. */
+  isOpen: boolean;
+  /** Hidden from management lists (closed by the rep). */
+  archivedAt?: Date | null;
+  /** Code of the ended room this one was reopened from. */
+  reopenedFrom?: string;
 }
 
 export interface IMeetingSummary {
@@ -41,6 +60,10 @@ export interface IMeeting extends Document {
   calendarOccurrenceKey?: string;
   status: 'scheduled' | 'live' | 'ended';
   visibility: 'public' | 'private';  // private → join-by-code users wait for the host
+  /** Deal Desk rooms are always stored as private so every existing gate
+   *  (waiting room, listings, alerts) treats them as host-admitted. */
+  roomType: MeetingRoomType;
+  dealDesk?: IMeetingDealDesk;
   scheduledAt?: Date;              // UTC instant of the MDT wall time chosen
   seriesId?: string;               // groups the sessions of a recurring meeting
   invitees: mongoose.Types.ObjectId[];
@@ -111,6 +134,15 @@ const MeetingSchema = new Schema<IMeeting>(
     calendarOccurrenceKey: { type: String },
     status: { type: String, enum: ['scheduled', 'live', 'ended'], default: 'live', index: true },
     visibility: { type: String, enum: ['public', 'private'], default: 'public' },
+    roomType: { type: String, enum: ['standard', 'dealdesk'], default: 'standard' },
+    dealDesk: {
+      description: { type: String, trim: true, maxlength: 280 },
+      passwordHash: { type: String, select: false },
+      passwordUpdatedAt: { type: Date },
+      isOpen: { type: Boolean, default: false },
+      archivedAt: { type: Date, default: null },
+      reopenedFrom: { type: String },
+    },
     scheduledAt: { type: Date, default: null, index: true },
     seriesId: { type: String, default: null, index: true },
     invitees: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
@@ -152,9 +184,11 @@ const MeetingSchema = new Schema<IMeeting>(
         guestId: { type: String },
         guestEmail: { type: String },
         avatar: { type: String, default: null },
-        status: { type: String, enum: ['waiting', 'admitted', 'denied'], default: 'waiting' },
+        status: { type: String, enum: ['waiting', 'admitted', 'denied', 'left'], default: 'waiting' },
         requestedAt: { type: Date, default: Date.now },
         respondedAt: { type: Date },
+        lastSeenAt: { type: Date },
+        source: { type: String, enum: ['dealdesk'] },
       },
     ],
     removedParticipantIds: [{ type: String }],
@@ -210,6 +244,9 @@ const MeetingSchema = new Schema<IMeeting>(
 MeetingSchema.index({ status: 1, scheduledAt: 1 });
 MeetingSchema.index({ organizationId: 1, code: 1 }, { unique: true });
 MeetingSchema.index({ organizationId: 1, status: 1, scheduledAt: 1 });
+// Public Deal Desk page + rep management view.
+MeetingSchema.index({ organizationId: 1, roomType: 1, status: 1, 'dealDesk.isOpen': 1 });
+MeetingSchema.index({ organizationId: 1, roomType: 1, hostCrmUserId: 1, createdAt: -1 });
 
 const Meeting = mongoose.model<IMeeting>('SuprahMeeting', MeetingSchema);
 export default Meeting;
