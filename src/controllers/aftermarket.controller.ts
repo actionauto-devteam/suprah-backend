@@ -11,6 +11,7 @@ import { storageService, BucketType } from '../services/storage.service';
 import membershipService from '../services/membership.service';
 import { notifyOrgAdmins } from '../utils/safeNotification';
 import logger from '../utils/logger';
+import { dealershipForPayments, paymentLimitProblem } from '../services/suprahPaySettings.service';
 import { getSocketIO } from '../utils/socketEmitter';
 
 
@@ -265,6 +266,20 @@ const buyNow = asyncHandler(async (req: Request, res: Response) => {
   const unitPrice = product.price;
   const lineTotal = Math.round(unitPrice * quantity * 100) / 100;
 
+  // Buying online needs SuprahPay on for the dealership and stays within its limit (2026-11-21).
+  let dealership;
+  try {
+    dealership = await dealershipForPayments(String(orgId));
+  } catch (error) {
+    if ((error as ApiError)?.statusCode === 403) {
+      throw new ApiError(403, "Buying online isn't available for this dealership yet. Send an inquiry instead.");
+    }
+    throw error;
+  }
+  if (paymentLimitProblem(lineTotal, dealership.maxPaymentAmount)) {
+    throw new ApiError(400, "This purchase is more than the limit for one online payment. Send an inquiry instead.");
+  }
+
   const payment = await Payment.create({
     organizationId: orgId,
     orgId: new mongoose.Types.ObjectId(orgId),
@@ -288,6 +303,8 @@ const buyNow = asyncHandler(async (req: Request, res: Response) => {
     description: `Aftermarket purchase: ${product.name}`,
     status: 'pending',
     source: 'aftermarket',
+    purpose: 'aftermarket',
+    suprahFeePercent: dealership.feePercent,
     aftermarketProductId: product._id,
     createdBy: customerId,
   });

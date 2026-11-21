@@ -33,6 +33,12 @@ import {
 } from '../utils/paymentDispute';
 import { fillMonthlyRevenue, lastMonths } from '../utils/paymentTrend';
 import { cleanSearchText, escapeSearchRegex } from '../utils/searchText';
+import mongoose from 'mongoose';
+import { invoiceLinesFrom, taxRateFrom } from '../utils/invoiceLines';
+import { paymentPurposeFrom } from '../utils/paymentPurpose';
+import { dealershipForPayments, getPlatformSettings, paymentLimitProblem } from '../services/suprahPaySettings.service';
+import Organization from '../models/Organization.model';
+import { statementSuffixFor } from '../utils/paymentBranding';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-02-25.clover',
@@ -198,70 +204,100 @@ async function broadcastPaymentSuccess(payment: any) {
   }
 }
 
-// ─── Line-item totals helper ──────────────────────────────────────────────────
-function computeTotals(
-  lineItems: IPaymentLineItem[],
-  taxRate = 0
-): { normalized: IPaymentLineItem[]; subtotal: number; taxAmount: number; total: number } {
-  const normalized = lineItems.map((li) => {
-    const quantity = Math.max(0, Number(li.quantity) || 0);
-    const unitPrice = Number(li.unitPrice) || 0;
-    const raw = quantity * unitPrice;
-    const lineTotal = li.kind === 'discount' ? -Math.abs(raw) : raw;
-    return {
-      label: String(li.label || '').trim() || 'Item',
-      kind: (li.kind || 'product') as IPaymentLineItem['kind'],
-      quantity,
-      unitPrice,
-      lineTotal: Math.round(lineTotal * 100) / 100,
-    };
-  });
-
-  const subtotal = Math.round(normalized.reduce((s, li) => s + li.lineTotal, 0) * 100) / 100;
-  const taxAmount = Math.round(Math.max(0, subtotal) * (Number(taxRate) || 0)) / 100;
-  const total = Math.round((subtotal + taxAmount) * 100) / 100;
-  return { normalized, subtotal, taxAmount, total };
-}
-
 // ─── Create Payment ───────────────────────────────────────────────────────────
+// A payment request from the dealership's staff (Leads → Request Payment).
+// Everything is checked before anything is saved (2026-11-21): SuprahPay must
+// be on for the dealership, the amount within SuprahPay's limit, US dollars
+// only, and lines, tax and dates real values. Suprah's fee rate at this moment
+// is recorded on the invoice for the dealership's payout.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const textOf = (value: unknown, max: number): string | null => {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text.length > max ? null : text;
+};
+const twoDecimals = (n: number) => Math.abs(Math.round(n * 100) - n * 100) < 1e-6;
+
 const createPayment = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
-  const {
-    customerName, customerEmail, customerPhone,
-    amount, currency = 'usd', description,
-    quoteId, shipmentId, dueDate, notes,
-    lineItems, taxRate,
-  } = req.body;
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
 
+  const customerName = textOf(body.customerName, 200);
+  const customerEmail = textOf(body.customerEmail, 254)?.toLowerCase() ?? null;
+  const description = textOf(body.description, 500);
+  const customerPhone = textOf(body.customerPhone, 40);
+  const notes = textOf(body.notes, 2000);
+  if (customerName === null || customerEmail === null || description === null || customerPhone === null || notes === null) {
+    throw new ApiError(400, "One of the details is too long or isn't text. Please check the form.");
+  }
   if (!customerName || !customerEmail || !description) {
-    throw new ApiError(400, 'customerName, customerEmail, and description are required');
+    throw new ApiError(400, "Enter the customer's name and email, and a description of the payment.");
+  }
+  if (!EMAIL_PATTERN.test(customerEmail)) throw new ApiError(400, "Enter the customer's email address, for example name@example.com.");
+
+  const currency = body.currency === undefined ? 'usd' : String(body.currency).trim().toLowerCase();
+  if (currency !== 'usd') throw new ApiError(400, 'SuprahPay takes payments in US dollars only.');
+
+  const purpose = paymentPurposeFrom(body.purpose);
+  if (!purpose) throw new ApiError(400, 'Choose what the payment is for.');
+
+  for (const [field, label] of [['quoteId', 'quote'], ['shipmentId', 'shipment']] as const) {
+    if (body[field] !== undefined && body[field] !== null && body[field] !== '' && !mongoose.isValidObjectId(body[field])) {
+      throw new ApiError(400, `That ${label} couldn't be found.`);
+    }
+  }
+  let dueDate: Date | undefined;
+  if (body.dueDate) {
+    dueDate = new Date(String(body.dueDate));
+    if (Number.isNaN(dueDate.getTime())) throw new ApiError(400, 'Enter a valid due date.');
   }
 
-  // If line items were supplied, derive the total from them; otherwise use `amount`.
-  let payload: any = { taxRate: Number(taxRate) || 0 };
-  if (Array.isArray(lineItems) && lineItems.length > 0) {
-    const { normalized, subtotal, taxAmount, total } = computeTotals(lineItems, Number(taxRate) || 0);
-    if (total <= 0) throw new ApiError(400, 'Invoice total must be greater than zero');
-    payload = { lineItems: normalized, subtotal, taxAmount, taxRate: Number(taxRate) || 0, amount: total };
+  // SuprahPay must be on for this dealership; also gives its tax rate and Suprah's settings.
+  const dealership = await dealershipForPayments(orgId);
+
+  let payload: Record<string, unknown>;
+  if (Array.isArray(body.lineItems) && body.lineItems.length > 0) {
+    // Invoice lines: the dealership's default tax rate applies unless one is given.
+    const taxRate = body.taxRate === undefined || body.taxRate === '' ? dealership.defaultTaxRate : taxRateFrom(body.taxRate);
+    if (taxRate === null) throw new ApiError(400, 'Enter a tax rate from 0% to 100%.');
+    const checked = invoiceLinesFrom(body.lineItems);
+    if (!checked.ok) throw new ApiError(400, checked.message);
+    const taxAmount = Math.round(Math.max(0, checked.subtotal) * taxRate) / 100;
+    payload = {
+      lineItems: checked.lines,
+      subtotal: checked.subtotal,
+      taxAmount,
+      taxRate,
+      amount: roundCents(checked.subtotal + taxAmount),
+    };
   } else {
-    if (!amount || amount <= 0) throw new ApiError(400, 'Amount must be greater than zero');
-    payload.amount = amount;
+    // One amount: what the customer pays, as typed (no tax is added to it).
+    const amount = typeof body.amount === 'number' ? body.amount : Number(String(body.amount ?? '').trim() || NaN);
+    if (!Number.isFinite(amount) || amount <= 0 || !twoDecimals(amount)) {
+      throw new ApiError(400, 'Enter the amount in dollars and cents, for example 125.50.');
+    }
+    payload = { amount: roundCents(amount), taxRate: 0 };
   }
+  const limitProblem = paymentLimitProblem(payload.amount as number, dealership.maxPaymentAmount);
+  if (limitProblem) throw new ApiError(400, limitProblem);
 
   const payment = await Payment.create({
     organizationId: orgId,
     customerId: customerEmail,
     customerName,
-    customerEmail: customerEmail.toLowerCase(),
-    customerPhone,
+    customerEmail,
+    customerPhone: customerPhone || undefined,
     currency,
     description,
+    purpose,
+    suprahFeePercent: dealership.feePercent,
     status: 'pending',
-    quoteId,
-    shipmentId,
-    dueDate: dueDate ? new Date(dueDate) : undefined,
-    notes,
+    quoteId: body.quoteId || undefined,
+    shipmentId: body.shipmentId || undefined,
+    dueDate,
+    notes: notes || undefined,
     createdBy: userId,
     ...payload,
   });
@@ -272,7 +308,8 @@ const createPayment = asyncHandler(async (req: Request, res: Response) => {
     { paymentId: payment._id.toString(), amount: payment.amount, customerName }
   );
 
-  logger.info({ paymentId: payment._id, amount: payment.amount, customerEmail }, 'Payment record created');
+  // No customer details in the server log.
+  logger.info({ paymentId: payment._id, amount: payment.amount }, 'Payment record created');
 
   res.status(201).json(new ApiResponse(201, payment, 'Payment record created successfully'));
 });
@@ -467,7 +504,8 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
     customer: stripeCustomerId,
     description: payment.description,
     metadata: { paymentId: payment._id.toString(), organizationId: orgId, invoiceNumber: payment.invoiceNumber || '' },
-    automatic_payment_methods: { enabled: true },
+    // Card only (2026-11-21); Apple Pay and Google Pay come with cards.
+    payment_method_types: ['card'],
   });
 
   await Payment.findByIdAndUpdate(payment._id, { stripePaymentIntentId: paymentIntent.id, stripeCustomerId, status: 'processing' });
@@ -493,9 +531,19 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
         })).id;
   }
 
-  const session = await stripe.checkout.sessions.create({
+  // SuprahPay branding with the dealership's name (2026-11-21): the payment
+  // page, Stripe's receipt and the card statement say which dealership it's for.
+  const org = mongoose.isValidObjectId(payment.organizationId)
+    ? await Organization.findById(payment.organizationId).select('name').lean()
+    : null;
+  const dealershipName = String(org?.name || '').trim();
+  const description = String(payment.description || '').trim();
+  const invoiceTitle = payment.invoiceNumber ? `Invoice ${payment.invoiceNumber}` : description || 'Invoice';
+  const sessionParams: Stripe.Checkout.SessionCreateParams = {
     mode: 'payment',
     customer: stripeCustomerId,
+    // Card only (2026-11-21); Apple Pay and Google Pay come with cards.
+    payment_method_types: ['card'],
     line_items: [
       {
         quantity: 1,
@@ -503,14 +551,14 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
           currency: payment.currency || 'usd',
           unit_amount: Math.round(payment.amount * 100),
           product_data: {
-            name: payment.invoiceNumber ? `Invoice ${payment.invoiceNumber}` : payment.description,
-            description: payment.description?.slice(0, 300),
+            name: (dealershipName ? `${dealershipName} · ${invoiceTitle}` : invoiceTitle).slice(0, 250),
+            ...(description ? { description: description.slice(0, 300) } : {}),
           },
         },
       },
     ],
     payment_intent_data: {
-      description: payment.description,
+      description: (dealershipName ? `${dealershipName}: ${description || invoiceTitle}` : description || invoiceTitle).slice(0, 1000),
       metadata: { paymentId: payment._id.toString(), organizationId: payment.organizationId },
     },
     metadata: {
@@ -522,7 +570,20 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
     success_url: `${CUSTOMER_APP_URL}/customer/payments?status=success&session_id={CHECKOUT_SESSION_ID}`,
     // Coming back without paying puts this invoice back under "To pay".
     cancel_url: `${CUSTOMER_APP_URL}/customer/payments?status=cancelled&invoice=${payment._id.toString()}`,
-  });
+  };
+  const suffix = statementSuffixFor(dealershipName);
+  let session: Stripe.Checkout.Session;
+  try {
+    session = await stripe.checkout.sessions.create(
+      suffix
+        ? { ...sessionParams, payment_intent_data: { ...sessionParams.payment_intent_data, statement_descriptor_suffix: suffix } }
+        : sessionParams,
+    );
+  } catch (error: any) {
+    // The card statement wording is a nice-to-have: never let it stop a payment.
+    if (!suffix || !/statement_descriptor/i.test(String(error?.param || error?.message || ''))) throw error;
+    session = await stripe.checkout.sessions.create(sessionParams);
+  }
 
   await Payment.findByIdAndUpdate(payment._id, {
     stripeCheckoutSessionId: session.id,
@@ -582,6 +643,11 @@ const createCustomerCheckoutSession = asyncHandler(async (req: Request, res: Res
   if (payment.status === 'succeeded') throw new ApiError(400, 'This invoice has already been paid');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This invoice has been cancelled');
   if (payment.status === 'refunded') throw new ApiError(400, 'This invoice has been refunded');
+  // SuprahPay's limit for one online payment (2026-11-21), in case it was lowered after the invoice was sent.
+  const { maxPaymentAmount } = await getPlatformSettings();
+  if (payment.amount > maxPaymentAmount) {
+    throw new ApiError(400, "This invoice is more than SuprahPay's limit for one online payment. Please contact the dealership.");
+  }
 
   // A payment page was opened before: make sure it wasn't paid, and close it.
   if ((await settleEarlierCheckout(payment)) === 'paid') {
@@ -1001,12 +1067,16 @@ const requestPaymentFromCustomer = asyncHandler(async (req: Request, res: Respon
   const payment = await Payment.findOne({ _id: id, organizationId: orgId });
   if (!payment) throw new ApiError(404, 'Payment not found');
   if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
+  // Only an unpaid invoice can be sent to the customer (2026-11-21).
+  if (!isAwaitingPayment(payment.status)) throw new ApiError(400, "This invoice isn't waiting for payment, so it can't be sent.");
+  // SuprahPay must be on for the dealership; the request says which dealership it's from.
+  const dealership = await dealershipForPayments(orgId);
 
   const customer = await User.findOne({ email: payment.customerEmail.toLowerCase() });
   if (!customer) throw new ApiError(404, 'Customer has not registered an account yet. Ask them to sign up first.');
 
   const dealer = req.user as IUser;
-  const dealerName = dealer?.name || 'the dealer';
+  const dealerName = dealership.name || dealer?.name || 'the dealer';
 
   await safeCreateNotification({
     userId: customer._id as any, organizationId: orgId, type: 'payment_request', title: 'Payment Request',
@@ -1025,10 +1095,20 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
   // Only what the customer's screens show, plus the dispute amounts that
   // "Total paid" needs (those two are left out of what is sent back).
   const payments = await Payment.find({ customerEmail: user.email.toLowerCase() })
-    .select([...CUSTOMER_INVOICE_FIELDS, 'disputeStatus', 'disputedAmount'].join(' '))
+    .select([...CUSTOMER_INVOICE_FIELDS, 'disputeStatus', 'disputedAmount', 'organizationId'].join(' '))
     .populate('aftermarketProductId', 'name media')
     .sort({ createdAt: -1 })
     .lean();
+
+  // Each invoice shows the dealership it's from (2026-11-21): one lookup for all of them.
+  const orgIds = [...new Set(payments.map((p) => String(p.organizationId)).filter((id) => mongoose.isValidObjectId(id)))];
+  const orgs = orgIds.length
+    ? await Organization.find({ _id: { $in: orgIds } }).select('name').lean()
+    : [];
+  const dealershipNames = new Map(orgs.map((org) => [String(org._id), String(org.name || '')]));
+  for (const p of payments as Array<Record<string, unknown>>) {
+    p.dealershipName = dealershipNames.get(String(p.organizationId)) || undefined;
+  }
 
   const totalOwed = payments.filter(p => p.status === 'pending' || p.status === 'failed').reduce((s, p) => s + p.amount, 0);
   // Paid minus anything refunded to them since.
@@ -1083,7 +1163,8 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
     customer: stripeCustomerId,
     description: payment.description,
     metadata: { paymentId: payment._id.toString(), invoiceNumber: payment.invoiceNumber || '' },
-    automatic_payment_methods: { enabled: true },
+    // Card only (2026-11-21); Apple Pay and Google Pay come with cards.
+    payment_method_types: ['card'],
   });
 
   await Payment.findByIdAndUpdate(payment._id, { stripePaymentIntentId: paymentIntent.id, stripeCustomerId, status: 'processing' });

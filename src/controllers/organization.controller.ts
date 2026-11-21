@@ -248,6 +248,7 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
         $or: [
             { organizationId: id },
             { dispatcherOrganizationIds: id },
+            { financeOrganizationIds: id },
         ],
     }).distinct('_id');
 
@@ -301,7 +302,7 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
         { organizationId: id },
         {
             $unset: { organizationId: 1, organizationRole: 1 },
-            $pull: { dispatcherOrganizationIds: id },
+            $pull: { dispatcherOrganizationIds: id, financeOrganizationIds: id },
         }
     );
 
@@ -311,6 +312,10 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
     await User.updateMany(
         { dispatcherOrganizationIds: id },
         { $pull: { dispatcherOrganizationIds: id } }
+    );
+    await User.updateMany(
+        { financeOrganizationIds: id },
+        { $pull: { financeOrganizationIds: id } }
     );
 
     affectedUserIds.forEach((userId: any) => {
@@ -344,7 +349,7 @@ export const getMembers = asyncHandler(async (req: Request, res: Response) => {
 
     const [members, total] = await Promise.all([
         User.find({ organizationId: id })
-            .select('name email avatar role organizationRole dispatcherOrganizationIds createdAt')
+            .select('name email avatar role organizationRole dispatcherOrganizationIds financeOrganizationIds createdAt')
             .sort({ [sortBy]: sortOrder })
             .skip(skip)
             .limit(limit),
@@ -365,6 +370,15 @@ export const getMembers = asyncHandler(async (req: Request, res: Response) => {
             (organizationId: any) => String(organizationId) === String(id),
         );
         delete member.dispatcherOrganizationIds;
+
+        // Admins always have Finance access; staff only when given it here.
+        const financeOrganizationIds = Array.isArray(member.financeOrganizationIds)
+            ? member.financeOrganizationIds
+            : [];
+        member.hasFinanceAccess = member.organizationRole === 'admin' || financeOrganizationIds.some(
+            (organizationId: any) => String(organizationId) === String(id),
+        );
+        delete member.financeOrganizationIds;
         return member;
     });
 
@@ -574,6 +588,87 @@ export const updateMemberDispatcherAccess = asyncHandler(async (req: Request, re
     });
 });
 
+/**
+ * PATCH /api/organizations/:id/members/:userId/finance-access
+ *
+ * Gives or removes Finance access (2026-11-21): the staff member can send
+ * payment requests and invoices, edit, cancel and refund payments in this
+ * dealership. It changes nothing else about the member. Admins always have it.
+ */
+export const updateMemberFinanceAccess = asyncHandler(async (req: Request, res: Response) => {
+    const { id, userId } = req.params;
+    const enabled = req.body?.enabled;
+
+    if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(userId)) {
+        throw new ApiError(400, "That member couldn't be found.");
+    }
+    if (typeof enabled !== 'boolean') {
+        throw new ApiError(400, 'Choose whether Finance access is on or off.');
+    }
+
+    const org = await Organization.findById(id).select('name ownerId');
+    if (!org) {
+        throw new ApiError(404, 'Organization not found');
+    }
+
+    const isOwner = !!req.user?._id && !!org.ownerId && org.ownerId.toString() === req.user._id.toString();
+    const isAdmin = req.orgRole === 'admin' && req.orgId === id;
+    const isSuperAdmin = req.user?.role === 'super_admin';
+    if (!isOwner && !isAdmin && !isSuperAdmin) {
+        throw new ApiError(403, 'Only the owner or admins can manage Finance access');
+    }
+
+    // Only a current member of this dealership, and only staff: admins already have it.
+    const target = await User.findOne({ _id: userId, organizationId: id }).select('name email role organizationRole financeOrganizationIds');
+    if (!target) {
+        throw new ApiError(404, 'User is not a member of this organization');
+    }
+    if (target.role !== 'employee' || (target as any).organizationRole === 'admin') {
+        throw new ApiError(400, 'Admins already have Finance access. It can only be given to staff members.');
+    }
+
+    const currentlyEnabled = Array.isArray((target as any).financeOrganizationIds) &&
+        (target as any).financeOrganizationIds.some((organizationId: any) => String(organizationId) === String(id));
+
+    if (enabled !== currentlyEnabled) {
+        await User.updateOne(
+            { _id: target._id, organizationId: id },
+            enabled ? { $addToSet: { financeOrganizationIds: id } } : { $pull: { financeOrganizationIds: id } },
+        );
+        invalidateUserCache(target._id.toString());
+
+        activityService.createActivity({
+            userId: (req.user?._id as any).toString(),
+            organizationId: id,
+            type: 'settings_change',
+            title: enabled ? 'Finance Access Granted' : 'Finance Access Removed',
+            description: `${target.name || 'A staff member'} ${enabled ? 'was given Finance access' : 'had Finance access removed'}`,
+            metadata: { targetUserId: target._id.toString(), financeAccess: enabled },
+        }).catch((error: unknown) => {
+            logger.error({ error, orgId: id, targetUserId: target._id }, 'Non-fatal: failed to log Finance access activity');
+        });
+
+        await safeCreateNotification({
+            userId: target._id.toString(),
+            organizationId: id,
+            type: 'admin_broadcast',
+            title: enabled ? 'Finance Access Granted' : 'Finance Access Removed',
+            message: enabled
+                ? `You can now send payment requests and invoices, cancel and refund payments in SuprahPay for ${org.name}. Your other permissions are unchanged.`
+                : `Your Finance access in SuprahPay for ${org.name} was removed. You can still view payments. Your other permissions are unchanged.`,
+            metadata: { financeAccess: enabled, route: '/billing' },
+        });
+    }
+
+    logger.info({ orgId: id, targetUserId: target._id, financeAccess: enabled }, 'Organization member Finance access updated');
+
+    res.status(200).json({
+        success: true,
+        data: { userId: target._id, organizationRole: (target as any).organizationRole, hasFinanceAccess: enabled },
+        message: enabled ? 'Finance access given' : 'Finance access removed',
+    });
+});
+
 export default {
     listPublicOrganizations,
     createOrganization,
@@ -583,5 +678,6 @@ export default {
     deleteOrganization,
     getMembers,
     removeMember,
-    updateMemberDispatcherAccess
+    updateMemberDispatcherAccess,
+    updateMemberFinanceAccess,
 };

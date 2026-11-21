@@ -56,6 +56,10 @@ export interface IUser extends Document {
   // This deliberately does NOT change role or organizationRole, so the user's
   // access to unrelated modules remains unchanged.
   dispatcherOrganizationIds?: mongoose.Types.ObjectId[];
+  // Finance access (2026-11-21): staff who can send payment requests, cancel
+  // and refund in these dealerships. Admins always can. Given by a dealership
+  // admin on the Members page; never changeable from a profile.
+  financeOrganizationIds?: mongoose.Types.ObjectId[];
 
   onlineStatus: OnlineStatus;
   customStatus?: string;
@@ -178,6 +182,10 @@ const UserSchema = new Schema(
       type: String,
     },
     dispatcherOrganizationIds: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Organization',
+    }],
+    financeOrganizationIds: [{
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Organization',
     }],

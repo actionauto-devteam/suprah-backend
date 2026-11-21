@@ -9,7 +9,8 @@ import request from 'supertest';
 jest.mock('../../src/middleware/auth.middleware', () => ({
   __esModule: true,
   default: () => (req: any, _res: any, next: any) => {
-    req.user = { _id: 'user-1', role: req.headers['x-test-role'] };
+    // Staff here have Finance access (2026-11-21); batch-2026-11-21 tests staff without it.
+    req.user = { _id: 'user-1', role: req.headers['x-test-role'], financeOrganizationIds: ['org-1'] };
     req.orgId = 'org-1';
     next();
   },

@@ -22,6 +22,8 @@ import {
   invoiceLinesFrom,
   taxRateFrom,
 } from "../utils/invoiceLines";
+import { FINANCE_ACCESS_MESSAGE, crmUserHasFinanceAccess } from "../utils/financeAccess";
+import { dealershipForPayments, paymentLimitProblem } from "../services/suprahPaySettings.service";
 
 
 async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
@@ -381,9 +383,11 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, "Not authenticated");
   if (!actor.organizationId) throw new ApiError(403, "No organization context.");
+  // Sending an invoice needs Finance access (2026-11-21).
+  if (!(await crmUserHasFinanceAccess(actor))) throw new ApiError(403, FINANCE_ACCESS_MESSAGE);
 
   const { inquiryId } = req.params;
-  const { lineItems, taxRate = 0, dueDate, notes, customerNote, description } = req.body as {
+  const { lineItems, taxRate, dueDate, notes, customerNote, description } = req.body as {
     lineItems?: Array<Partial<IPaymentLineItem>>;
     taxRate?: number;
     dueDate?: string;
@@ -395,9 +399,11 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
   };
 
   // Check the lines, tax, due date and note before anything is looked up (2026-11-20).
+  // SuprahPay must be on for the dealership; gives its default tax rate and Suprah's settings.
+  const dealership = await dealershipForPayments(String(actor.organizationId));
   const checked = invoiceLinesFrom(lineItems);
   if (!checked.ok) throw new ApiError(400, checked.message);
-  const rate = taxRateFrom(taxRate);
+  const rate = taxRate === undefined || (taxRate as unknown) === "" ? dealership.defaultTaxRate : taxRateFrom(taxRate);
   if (rate === null) throw new ApiError(400, "Enter a tax rate from 0% to 100%.");
   const noteToCustomer = customerNoteFrom(customerNote);
   if (noteToCustomer === null) {
@@ -411,6 +417,8 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
   const amount = Math.round((subtotal + taxAmount) * 100) / 100;
   if (amount <= 0) throw new ApiError(400, "The invoice total must be more than $0.");
   if (amount > MAX_INVOICE_TOTAL) throw new ApiError(400, "The invoice total can't be more than $999,999.99.");
+  const limitProblem = paymentLimitProblem(amount, dealership.maxPaymentAmount);
+  if (limitProblem) throw new ApiError(400, limitProblem);
 
   const inquiry = await AftermarketInquiry.findOne({
     _id: inquiryId,
@@ -447,6 +455,8 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
     dueDate: due,
     notes: typeof notes === "string" ? notes.trim() || undefined : undefined,
     customerNote: noteToCustomer,
+    purpose: "aftermarket",
+    suprahFeePercent: dealership.feePercent,
     createdBy: actor._id,
   });
 

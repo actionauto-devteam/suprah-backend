@@ -25,6 +25,21 @@ export interface IOrganization extends Document {
     metadata?: any;
     status: 'active' | 'suspended' | 'archived';
     subscription: IOrganizationSubscription;
+    /** SuprahPay for this dealership (2026-11-21); see services/suprahPaySettings. */
+    suprahPay?: {
+        /** Set by a super admin. Unset means on only for Suprah Origin dealerships (the pilot). */
+        enabled?: boolean;
+        /** Default sales tax rate in percent, set by the dealership's admins. */
+        defaultTaxRate?: number;
+        /** The dealership's Stripe payout account (Stripe Connect), for Suprah's weekly payouts. */
+        stripeAccountId?: string;
+        /** Payouts cover customer payments paid from this moment (when the payout account was connected). */
+        payoutsStartAt?: Date;
+        /** Set while a payout is being sent, so only one is sent at a time. */
+        payoutClaimedAt?: Date | null;
+        updatedAt?: Date;
+        updatedBy?: mongoose.Types.ObjectId;
+    };
     createdAt: Date;
     updatedAt: Date;
 }
@@ -90,6 +105,15 @@ const OrganizationSchema = new Schema<IOrganization>(
                 type: Schema.Types.ObjectId,
                 ref: 'User',
             },
+        },
+        suprahPay: {
+            enabled: { type: Boolean },
+            defaultTaxRate: { type: Number, min: 0, max: 100 },
+            stripeAccountId: { type: String, trim: true },
+            payoutsStartAt: { type: Date },
+            payoutClaimedAt: { type: Date },
+            updatedAt: { type: Date },
+            updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         },
     },
     {

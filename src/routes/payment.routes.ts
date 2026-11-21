@@ -2,6 +2,13 @@ import express from 'express';
 import paymentController from '../controllers/payment.controller';
 import auth from '../middleware/auth.middleware';
 import authorize from '../middleware/role.middleware';
+import { getDealershipSettings, updateDealershipSettings } from '../controllers/suprahPaySettings.controller';
+import { requireFinanceAccess } from '../utils/financeAccess';
+import {
+  connectDealershipPayoutAccount,
+  getDealershipPayoutAccount,
+  getDealershipPayouts,
+} from '../controllers/dealershipPayouts.controller';
 
 const router = express.Router();
 
@@ -34,16 +41,36 @@ router.get('/stats', paymentController.getPaymentStats);
 router.get('/balance', paymentController.getBillingBalance);
 router.get('/pending', paymentController.getPendingPayments);
 
-router.get('/', paymentController.getPayments);
-router.post('/', paymentController.createPayment);
+// The dealership's SuprahPay settings (2026-11-21): any staff can read them; admins change them.
+router.get('/settings', getDealershipSettings);
+router.put(
+  '/settings',
+  authorize(['super_admin', 'admin'], "Only your dealership's admins can change SuprahPay settings."),
+  updateDealershipSettings,
+);
 
-router.post('/create-intent', paymentController.createPaymentIntent);
-router.post('/confirm', paymentController.confirmPayment);
+// Suprah's weekly payouts to the dealership (2026-11-21): staff can see them;
+// only admins set up the Stripe payout account.
+router.get('/payouts', getDealershipPayouts);
+router.get('/payout-account', getDealershipPayoutAccount);
+router.post(
+  '/payout-account/connect',
+  authorize(['super_admin', 'admin'], "Only your dealership's admins can set up the payout account."),
+  connectDealershipPayoutAccount,
+);
+
+router.get('/', paymentController.getPayments);
+// Sending, editing, cancelling and refunding need Finance access (2026-11-21);
+// every staff member can still view payments.
+router.post('/', requireFinanceAccess, paymentController.createPayment);
+
+router.post('/create-intent', requireFinanceAccess, paymentController.createPaymentIntent);
+router.post('/confirm', requireFinanceAccess, paymentController.confirmPayment);
 
 router.get('/:id', paymentController.getPaymentById);
-router.patch('/:id', paymentController.updatePayment);
-router.post('/:id/cancel', paymentController.cancelPayment);
-router.post('/:id/refund', paymentController.refundPayment);
-router.post('/:id/request', paymentController.requestPaymentFromCustomer);
+router.patch('/:id', requireFinanceAccess, paymentController.updatePayment);
+router.post('/:id/cancel', requireFinanceAccess, paymentController.cancelPayment);
+router.post('/:id/refund', requireFinanceAccess, paymentController.refundPayment);
+router.post('/:id/request', requireFinanceAccess, paymentController.requestPaymentFromCustomer);
 
 export default router;

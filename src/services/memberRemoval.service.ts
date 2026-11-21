@@ -116,7 +116,7 @@ export async function removeMemberFromOrganization(input: {
                 { _id: userId, organizationId: id },
                 {
                     $unset: { organizationId: 1, organizationRole: 1 },
-                    $pull: { dispatcherOrganizationIds: id },
+                    $pull: { dispatcherOrganizationIds: id, financeOrganizationIds: id },
                 },
                 { new: true, session },
             );

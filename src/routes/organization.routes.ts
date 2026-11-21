@@ -10,6 +10,7 @@ import {
     getOrganization,
     removeMember,
     updateMemberDispatcherAccess,
+    updateMemberFinanceAccess,
     updateOrganization,
     updateOwnOrganizationSubscription,
 } from '../controllers/organization.controller';
@@ -28,6 +29,7 @@ router.delete('/:id', authorize(['super_admin']), deleteOrganization);
 
 router.get('/:id/members', getMembers);
 router.patch('/:id/members/:userId/dispatcher-access', requireAdmin, updateMemberDispatcherAccess);
+router.patch('/:id/members/:userId/finance-access', requireAdmin, updateMemberFinanceAccess);
 router.delete('/:id/members/:userId', requireAdmin, removeMember);
 
 export default router;

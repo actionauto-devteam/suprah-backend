@@ -123,7 +123,7 @@ const SECURITY_CRITICAL_TYPES = new Set([
 const CATEGORY_PUSH_LABELS: Record<NotificationCategory, string> = {
   transportation: 'Transportation', inventory: 'Inventory', appointments: 'Appointments',
   crm: 'CRM', feeds: 'Feeds', projectManagement: 'Project Mgmt', calendar: 'Calendar',
-  driverTracker: 'Driver Tracker', wallet: 'Suprah Pay', team: 'Team', account: 'Account',
+  driverTracker: 'Driver Tracker', wallet: 'SuprahPay', team: 'Team', account: 'Account',
   referrals: 'Referrals', system: 'System', adminBroadcasts: 'Admin', adminSystemAlerts: 'Admin',
   adminStaffActivity: 'Admin', adminSecurityAudit: 'Admin',
 };
