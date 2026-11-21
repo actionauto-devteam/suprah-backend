@@ -3,6 +3,7 @@ import crmAuth from '../middleware/crmAuth.middleware';
 import suprahMeetController from '../controllers/suprahMeet.controller';
 import { testMeetingDevicePush } from '../controllers/suprahMeetPush.controller';
 import { previewUnusedMeetings, removeUnusedMeetings } from '../controllers/suprahMeetCleanup.controller';
+import dealDesk from '../controllers/suprahMeetDealDesk.controller';
 
 // NOTE: if your existing route file imports the auth middleware differently
 // (named import / different filename), keep YOUR import + router.use line and
@@ -20,7 +21,22 @@ router.post('/guest/:code/captions', suprahMeetController.guestCaptions);
 router.get('/guest/:code/roster',   suprahMeetController.guestRoster);
 router.get('/guest/recording/:code', suprahMeetController.recordingAccess); // token-gated
 
+// ── Public Deal Desk (NO auth). Scoped to one organization; never returns
+// room passwords. Entering a room requires its password and issues a
+// Deal Desk guest pass that the guest endpoints above accept. ──
+router.get('/deal-desk/public/:org/rooms',               dealDesk.publicListRooms);
+router.post('/deal-desk/public/:org/rooms/:code/enter',  dealDesk.publicEnterRoom);
+router.get('/deal-desk/public/:org/rooms/:code/queue',   dealDesk.publicQueueStatus);
+router.post('/deal-desk/public/:org/rooms/:code/leave',  dealDesk.publicLeaveQueue);
+
 router.use(crmAuth());
+
+// Deal Desk management (rep). Admit / decline use /meetings/:code/waiting/:userId.
+router.get('/deal-desk/rooms',                 dealDesk.listRooms);
+router.post('/deal-desk/rooms',                dealDesk.createRoom);
+router.patch('/deal-desk/rooms/:code',         dealDesk.updateRoom);
+router.delete('/deal-desk/rooms/:code',        dealDesk.closeRoom);
+router.post('/deal-desk/rooms/:code/reopen',   dealDesk.reopenRoom);
 
 router.post('/device-notifications/test', testMeetingDevicePush);
 router.get('/unused-schedules', previewUnusedMeetings);

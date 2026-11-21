@@ -14,6 +14,7 @@ function cleanupScope(req: Request) {
     organizationId: user.organizationId,
     ...(['admin', 'manager'].includes(user.role) ? {} : { hostCrmUserId: user._id }),
     title: /^\s*Instant meeting\s*$/i,
+    roomType: { $ne: 'dealdesk' }, // Deal Desk rooms are standing rooms, never "unused drafts"
     status: 'scheduled', calendarSourceId: null,
     startedAt: null, endedAt: null, chimeMeetingId: null,
     participants: { $size: 0 },

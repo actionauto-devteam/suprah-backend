@@ -28,6 +28,12 @@ import Joi from 'joi';
 import { recoverCalendarMeetings } from '../services/calendarMeetSync.service';
 import { persistMeetingJoin } from '../services/suprahMeetJoin.service';
 import { claimHostMeetingEnd, closeAbandonedMeeting, openScheduledMeeting, reconcilePersistedPresence } from '../services/suprahMeetLifecycle.service';
+import { GUEST_SECRET, GuestPass, signGuest, verifyGuest } from '../services/suprahMeetGuestPass.service';
+import {
+  assertAttemptAllowed, clearFailures, dealDeskUrls, isQueueEntryLive, notifyHostCustomerQueued, recordFailure, verifyRoomPassword,
+} from '../services/suprahMeetDealDesk.service';
+
+const isDealDesk = (m: any) => m?.roomType === 'dealdesk';
 
 const COMPANY_TZ = 'America/Denver'; // Mountain time — MDT/MST with automatic DST
 const MAX_SERIES_SESSIONS = 30;
@@ -212,6 +218,11 @@ async function resolveAudience(user: any, invitees: any, inviteDepartments: any)
 const createMeeting = asyncHandler(async (req: Request, res: Response) => {
   const user = requireCrmUser(req);
   const { title, scheduledAt, occurrences, invitees, inviteAll, inviteDepartments, visibility } = req.body ?? {};
+  // Deal Desk rooms need a password and their own lifecycle. Never let one
+  // silently fall through to the `public` default below.
+  if (visibility === 'dealdesk' || req.body?.roomType === 'dealdesk') {
+    throw new ApiError(400, 'Create Deal Desk rooms with POST /api/crm/meet/deal-desk/rooms.');
+  }
 
   const cleanTitle = typeof title === 'string' && title.trim()
     ? title.trim().slice(0, 120) : 'Instant meeting';
@@ -322,26 +333,8 @@ const deleteMeeting = asyncHandler(async (req: Request, res: Response) => {
 // get a signed "guest pass" (JWT) that scopes them to ONE meeting code. Public
 // meetings admit them directly; private meetings put them in the waiting room,
 // where the host admits/denies exactly like internal join-by-code users.
-const GUEST_SECRET =
-  process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || config.jwt.crmJwtSecret || config.jwt.accessSecret;
-
-interface GuestPass {
-  guest: true; code: string; guestId: string;
-  name: string; email: string | null; organizationId: string;
-}
-const signGuest = (p: Omit<GuestPass, 'guest'>) =>
-  jwt.sign({ guest: true, ...p }, GUEST_SECRET, { expiresIn: '12h' });
-function verifyGuest(req: Request): GuestPass {
-  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (!raw) throw new ApiError(401, 'Missing guest pass.');
-  try {
-    const p = jwt.verify(raw, GUEST_SECRET) as any;
-    if (!p?.guest || !p?.guestId || !p?.code || !p?.organizationId) throw new Error('not a guest pass');
-    return p as GuestPass;
-  } catch {
-    throw new ApiError(401, 'Your guest pass is invalid or expired. Re-enter your name to get a new one.');
-  }
-}
+// GUEST_SECRET / signGuest / verifyGuest live in suprahMeetGuestPass.service
+// so Deal Desk can issue the same passes.
 const findMeetingByCodePublic = async (code: string, organizationId?: string) => {
   const normalized = code.trim().toUpperCase();
   if (organizationId) return Meeting.findOne({ code: normalized, organizationId });
@@ -382,9 +375,46 @@ const guestRequest = asyncHandler(async (req: Request, res: Response) => {
   let guestId: string | null = previous?.organizationId === String(meeting.organizationId) ? previous.guestId : null;
   if (!guestId) guestId = 'g' + crypto.randomBytes(8).toString('hex');
 
+  // ── Deal Desk: the room password is required even on the plain guest link.
+  // A pass from the Deal Desk page (dealDesk: true) is proof it was entered;
+  // otherwise the guest page may send { password } in this request.
+  let dealDeskVerified = false;
+  if (isDealDesk(meeting)) {
+    const orgId = String(meeting.organizationId);
+    dealDeskVerified = Boolean(previous?.dealDesk && previous.organizationId === orgId);
+    if (!dealDeskVerified && typeof req.body?.password === 'string' && req.body.password) {
+      const limiterKey = `${req.ip}:${orgId}:${meeting.code}`;
+      assertAttemptAllowed(limiterKey);
+      const withHash = await Meeting.findById(meeting._id).select('+dealDesk.passwordHash').lean();
+      if (await verifyRoomPassword(req.body.password, withHash?.dealDesk?.passwordHash)) {
+        clearFailures(limiterKey);
+        dealDeskVerified = true;
+      } else {
+        const left = recordFailure(limiterKey);
+        return res.status(403).json({
+          statusCode: 403, success: false,
+          message: left > 0 ? 'That room password is not correct.' : 'Too many incorrect passwords. Try again in a few minutes.',
+          data: { passwordRequired: true, attemptsLeft: left, dealDeskUrl: dealDeskUrls(orgId, meeting.code).roomUrl },
+        });
+      }
+    }
+    if (!dealDeskVerified) {
+      return res.status(403).json({
+        statusCode: 403, success: false,
+        message: 'This is a password-protected Deal Desk room. Enter the room password to join the line.',
+        data: { passwordRequired: true, dealDeskUrl: dealDeskUrls(orgId, meeting.code).roomUrl },
+      });
+    }
+    const known = ((meeting as any).waiting ?? []).some((w: any) => w.guestId === guestId);
+    if (!known && !(meeting as any).dealDesk?.isOpen) {
+      throw new ApiError(409, 'This Deal Desk room is not accepting new customers right now.');
+    }
+  }
+
   const guestToken = signGuest({
     code: meeting.code, guestId, name, email,
     organizationId: meeting.organizationId.toString(),
+    ...(dealDeskVerified ? { dealDesk: true } : {}),
   });
   const live = meeting.status === 'live' && (isHostPresent(meeting) || hasScheduledMeetingOpened(meeting));
   const scheduledAt = meeting.scheduledAt?.toISOString() ?? null;
@@ -406,12 +436,21 @@ const guestRequest = asyncHandler(async (req: Request, res: Response) => {
     return res.json(new ApiResponse(200,
       { admitted: true, live, guestToken, title: meeting.title, scheduledAt }, 'Admitted'));
   }
-  if (!entry) {
-    waiting.push({
-      fullName: `${name} (guest)`, status: 'waiting', requestedAt: new Date(),
-      isGuest: true, guestId, guestEmail: email || undefined,
-    });
+  if (!entry || entry.status === 'left') {
+    if (entry) {
+      entry.status = 'waiting'; entry.requestedAt = new Date(); entry.lastSeenAt = new Date();
+    } else {
+      waiting.push({
+        fullName: `${name} (guest)`, status: 'waiting', requestedAt: new Date(),
+        isGuest: true, guestId, guestEmail: email || undefined,
+        ...(isDealDesk(meeting) ? { lastSeenAt: new Date(), source: 'dealdesk' } : {}),
+      });
+    }
     await meeting.save();
+    if (isDealDesk(meeting)) notifyHostCustomerQueued(meeting, name);
+  } else if (isDealDesk(meeting)) {
+    // The guest page polls this endpoint while waiting — keep the rep's queue view fresh.
+    await Meeting.updateOne({ _id: meeting._id, 'waiting.guestId': guestId }, { $set: { 'waiting.$.lastSeenAt': new Date() } });
   }
   res.json(new ApiResponse(200, { waiting: true, guestToken, title: meeting.title, scheduledAt }, 'Waiting for the host'));
 });
@@ -427,6 +466,9 @@ const guestJoin = asyncHandler(async (req: Request, res: Response) => {
   if (meeting.status === 'ended') throw new ApiError(410, meetingEndedMessage(meeting.endedReason));
   if (isRemovedParticipant(meeting, `guest:${g.guestId}`)) {
     throw new ApiError(403, 'The host removed you from this meeting.');
+  }
+  if (isDealDesk(meeting) && !g.dealDesk) {
+    throw new ApiError(403, 'This Deal Desk room requires its password. Join the line from the Deal Desk page.');
   }
   // Guests can never START a meeting — only join one that is live.
   if (meeting.status === 'scheduled') {
@@ -522,6 +564,8 @@ const guestRoster = asyncHandler(async (req: Request, res: Response) => {
   const g = verifyGuest(req);
   let meeting: IMeeting | null = await findMeetingByCodePublic(String(req.params.code || ''), g.organizationId);
   if (!meeting || g.code !== meeting.code) throw new ApiError(404, 'No meeting found for that link.');
+  // Don't reveal who is in a Deal Desk room to a pass that never entered its password.
+  if (isDealDesk(meeting) && !g.dealDesk) throw new ApiError(403, 'This Deal Desk room requires its password.');
   meeting = await refreshPersistedPresence(meeting);
   res.json(new ApiResponse(200, {
     participants: pubParticipants(meeting),
@@ -794,8 +838,11 @@ const getWaiting = asyncHandler(async (req: Request, res: Response) => {
   if (!isHost(user, meeting)) {
     throw new ApiError(403, 'Only the meeting host can see the waiting room.');
   }
+  const now = Date.now();
   const waiting = (((meeting as any).waiting ?? []) as any[])
-    .filter((w) => w.status === 'waiting')
+    // Deal Desk customers who closed their page drop off the banner on their own.
+    .filter((w) => isQueueEntryLive(w, now))
+    .sort((a, b) => new Date(a.requestedAt).getTime() - new Date(b.requestedAt).getTime())
     .map((w) => ({
       crmUserId: w.crmUserId ? w.crmUserId.toString() : `guest:${w.guestId}`,
       fullName: w.fullName,
@@ -841,6 +888,8 @@ const updateMeeting = asyncHandler(async (req: Request, res: Response) => {
   if (!isHost(user, meeting)) {
     throw new ApiError(403, 'Only the meeting host can edit this meeting.');
   }
+  // Deal Desk rooms must stay private and password-protected.
+  if (isDealDesk(meeting)) throw new ApiError(409, 'Edit Deal Desk rooms from Suprah Meet → Deal Desk.');
   if (meeting.status !== 'scheduled') {
     throw new ApiError(400, 'Only upcoming meetings can be edited.');
   }
@@ -1437,6 +1486,11 @@ function serializeMeeting(m: any) {
     title: m.title,
     status: m.status,
     visibility: m.visibility === 'private' ? 'private' : 'public',
+    roomType: m.roomType === 'dealdesk' ? 'dealdesk' : 'standard',
+    // Never includes the password hash.
+    dealDesk: m.roomType === 'dealdesk'
+      ? { isOpen: Boolean(m.dealDesk?.isOpen), description: m.dealDesk?.description || null }
+      : null,
     scheduledAt: m.scheduledAt ?? null,
     seriesId: m.seriesId ?? null,
     calendarSourceId: m.calendarSourceId ?? null,
