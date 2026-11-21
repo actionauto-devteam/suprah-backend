@@ -4,7 +4,7 @@ import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import Appointment from '../models/Appointment.model';
 import { CallLog, CommunicationMessage } from '../models/communication.model';
-import { LEAD_STATUS_CATEGORY_OF } from '../constants/leadStatus';
+import { LEAD_STATUS_CATEGORY_OF, countedLeadFilter } from '../constants/leadStatus';
 import { isGenuineDemoLead, normalizeLeadSourceForDisplay, UNMAPPED_LEAD_SOURCE_LABEL } from '../constants/leadSource';
 
 export const UNASSIGNED_KEY = 'unassigned';
@@ -98,7 +98,7 @@ export async function buildSalespeopleReport(input: {
   const created = { $gte: from, $lte: to };
 
   const [leadDocs, textRows, placedRows, answeredRows] = await Promise.all([
-    Lead.find({ organizationId: orgObjectId, createdAt: created, 'combinedInto.leadId': { $exists: false } })
+    Lead.find({ organizationId: orgObjectId, createdAt: created, ...countedLeadFilter() })
       .select('firstName lastName phone email source sourceProvider channel status location assignedTo createdAt')
       .sort({ createdAt: -1 })
       .lean(),

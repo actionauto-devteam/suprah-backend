@@ -5,8 +5,9 @@ import LeadIntakeAudit from '../models/LeadIntakeAudit.model';
 import WebChatSession from '../models/WebChatSession.model';
 import WebChatMessage from '../models/WebChatMessage.model';
 import Appointment from '../models/Appointment.model';
-import { CallLog, CommunicationMessage } from '../models/communication.model';
-import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
+import { CallLog, CommunicationMessage, Conversation } from '../models/communication.model';
+import { moveConversationToLead } from '../utils/conversationOwnership';
+import { LIFECYCLE_TERMINAL_STATUSES, NOT_A_LEAD_STATUS } from '../constants/leadStatus';
 import { ApiError } from '../utils/ApiError';
 import { emitToOrg } from '../utils/socketEmitter';
 import { clearLeadAwaitingReply, moveLeadAwaitingReply } from '../utils/leadActivity';
@@ -153,30 +154,51 @@ async function writeAudit(entry: {
   });
 }
 
-async function closeMergedLead(organizationId: string, leadId: unknown, status: string, reason: string, actor: ReviewActor) {
-  const lead: any = await Lead.findOne({ _id: leadId, organizationId }).select('status').lean();
-  if (!lead || lead.status === status) return;
+async function closeMergedLead(organizationId: string, leadId: unknown, status: string, reason: string, actor: ReviewActor, linkedInto?: unknown) {
+  const lead: any = await Lead.findOne({ _id: leadId, organizationId }).select('status combinedInto').lean();
+  if (!lead) return;
+  const link = isObjectId(linkedInto) && !lead.combinedInto?.leadId
+    ? { combinedInto: { leadId: linkedInto, at: new Date(), previousStatus: lead.status, via: 'link' } }
+    : null;
+  if (lead.status === status && !link) return;
   await Lead.updateOne(
     { _id: leadId, organizationId },
     {
-      $set: { status },
-      $push: {
-        statusHistory: {
-          from: lead.status,
-          to: status,
-          changedAt: new Date(),
-          ...(isObjectId(actor.userId) ? { changedBy: actor.userId } : {}),
-          reason,
-        },
-      },
+      $set: { status, ...(link || {}) },
+      ...(link ? { $unset: { intakeIdentity: 1 } } : {}),
+      ...(lead.status !== status
+        ? {
+          $push: {
+            statusHistory: {
+              from: lead.status,
+              to: status,
+              changedAt: new Date(),
+              ...(isObjectId(actor.userId) ? { changedBy: actor.userId } : {}),
+              reason,
+            },
+          },
+        }
+        : {}),
     },
   );
   if (LIFECYCLE_TERMINAL_STATUSES.includes(status)) await clearLeadAwaitingReply(leadId, undefined, new Date());
   emitToOrg(organizationId, 'lead:update', { leadId: String(leadId) });
 }
 
+async function copyLeadNotes(organizationId: string, fromLeadId: unknown, toLeadId: unknown) {
+  const [from, to]: any[] = await Promise.all([
+    Lead.findOne({ _id: fromLeadId, organizationId }).select('notes').lean(),
+    Lead.findOne({ _id: toLeadId, organizationId }).select('notes._id').lean(),
+  ]);
+  if (!from?.notes?.length || !to) return;
+  const have = new Set((to.notes || []).map((note: any) => String(note._id)));
+  const missing = from.notes.filter((note: any) => note?._id && !have.has(String(note._id)));
+  if (missing.length) await Lead.updateOne({ _id: toLeadId, organizationId }, { $push: { notes: { $each: missing, $sort: { createdAt: 1 } } } });
+}
+
 async function moveLeadRecords(organizationId: string, fromLeadId: unknown, toLeadId: unknown) {
   const orgIds = { $in: [organizationId, new mongoose.Types.ObjectId(organizationId)] };
+  await copyLeadNotes(organizationId, fromLeadId, toLeadId);
   await Promise.all([
     WebChatSession.updateMany({ organizationId, leadId: fromLeadId }, { $set: { leadId: toLeadId } }),
     WebChatMessage.updateMany({ organizationId, leadId: fromLeadId }, { $set: { leadId: toLeadId } }),
@@ -184,6 +206,12 @@ async function moveLeadRecords(organizationId: string, fromLeadId: unknown, toLe
     CallLog.updateMany({ orgId: orgIds, leadId: fromLeadId }, { $set: { leadId: toLeadId } }),
     Appointment.updateMany({ organizationId, leadId: fromLeadId }, { $set: { leadId: toLeadId } }),
   ]);
+  const conversations: any[] = await Conversation.find({ orgId: orgIds, leadId: fromLeadId }).select('_id').lean();
+  for (const conversation of conversations) {
+    await moveConversationToLead({ organizationId, conversationId: conversation._id, leadId: toLeadId });
+  }
+  const { default: AiAgentTask } = await import('../models/AiAgentTask.model');
+  await AiAgentTask.updateMany({ organizationId: String(organizationId), leadId: fromLeadId, status: 'pending' }, { $set: { leadId: toLeadId } });
   await moveLeadAwaitingReply([fromLeadId], toLeadId, organizationId);
 }
 
@@ -232,7 +260,7 @@ export async function resolveLeadReview(input: {
   }
   if (possibleMatch && input.resolution === 'create_lead') input.resolution = 'keep_separate';
   if (!possibleMatch && input.resolution === 'keep_separate') {
-    throw new ApiError(400, 'Choose to add this to a lead, create a new lead, or mark it as not a customer inquiry.');
+    throw new ApiError(400, 'Choose to add this to a lead, create a new lead, or mark it as not a lead.');
   }
   if (input.resolution === 'associate') {
     await requireOpenLead(organizationId, input.leadId);
@@ -290,12 +318,12 @@ export async function resolveLeadReview(input: {
           { _id: current._id },
           { $set: { 'association.leadId': input.leadId, 'association.outcome': 'appended', 'association.reason': 'staff_review' } },
         );
-        await closeMergedLead(organizationId, createdLeadId, 'Closed', `Linked to another lead after staff review${note ? `: ${note}` : ''}`, actor);
+        await closeMergedLead(organizationId, createdLeadId, 'Closed', `Linked to another lead after staff review${note ? `: ${note}` : ''}`, actor, input.leadId);
         finalLeadId = String(input.leadId);
         await rearmSideEffects(current._id);
         await fillEmptyLeadAddress(organizationId, appended, claimed as ILeadInquiry);
       } else if (input.resolution === 'not_customer_inquiry') {
-        await closeMergedLead(organizationId, createdLeadId, 'Bad Lead', `Marked as not a customer inquiry${note ? `: ${note}` : ''}`, actor);
+        await closeMergedLead(organizationId, createdLeadId, NOT_A_LEAD_STATUS, `Marked as not a lead${note ? `: ${note}` : ''}`, actor);
       }
     } else if (input.resolution === 'associate') {
       const appended = await appendInquiryToLead(organizationId, String(input.leadId), claimed as ILeadInquiry, { fillAddress: false });
@@ -390,7 +418,7 @@ export async function linkUnverifiedLead(input: {
     { _id: input.targetLeadId, organizationId },
     { $set: { isRead: false, 'followUp.lastCustomerActivityAt': new Date() } },
   );
-  await closeMergedLead(organizationId, input.leadId, 'Closed', `Linked to another lead after staff verification${note ? `: ${note}` : ''}`, actor);
+  await closeMergedLead(organizationId, input.leadId, 'Closed', `Linked to another lead after staff verification${note ? `: ${note}` : ''}`, actor, input.targetLeadId);
   emitToOrg(organizationId, 'lead:update', { leadId: String(input.targetLeadId) });
   return { leadId: String(input.targetLeadId), resolution: 'associated' };
 }
@@ -404,10 +432,14 @@ export type ActiveLeadLookup =
 export async function findActiveLeadForClosedLead(organizationId: string, leadId: string): Promise<ActiveLeadLookup> {
   if (!isObjectId(leadId)) throw new ApiError(404, 'Lead not found');
   const lead: any = await Lead.findOne({ _id: leadId, organizationId })
-    .select('status phone email identityEmailExcluded intakeIdentity')
+    .select('status phone email identityEmailExcluded intakeIdentity combinedInto')
     .lean();
   if (!lead) throw new ApiError(404, 'Lead not found');
   if (!LIFECYCLE_TERMINAL_STATUSES.includes(lead.status)) return { leadClosed: false };
+  if (lead.combinedInto?.leadId) {
+    const target: any = await Lead.findOne({ _id: lead.combinedInto.leadId, organizationId }).select(LEAD_SUMMARY_FIELDS).lean();
+    if (target && !LIFECYCLE_TERMINAL_STATUSES.includes(target.status)) return { leadClosed: true, status: 'single', lead: leadSummary(target) };
+  }
   if (lead.intakeIdentity === 'unverified') return { leadClosed: true, status: 'uncertain' };
   const inputs = await loadLeadAssociationInputs({
     organizationId,

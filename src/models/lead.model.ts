@@ -111,7 +111,7 @@ export interface ILead extends Document {
   sourceSubmittedAt?: Date;
   sourceInquiryId?: mongoose.Types.ObjectId;
   intakeIdentity?: 'unverified';
-  combinedInto?: { leadId: mongoose.Types.ObjectId; at: Date; previousStatus: string };
+  combinedInto?: { leadId: mongoose.Types.ObjectId; at: Date; previousStatus: string; via?: 'combine' | 'link' };
   intakeSlots?: string[];
   lastInquiryAt?: Date;
   inquiryCount?: number;
@@ -459,6 +459,7 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
           leadId: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', required: true },
           at: { type: Date, required: true },
           previousStatus: { type: String, required: true },
+          via: { type: String, enum: ['combine', 'link'] },
         },
         { _id: false },
       ),

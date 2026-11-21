@@ -24,13 +24,15 @@ import {
 } from '../utils/adfParser';
 import { getSocketIO, emitToUser } from '../utils/socketEmitter';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
+import LeadInquiry from '../models/LeadInquiry.model';
+import { normalizeIdentityEmail } from '../utils/contactIdentity';
 import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
 import { buildLeadSearchCondition } from '../utils/leadSearch';
 import { customerAreaFilterCondition, leadCustomerArea, postalAddressLine } from '../utils/customerArea';
-import { LEAD_STATUS_CATEGORIES, LIFECYCLE_TERMINAL_STATUSES, UNANSWERED_LEAD_STATUSES, isContactRestrictedStatus } from '../constants/leadStatus';
+import { LEAD_STATUS_CATEGORIES, LIFECYCLE_TERMINAL_STATUSES, NOT_A_LEAD_STATUS, UNANSWERED_LEAD_STATUSES, countedLeadFilter, isContactRestrictedStatus } from '../constants/leadStatus';
 import {
   assertContactAllowed,
   isContactRestrictedError,
@@ -102,6 +104,39 @@ async function viewerUserId(req: Request): Promise<string> {
 
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 const DUPLICATE_NOTE_WINDOW_MS = 5 * 60 * 1000;
+const LINKED_CHAT_REOPEN_MESSAGE = "This chat was added to the customer's lead, so it can't be reopened. Open that lead to keep working with the customer.";
+
+async function syncNotLeadSender(orgId: unknown, lead: any, markedNotALead: boolean): Promise<void> {
+  if (lead?.source !== LEAD_SOURCE.EMAIL_INQUIRY) return;
+  const sender = normalizeIdentityEmail(lead.email);
+  if (!sender) return;
+  const config: any = await OrgLeadConfig.findOne({ organizationId: orgId })
+    .select('leadSourceEmail gmailAddress previousMailbox.gmailAddress')
+    .lean();
+  if (!config) return;
+  const protectedAddresses = [config.leadSourceEmail, config.gmailAddress, config.previousMailbox?.gmailAddress]
+    .map((address) => normalizeIdentityEmail(address))
+    .filter(Boolean);
+  if (protectedAddresses.includes(sender)) return;
+  await OrgLeadConfig.updateOne(
+    { organizationId: orgId },
+    markedNotALead ? { $addToSet: { notLeadSenders: sender } } : { $pull: { notLeadSenders: sender } },
+  );
+  if (markedNotALead || !lead.identityEmailExcluded) return;
+  const inquiry: any = lead.sourceInquiryId
+    ? await LeadInquiry.findOne({ _id: lead.sourceInquiryId, organizationId: orgId }).select('sourceIds.gmailThreadId').lean()
+    : null;
+  const threadId = inquiry?.sourceIds?.gmailThreadId;
+  await Lead.findOneAndUpdate(
+    { _id: lead._id, organizationId: orgId },
+    { $unset: { identityEmailExcluded: 1 }, ...(threadId && !lead.threadId ? { $set: { threadId } } : {}) },
+  );
+}
+
+async function isLinkedChatLead(orgId: unknown, leadId: unknown): Promise<boolean> {
+  const lead: any = await Lead.findOne({ _id: leadId, organizationId: orgId }).select('combinedInto.via').lean();
+  return lead?.combinedInto?.via === 'link';
+}
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
 
 function createAdfIngestionFingerprint(xmlData: string) {
@@ -823,6 +858,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
     } else if (statusGroup && Object.prototype.hasOwnProperty.call(LEAD_STATUS_CATEGORIES, statusGroup)) {
       query.status = { $in: LEAD_STATUS_CATEGORIES[statusGroup as keyof typeof LEAD_STATUS_CATEGORIES] };
     }
+    if (!query.status) query.status = { $ne: NOT_A_LEAD_STATUS };
 
     if (assignedTo) {
       query.assignedTo = assignedTo;
@@ -1049,7 +1085,7 @@ export const getLeadLocationCounts = async (req: Request, res: Response) => {
     }
 
     const results = await Lead.aggregate([
-      { $match: { organizationId: new mongoose.Types.ObjectId(orgId), 'combinedInto.leadId': { $exists: false } } },
+      { $match: { organizationId: new mongoose.Types.ObjectId(orgId), ...countedLeadFilter() } },
       {
         $group: {
           _id: {
@@ -1090,7 +1126,7 @@ export const getLeadTypeCounts = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Organization context missing' });
     }
     const [row] = await Lead.aggregate([
-      { $match: { organizationId: new mongoose.Types.ObjectId(orgId), 'combinedInto.leadId': { $exists: false } } },
+      { $match: { organizationId: new mongoose.Types.ObjectId(orgId), ...countedLeadFilter() } },
       { $group: leadTypeCountsGroup() },
     ]);
     res.json(new ApiResponse(200, { counts: leadTypeCountsFromGroup(row) }));
@@ -1114,7 +1150,7 @@ export const getAssignedNewCount = async (req: Request, res: Response) => {
       organizationId: orgId,
       assignedTo: viewerId,
       assignmentUnseenBy: viewerId,
-      'combinedInto.leadId': { $exists: false },
+      ...countedLeadFilter(),
     });
     res.json(new ApiResponse(200, { count }));
   } catch (error) {
@@ -1711,6 +1747,9 @@ export const updateLead = async (req: Request, res: Response) => {
     const fromStatus = currentLead.status;
     const isClosing = status === 'Closed' && fromStatus !== 'Closed';
     const isReopening = fromStatus === 'Closed' && status !== 'Closed';
+    if (isReopening && currentLead.combinedInto?.via === 'link') {
+      return res.status(409).json({ message: LINKED_CHAT_REOPEN_MESSAGE });
+    }
     const isRemovingDoNotContact = isContactRestrictedStatus(fromStatus) && !isContactRestrictedStatus(status);
     const isApplyingDoNotContact = !isContactRestrictedStatus(fromStatus) && isContactRestrictedStatus(status);
     if (isRemovingDoNotContact && !(await isOrganizationAdmin(user, orgId))) {
@@ -1728,17 +1767,25 @@ export const updateLead = async (req: Request, res: Response) => {
       statusSet.isPending = false;
       statusSet['followUp.lastRepResponseAt'] = new Date();
     }
-    const historyEntry = statusHistoryEntry(fromStatus, status, userId, reason);
+    const notALeadReason = status === NOT_A_LEAD_STATUS && !(reason && String(reason).trim()) ? 'Not a lead' : reason;
+    const historyEntry = statusHistoryEntry(fromStatus, status, userId, notALeadReason);
     const lead = await Lead.findOneAndUpdate(
-      { _id: currentLead._id, organizationId: orgId, status: fromStatus },
+      { _id: currentLead._id, organizationId: orgId, status: fromStatus, ...(isReopening ? { 'combinedInto.via': { $ne: 'link' } } : {}) },
       { $set: statusSet, ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}) },
       { new: true, runValidators: true },
     );
     if (!lead) {
+      if (isReopening && await isLinkedChatLead(orgId, currentLead._id)) {
+        return res.status(409).json({ message: LINKED_CHAT_REOPEN_MESSAGE });
+      }
       return res.status(409).json({ message: CONTACT_RESTRICTION_MESSAGES.statusChanged, code: LEAD_STATUS_CHANGED_CODE });
     }
     if (statusSet['followUp.lastRepResponseAt']) await recordLeadAnswered(lead._id, orgId);
     else if (LIFECYCLE_TERMINAL_STATUSES.includes(status)) await clearLeadAwaitingReply(lead._id, orgId, new Date());
+    if (status !== fromStatus && (status === NOT_A_LEAD_STATUS || fromStatus === NOT_A_LEAD_STATUS)) {
+      await syncNotLeadSender(orgId, lead, status === NOT_A_LEAD_STATUS).catch((err) =>
+        logger.warn({ err, leadId: lead._id }, 'Could not update the Not a lead sender list'));
+    }
 
     if (isRemovingDoNotContact) {
       await releaseProtectedContacts({ organizationId: orgId, leadId: lead._id, actorUserId: userId }).catch((err) => {
@@ -2040,15 +2087,25 @@ export const markAsPending = async (req: Request, res: Response) => {
     if (isContactRestrictedStatus(currentLead.status)) {
       return res.status(403).json({ message: CONTACT_RESTRICTION_MESSAGES.statusLocked, code: CONTACT_RESTRICTION_ADMIN_ONLY_CODE });
     }
+    if (currentLead.combinedInto?.via === 'link' && LIFECYCLE_TERMINAL_STATUSES.includes(currentLead.status)) {
+      return res.status(409).json({ message: LINKED_CHAT_REOPEN_MESSAGE });
+    }
 
     const historyEntry = statusHistoryEntry(currentLead.status, 'Pending', user?._id);
     const lead = await Lead.findOneAndUpdate(
-      { _id: currentLead._id, organizationId: orgId, status: currentLead.status },
+      { _id: currentLead._id, organizationId: orgId, status: currentLead.status, 'combinedInto.via': { $ne: 'link' } },
       { $set: { isPending: true, status: 'Pending' }, ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}) },
       { new: true },
     );
     if (!lead) {
+      if (await isLinkedChatLead(orgId, currentLead._id)) {
+        return res.status(409).json({ message: LINKED_CHAT_REOPEN_MESSAGE });
+      }
       return res.status(409).json({ message: CONTACT_RESTRICTION_MESSAGES.statusChanged, code: LEAD_STATUS_CHANGED_CODE });
+    }
+    if (currentLead.status === NOT_A_LEAD_STATUS) {
+      await syncNotLeadSender(orgId, lead, false).catch((err) =>
+        logger.warn({ err, leadId: lead._id }, 'Could not update the Not a lead sender list'));
     }
 
     const io = getSocketIO();
@@ -3000,7 +3057,7 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
   const scheduledLead =
     (!isContactRestrictedStatus(lead.status)
       ? await Lead.findOneAndUpdate(
-          { _id: lead._id, organizationId: orgId, status: { $in: [lead.status, 'Appointment Set'] } },
+          { _id: lead._id, organizationId: orgId, status: { $in: [lead.status, 'Appointment Set'] }, 'combinedInto.leadId': { $exists: false } },
           {
             $set: { status: 'Appointment Set', appointment: appointmentInfo },
             ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}),

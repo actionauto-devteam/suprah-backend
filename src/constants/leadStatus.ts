@@ -1,4 +1,6 @@
-export type LeadStatusCategory = 'None' | 'Active' | 'MissedOpportunity' | 'DeadLead' | 'Sold' | 'ClosedLegacy';
+export type LeadStatusCategory = 'None' | 'Active' | 'MissedOpportunity' | 'DeadLead' | 'Sold' | 'ClosedLegacy' | 'NotALead';
+
+export const NOT_A_LEAD_STATUS = 'Not a Lead';
 
 export const LEAD_STATUS_CATEGORY_ORDER: LeadStatusCategory[] = [
   'None',
@@ -7,6 +9,7 @@ export const LEAD_STATUS_CATEGORY_ORDER: LeadStatusCategory[] = [
   'DeadLead',
   'Sold',
   'ClosedLegacy',
+  'NotALead',
 ];
 
 export const LEAD_STATUS_CATEGORIES: Record<LeadStatusCategory, string[]> = {
@@ -35,6 +38,7 @@ export const LEAD_STATUS_CATEGORIES: Record<LeadStatusCategory, string[]> = {
   DeadLead: ['Bought Elsewhere', 'Bad Lead', 'Do Not Contact'],
   Sold: ['Sold', 'In Finance', 'Online Financing'],
   ClosedLegacy: ['Closed'],
+  NotALead: [NOT_A_LEAD_STATUS],
 };
 
 export const LEAD_STATUS_VALUES: string[] = LEAD_STATUS_CATEGORY_ORDER.flatMap(
@@ -63,12 +67,14 @@ export const TERMINAL_LEAD_STATUSES: string[] = [
   ...LEAD_STATUS_CATEGORIES.DeadLead,
   ...LEAD_STATUS_CATEGORIES.Sold,
   ...LEAD_STATUS_CATEGORIES.ClosedLegacy,
+  ...LEAD_STATUS_CATEGORIES.NotALead,
 ];
 
 /** Moving a lead to one of these statuses prompts staff for a reason. */
 export const REASON_REQUIRED_STATUSES: string[] = [
   ...LEAD_STATUS_CATEGORIES.DeadLead,
   ...LEAD_STATUS_CATEGORIES.ClosedLegacy,
+  ...LEAD_STATUS_CATEGORIES.NotALead,
 ];
 
 export type LeadLifecycleState = 'active' | 'terminal' | 'unknown';
@@ -83,8 +89,13 @@ export const LIFECYCLE_TERMINAL_STATUSES: string[] = [
   'Missed Opportunity',
   'Declined',
   'No Longer Interested',
+  NOT_A_LEAD_STATUS,
   ...CONTACT_RESTRICTED_STATUSES,
 ];
+
+export function countedLeadFilter(): Record<string, unknown> {
+  return { 'combinedInto.leadId': { $exists: false }, status: { $ne: NOT_A_LEAD_STATUS } };
+}
 
 export const LIFECYCLE_ACTIVE_STATUSES: string[] = LEAD_STATUS_VALUES.filter(
   (status) => !LIFECYCLE_TERMINAL_STATUSES.includes(status),

@@ -97,6 +97,8 @@ export interface ILeadInquiry extends Document {
   sourceIds: {
     gmailMessageId?: string;
     gmailThreadId?: string;
+    emailMessageId?: string;
+    mailbox?: string;
     providerInquiryKey?: string;
     adfPayloadHash?: string;
     smsProviderMessageId?: string;
@@ -187,6 +189,8 @@ const LeadInquirySchema = new Schema<ILeadInquiry>(
     sourceIds: {
       gmailMessageId: { type: String, trim: true },
       gmailThreadId: { type: String, trim: true },
+      emailMessageId: { type: String, trim: true },
+      mailbox: { type: String, trim: true },
       providerInquiryKey: { type: String, trim: true },
       adfPayloadHash: { type: String, trim: true },
       smsProviderMessageId: { type: String, trim: true },
@@ -263,6 +267,10 @@ uniqueOptionalKey('fingerprint', 'string', 'lead_inquiry_org_fingerprint_unique'
 LeadInquirySchema.index(
   { organizationId: 1, contentKey: 1, createdAt: -1 },
   { partialFilterExpression: { contentKey: { $type: 'string' } }, name: 'lead_inquiry_org_content_recent' },
+);
+LeadInquirySchema.index(
+  { organizationId: 1, 'sourceIds.emailMessageId': 1, createdAt: -1 },
+  { partialFilterExpression: { 'sourceIds.emailMessageId': { $type: 'string' } }, name: 'lead_inquiry_org_email_message' },
 );
 LeadInquirySchema.index({ organizationId: 1, 'association.state': 1, createdAt: -1 }, { name: 'lead_inquiry_org_association_state' });
 LeadInquirySchema.index({ organizationId: 1, 'association.leadId': 1, receivedAt: -1 }, { name: 'lead_inquiry_org_lead_received' });

@@ -4,7 +4,8 @@ import Lead from '../models/lead.model';
 import LeadInquiry, { ILeadInquiry } from '../models/LeadInquiry.model';
 import LeadIntakeControl from '../models/LeadIntakeControl.model';
 import LeadIntakeAudit from '../models/LeadIntakeAudit.model';
-import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
+import { LIFECYCLE_TERMINAL_STATUSES, NOT_A_LEAD_STATUS, isContactRestrictedStatus } from '../constants/leadStatus';
+import { CLOSED_LEAD_COPY_WINDOW_MS, SAME_REQUEST_WINDOW_MS, inquiryNamesUnit, inquiryNamesVehicle, isSameRequest, sameInquiryUnit } from '../utils/inquiryKeys';
 import {
   RecordInquiryInput,
   claimInquiryProcessing,
@@ -96,6 +97,107 @@ export async function submitLeadInquiry(request: LeadIntakeRequest): Promise<Lea
 
 export const CONVERSATION_ONLY_KINDS = ['email_reply', 'sms', 'call'];
 const REPLY_KINDS = ['email_reply', 'sms'];
+export const SAME_REQUEST_KINDS = ['provider_inquiry', 'website_inquiry'];
+
+const objectIdsOf = (leadIds: unknown[]) => [...new Set(leadIds.map((id) => String(id || '')).filter((id) => mongoose.isValidObjectId(id)))]
+  .map((id) => new mongoose.Types.ObjectId(id));
+
+async function findSameRequestInquiry(organizationId: string, event: any, openLeadIds: unknown[], closedLeadIds: unknown[]) {
+  if (!SAME_REQUEST_KINDS.includes(event.kind) || event.intakePolicy === 'isolate') return null;
+  const open = objectIdsOf(openLeadIds);
+  const closed = objectIdsOf(closedLeadIds);
+  if (!open.length && !closed.length) return null;
+  const at = new Date(event.receivedAt).getTime();
+  const near = (windowMs: number) => ({ $gte: new Date(at - windowMs), $lte: new Date(at + windowMs) });
+  const earlier = await LeadInquiry.find({
+    organizationId,
+    _id: { $ne: event._id },
+    kind: { $in: SAME_REQUEST_KINDS },
+    'association.state': 'associated',
+    $or: [
+      ...(open.length ? [{ 'association.leadId': { $in: open }, receivedAt: near(SAME_REQUEST_WINDOW_MS) }] : []),
+      ...(closed.length ? [{ 'association.leadId': { $in: closed }, receivedAt: near(CLOSED_LEAD_COPY_WINDOW_MS) }] : []),
+    ],
+  }).select('_id association.leadId vehicle comments source sourceProvider sourceIds.mailbox receivedAt').sort({ receivedAt: 1 }).limit(25).lean();
+  return earlier.find((candidate) => isSameRequest(candidate, event)) || null;
+}
+
+const PLACEHOLDER_NAME_WORDS = new Set([
+  'unknown', 'customer', 'guest', 'user', 'buyer', 'shopper', 'test', 'lead', 'none', 'na', 'noname', 'anonymous',
+  'visitor', 'client', 'prospect', 'facebook', 'marketplace', 'web', 'website', 'internet', 'online', 'cargurus', 'autotrader', 'carscom',
+]);
+
+const fullNameKey = (contact: any) => {
+  const first = String(contact?.firstName || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const last = String(contact?.lastName || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (first.length < 2 || last.length < 2 || PLACEHOLDER_NAME_WORDS.has(first) || PLACEHOLDER_NAME_WORDS.has(last)) return '';
+  return `${first}|${last}`;
+};
+
+async function findSameNameRequest(organizationId: string, event: any) {
+  if (!SAME_REQUEST_KINDS.includes(event.kind) || event.intakePolicy === 'isolate') return null;
+  const nameKey = fullNameKey(event.contact);
+  if (!nameKey || !inquiryNamesUnit(event.vehicle)) return null;
+  const at = new Date(event.receivedAt).getTime();
+  const nearby = await LeadInquiry.find({
+    organizationId,
+    _id: { $ne: event._id },
+    kind: { $in: SAME_REQUEST_KINDS },
+    'association.state': 'associated',
+    receivedAt: { $gte: new Date(at - SAME_REQUEST_WINDOW_MS), $lte: new Date(at + SAME_REQUEST_WINDOW_MS) },
+  }).select('_id association.leadId vehicle comments contact.firstName contact.lastName contact.normalizedPhone receivedAt').sort({ receivedAt: 1 }).limit(200).lean();
+  const eventPhone = event.contact?.normalizedPhone || null;
+  const matches = nearby.filter((candidate: any) => fullNameKey(candidate.contact) === nameKey
+    && sameInquiryUnit(candidate.vehicle, event.vehicle)
+    && !(eventPhone && candidate.contact?.normalizedPhone && candidate.contact.normalizedPhone !== eventPhone)
+    && isSameRequest(candidate, event));
+  if (!matches.length) return null;
+  const leads: any[] = await Lead.find({ _id: { $in: matches.map((candidate: any) => candidate.association?.leadId) }, organizationId })
+    .select('status combinedInto.leadId')
+    .lean();
+  const leadById = new Map(leads.map((lead) => [String(lead._id), lead]));
+  return matches.find((candidate: any) => {
+    const lead = leadById.get(String(candidate.association?.leadId));
+    if (!lead || lead.combinedInto?.leadId) return false;
+    if (!LIFECYCLE_TERMINAL_STATUSES.includes(lead.status)) return true;
+    return Math.abs(new Date(candidate.receivedAt).getTime() - at) <= CLOSED_LEAD_COPY_WINDOW_MS;
+  }) || null;
+}
+
+const blankText = (value: unknown) => !String(value ?? '').trim();
+
+export async function fillEmptyLeadFields(organizationId: string, leadId: unknown, event: any): Promise<void> {
+  const lead: any = await Lead.findOne({ _id: leadId, organizationId })
+    .select('firstName lastName phone email identityEmailExcluded vehicle comments address status')
+    .lean();
+  if (!lead || isContactRestrictedStatus(lead.status)) return;
+  const contact = event?.contact || {};
+  const set: Record<string, unknown> = {};
+  if ((blankText(lead.firstName) || lead.firstName === 'Unknown') && !blankText(contact.firstName)) {
+    set.firstName = String(contact.firstName).trim();
+    if (blankText(lead.lastName) && !blankText(contact.lastName)) set.lastName = String(contact.lastName).trim();
+  }
+  if (blankText(lead.phone) && !blankText(contact.phone)) set.phone = String(contact.phone).trim();
+  if (blankText(lead.email) && !lead.identityEmailExcluded && !contact.emailExcluded && !blankText(contact.email)) {
+    set.email = String(contact.email).trim();
+  }
+  const vehicle = event?.vehicle || {};
+  const current = lead.vehicle || {};
+  if (!inquiryNamesVehicle(current) && inquiryNamesVehicle(vehicle)) {
+    const filled = Object.fromEntries(
+      ['year', 'make', 'model', 'trim', 'vin', 'stock']
+        .filter((key) => !blankText(vehicle[key]))
+        .map((key) => [`vehicle.${key}`, String(vehicle[key]).trim()]),
+    );
+    Object.assign(set, filled);
+  }
+  if (blankText(lead.comments) && !blankText(event?.comments)) set.comments = String(event.comments).trim().slice(0, 10000);
+  const draftAddress = (event?.leadDraft as Record<string, unknown> | null | undefined)?.address;
+  if (blankText(lead.address) && typeof draftAddress === 'string' && draftAddress.trim()) set.address = draftAddress.trim();
+  if (!Object.keys(set).length) return;
+  await Lead.findOneAndUpdate({ _id: leadId, organizationId }, { $set: set }, { timestamps: false }).catch((err) =>
+    logger.warn({ err, leadId: String(leadId) }, '[LeadIntake] Could not fill empty details from a repeated inquiry'));
+}
 
 export async function findOpenLeadForContact(
   organizationId: string,
@@ -170,8 +272,10 @@ export async function createLeadForInquiry(organizationId: string, event: ILeadI
   const draft = (event.leadDraft || {}) as Record<string, unknown>;
   const createdBy = draft.createdBy || (await resolveOrgSystemUserId(organizationId));
   if (!createdBy) throw new RetryableIntakeError('This organization has no staff account to own new leads');
-  const fromDraft = Object.fromEntries(Object.entries(draft).filter(([key]) => !RESERVED_DRAFT_FIELDS.has(key)));
+  const fromDraft = Object.fromEntries(Object.entries(draft).filter(([key]) => !RESERVED_DRAFT_FIELDS.has(key) && key !== 'othersReason'));
   const draftStatus = typeof fromDraft.status === 'string' ? fromDraft.status : 'New';
+  const notALead = draftStatus === NOT_A_LEAD_STATUS;
+  const othersReason = typeof draft.othersReason === 'string' && draft.othersReason.trim() ? draft.othersReason.trim() : 'Not a lead';
   const document: Record<string, unknown> = {
     organizationId,
     firstName: event.contact?.firstName || 'Unknown',
@@ -187,7 +291,8 @@ export async function createLeadForInquiry(organizationId: string, event: ILeadI
     channel: event.channel,
     isRead: false,
     ...fromDraft,
-    status: LIFECYCLE_TERMINAL_STATUSES.includes(draftStatus) ? 'New' : draftStatus,
+    status: notALead ? NOT_A_LEAD_STATUS : LIFECYCLE_TERMINAL_STATUSES.includes(draftStatus) ? 'New' : draftStatus,
+    ...(notALead ? { statusHistory: [{ from: 'New', to: NOT_A_LEAD_STATUS, changedAt: event.receivedAt, reason: othersReason }] } : {}),
     createdBy,
     sourceInquiryId: event._id,
     lastInquiryAt: event.receivedAt,
@@ -295,6 +400,27 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
           ? { ...decided, action: 'review' as const, reason: 'email_after_lead_closed' }
           : decided;
 
+      const sameRequest = await findSameRequestInquiry(
+        organizationId,
+        event,
+        [decided.leadId, ...decided.candidateLeadIds, ...decided.possibleMatchLeadIds],
+        decided.previousLeadIds,
+      ) || (decided.action === 'create' ? await findSameNameRequest(organizationId, event) : null);
+      if (sameRequest) {
+        await confirmHeld();
+        const done = await completeInquiryAssociation(event._id, owner, {
+          state: 'resolved',
+          outcome: 'dismissed',
+          reason: 'duplicate_same_request',
+          duplicateOf: sameRequest._id,
+          contextLeadId: event.association?.contextLeadId,
+        });
+        if (!done) throw new RetryableIntakeError('The intake lease expired before the repeated inquiry was saved');
+        const originalLeadId = asId((sameRequest as any).association?.leadId);
+        if (originalLeadId) await fillEmptyLeadFields(organizationId, originalLeadId, event);
+        return { status: 'duplicate', inquiryId, leadId: originalLeadId } as LeadIntakeResult;
+      }
+
       if (shortReply && decision.action !== 'append') {
         await confirmHeld();
         const done = await completeInquiryAssociation(event._id, owner, {
@@ -361,7 +487,7 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
     if (result.status === 'associated' && result.reason === 'phone_confirmed_chat') {
       await linkConfirmedChatCustomer(organizationId, result.leadId);
     }
-    if (result.status !== 'dismissed') {
+    if (result.status !== 'dismissed' && result.status !== 'duplicate') {
       await runInquirySideEffects(event._id).catch((err) =>
         logger.warn({ err, inquiryId }, '[LeadIntake] Side effects will be retried by the recovery sweep'));
     }
@@ -440,8 +566,12 @@ async function sendIntakeNotification(event: any): Promise<void> {
     if (association.state === 'pending_review') return;
   }
   if (association.state !== 'associated' || !association.leadId) return;
-  const lead: any = await Lead.findOne({ _id: association.leadId, organizationId }).select('assignedTo firstName lastName source').lean();
+  const lead: any = await Lead.findOne({ _id: association.leadId, organizationId }).select('assignedTo firstName lastName source status').lean();
   if (!lead) return;
+  if (lead.status === NOT_A_LEAD_STATUS) {
+    emitToOrg(organizationId, 'lead:update', { _id: String(lead._id), leadId: String(lead._id) });
+    return;
+  }
   if (association.outcome === 'created_lead' || association.outcome === 'manual_create') {
     if ((event.leadDraft as any)?.announced) {
       emitToOrg(organizationId, 'lead:update', { _id: String(lead._id), leadId: String(lead._id) });

@@ -13,6 +13,8 @@ export interface IOrgLeadConfig extends Document {
 
     leadSourceEmail: string;
 
+    notLeadSenders?: string[];
+
     previousMailbox?: {
         gmailAddress?: string;
         accessToken?: string;
@@ -49,6 +51,7 @@ const OrgLeadConfigSchema: Schema = new Schema({
     gmailConnected: { type: Boolean, default: false },
     calendarConnected: { type: Boolean, default: false },
     leadSourceEmail: { type: String, default: 'leads@dealerscloud.com' },
+    notLeadSenders: { type: [String], default: [] },
     previousMailbox: {
         gmailAddress: { type: String },
         accessToken: { type: String },
