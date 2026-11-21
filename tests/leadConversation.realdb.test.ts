@@ -50,6 +50,7 @@ import { handleSmsStatus } from '../src/services/communication.service';
 import { buildLeadTimeline } from '../src/controllers/communication.controller';
 import { encrypt } from '../src/utils/crypto';
 import { setLeadIntakeMode, clearLeadIntakeModeCache } from '../src/services/leadIntakeControl.service';
+import { recordLeadHandling } from '../src/services/leadHandling.service';
 
 const app = express();
 app.use(express.json());
@@ -268,6 +269,27 @@ describe('Real-DB: unified lead conversation (local MongoDB only)', () => {
     expect(closedEmails).toEqual(['Old reply']);
     const freshView = await get(`/api/leads/${fresh._id}/conversation`);
     expect(freshView.body.data.items.filter((item: any) => item.channel === 'email').map((item: any) => item.body)).toEqual(['I want another car']);
+  });
+
+  it('shows the rep name on an email reply sent from Suprah instead of the mailbox address', async () => {
+    const email = nextEmail();
+    const threadId = `thread-${serial}`;
+    const lead = await makeLead({ email }, { threadId });
+    await recordLeadHandling({ organizationId: ORG, leadId: lead._id, action: 'email_sent', channel: 'email', actor: { userId: String(ids.employee) }, at: minutesAgo(30) });
+    mockThreadsGet.mockResolvedValue({ data: { messages: [
+      { id: 'g-rep', threadId, internalDate: String(minutesAgo(30).getTime()), payload: { headers: [{ name: 'From', value: 'sales@timeline.example.com' }], mimeType: 'text/plain', body: { data: b64('It is still here') } } },
+      { id: 'g-gmail', threadId, internalDate: String(minutesAgo(10).getTime()), payload: { headers: [{ name: 'From', value: 'sales@timeline.example.com' }], mimeType: 'text/plain', body: { data: b64('Typed in Gmail') } } },
+      { id: 'g-named', threadId, internalDate: String(minutesAgo(5).getTime()), payload: { headers: [{ name: 'From', value: '"Olivia Owner" <sales@timeline.example.com>' }], mimeType: 'text/plain', body: { data: b64('Sent under a name') } } },
+    ] } });
+
+    const res = await get(`/api/leads/${lead._id}/conversation`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.items.filter((item: any) => item.channel === 'email').map((item: any) => [item.body, item.direction, item.author.name])).toEqual([
+      ['It is still here', 'outbound', 'Erin Employee'],
+      ['Typed in Gmail', 'outbound', 'sales@timeline.example.com'],
+      ['Sent under a name', 'outbound', 'Olivia Owner'],
+    ]);
   });
 
   it('keeps email trouble from hiding the rest of the conversation', async () => {

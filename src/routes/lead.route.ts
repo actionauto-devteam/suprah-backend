@@ -16,6 +16,7 @@ import {
   updateLead,
   createInquiry,
   markAsRead,
+  markLeadOpened,
   markNoReplyNeeded,
   markAsPending,
   replyToInquiry,
@@ -94,6 +95,7 @@ router.post("/:id/ai-draft", staffAiDraftLimiter, generateLeadAiDraftHandler);
 router.get("/:id/ai-summary", getLeadAiSummary);
 router.post("/:id/ai-summary/regenerate", regenerateLeadAiSummary);
 router.patch("/:id/read", markAsRead);
+router.patch("/:id/opened", markLeadOpened);
 router.patch("/:id/no-reply-needed", markNoReplyNeeded);
 router.patch("/:id/pending", markAsPending);
 router.post("/:id/appointment", setAppointmentForLead);

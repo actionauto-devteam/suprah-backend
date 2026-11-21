@@ -151,7 +151,7 @@ describe('Real-DB: who handled a lead (local test DB only)', () => {
 
   it('2. an untouched lead has nobody; another org cannot read it', async () => {
     const quiet = await getLeadHandlers(ORG, String(leadFour));
-    expect(quiet).toEqual({ people: [], assignedTo: null, assignments: [] });
+    expect(quiet).toEqual({ people: [], assignedTo: null, assignments: [], opened: null });
     await expect(getLeadHandlers(String(new mongoose.Types.ObjectId()), String(leadOne))).rejects.toMatchObject({ statusCode: 404 });
   });
 
