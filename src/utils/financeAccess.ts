@@ -26,16 +26,35 @@ export function hasFinanceAccess(user: FinanceUser, orgId: string | null | undef
   return ids.some((id) => String(id) === String(orgId));
 }
 
+/**
+ * Finance access as it is right now (2026-11-23). Admins are known from
+ * sign-in, like every other admin check. For other staff the Finance list is
+ * read fresh, because sign-in details are kept for up to a minute on each
+ * server: Finance access an admin gives or removes applies straight away.
+ */
+export async function financeAccessNow(req: Request): Promise<boolean> {
+  const user = req.user as (NonNullable<FinanceUser> & { _id?: unknown }) | undefined;
+  if (!user) return false;
+  if (user.role === 'super_admin' || user.role === 'admin' || req.orgRole === 'admin') return true;
+  if (user.role !== 'employee' || !req.orgId || !user._id) return false;
+  const account = await User.findOne({ _id: user._id, organizationId: req.orgId })
+    .select('role financeOrganizationIds')
+    .lean();
+  return hasFinanceAccess(account as FinanceUser, req.orgId);
+}
+
 /** Route guard for the payment actions above. */
 export function requireFinanceAccess(req: Request, _res: Response, next: NextFunction) {
-  if (hasFinanceAccess(req.user as FinanceUser, req.orgId, req.orgRole)) return next();
-  return next(new ApiError(403, FINANCE_ACCESS_MESSAGE));
+  financeAccessNow(req)
+    .then((allowed) => next(allowed ? undefined : new ApiError(403, FINANCE_ACCESS_MESSAGE)))
+    .catch(next);
 }
 
 /**
  * The same rule for CRM accounts (Aftermarket invoices are sent from the CRM):
- * a CRM admin always can; anyone else needs Finance access on their website
- * account with the same email in the same dealership.
+ * a CRM admin always can; anyone else needs their website account with the
+ * same email in the same dealership to be one of its admins, or to have
+ * Finance access there.
  */
 export async function crmUserHasFinanceAccess(crmUser: {
   role?: string | null;
@@ -48,7 +67,8 @@ export async function crmUserHasFinanceAccess(crmUser: {
   if (!email) return false;
   const orgId = String(crmUser.organizationId);
   const account = await User.findOne({ email, organizationId: orgId })
-    .select('role financeOrganizationIds')
-    .lean();
-  return hasFinanceAccess(account as FinanceUser, orgId);
+    .select('role organizationRole financeOrganizationIds')
+    .lean<{ role?: string; organizationRole?: string; financeOrganizationIds?: unknown[] } | null>();
+  // The website admin role counts here too (2026-11-23), as it does on the website.
+  return hasFinanceAccess(account, orgId, account?.organizationRole);
 }

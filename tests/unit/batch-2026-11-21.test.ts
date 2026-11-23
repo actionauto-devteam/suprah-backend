@@ -178,8 +178,11 @@ describe('SuprahPay settings: dealerships', () => {
   it('staff can read the settings; only admins can edit them', async () => {
     orgs.findById.mockReturnValue(leanResult({ subscription: { tier: 'suprah_origin' }, suprahPay: { defaultTaxRate: 7.25 } }));
     configs.findOne.mockReturnValue(leanResult(null));
+    users.findOne.mockReturnValue(doc({ role: 'employee' }));
     const { res } = await call(settingsController.getDealershipSettings, { user: STAFF, orgId: ORG_ID, orgRole: 'member' });
     expect(res.body.data).toEqual({ enabled: true, defaultTaxRate: 7.25, maxPaymentAmount: 999_999.99, feePercent: 0, canEdit: false, canManagePayments: false });
+    // Finance access is read fresh for staff (2026-11-23).
+    expect(users.findOne).toHaveBeenCalledWith({ _id: 'staff-1', organizationId: ORG_ID });
 
     const denied = await call(settingsController.updateDealershipSettings, {
       user: STAFF, orgId: ORG_ID, orgRole: 'member', body: { defaultTaxRate: 5 },
@@ -243,6 +246,7 @@ describe('Finance access: who can send, cancel and refund', () => {
   const as = (user: unknown, orgRole = 'member') => JSON.stringify({ user, orgId: ORG_ID, orgRole });
 
   it('the server refuses staff without Finance access, whatever the website shows', async () => {
+    users.findOne.mockReturnValue(doc({ role: 'employee' }));
     const staff = as({ _id: 's1', role: 'employee' });
     const attempts: Array<['post' | 'patch', string]> = [
       ['post', '/api/payments'],
@@ -261,6 +265,7 @@ describe('Finance access: who can send, cancel and refund', () => {
   });
 
   it('admins and staff with Finance access get through; customers never do', async () => {
+    users.findOne.mockReturnValue(doc({ role: 'employee', financeOrganizationIds: [ORG_ID] }));
     const finance = as({ _id: 's2', role: 'employee', financeOrganizationIds: [ORG_ID] });
     const admin = as({ _id: 'a1', role: 'admin' }, 'admin');
     for (const who of [finance, admin]) {
@@ -278,6 +283,29 @@ describe('Finance access: who can send, cancel and refund', () => {
     users.findOne.mockReturnValue(doc({ role: 'employee' }));
     expect(await crmUserHasFinanceAccess({ role: 'employee', email: 'staff@example.com', organizationId: ORG_ID })).toBe(false);
     expect(await crmUserHasFinanceAccess({ role: 'manager', organizationId: ORG_ID })).toBe(false);
+  });
+
+  it("CRM accounts: the dealership's website admins count, as they do on the website (2026-11-23)", async () => {
+    users.findOne.mockReturnValue(doc({ role: 'employee', organizationRole: 'admin' }));
+    expect(await crmUserHasFinanceAccess({ role: 'employee', email: 'owner@example.com', organizationId: ORG_ID })).toBe(true);
+    users.findOne.mockReturnValue(doc({ role: 'employee', organizationRole: 'member' }));
+    expect(await crmUserHasFinanceAccess({ role: 'employee', email: 'staff@example.com', organizationId: ORG_ID })).toBe(false);
+  });
+
+  it('removing Finance access applies at once: the fresh record decides, not the saved sign-in', async () => {
+    // Signed in a minute ago with Finance access; an admin has since removed it.
+    const stale = as({ _id: 's3', role: 'employee', financeOrganizationIds: [ORG_ID] });
+    users.findOne.mockReturnValue(doc({ role: 'employee', financeOrganizationIds: [] }));
+    const removed = await request(app).post(`/api/payments/${ORG_ID}/refund`).set('x-test-user', stale).send({});
+    expect(removed.status).toBe(403);
+    expect(users.findOne).toHaveBeenCalledWith({ _id: 's3', organizationId: ORG_ID });
+    // Given a moment ago: works straight away too.
+    const fresh = as({ _id: 's4', role: 'employee' });
+    users.findOne.mockReturnValue(doc({ role: 'employee', financeOrganizationIds: [ORG_ID] }));
+    expect((await request(app).post(`/api/payments/${ORG_ID}/refund`).set('x-test-user', fresh).send({})).status).toBe(200);
+    // Moved to another dealership: no record in this one, so no access.
+    users.findOne.mockReturnValue(doc(null));
+    expect((await request(app).post(`/api/payments/${ORG_ID}/refund`).set('x-test-user', stale).send({})).status).toBe(403);
   });
 });
 

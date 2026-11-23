@@ -106,14 +106,18 @@ const OrganizationSchema = new Schema<IOrganization>(
                 ref: 'User',
             },
         },
+        // The payout account, the payout lock and who last changed the settings
+        // stay on the server (2026-11-23): left out unless a query names them
+        // (or the whole suprahPay), so the dealership record sent to members
+        // and customers never includes them.
         suprahPay: {
             enabled: { type: Boolean },
             defaultTaxRate: { type: Number, min: 0, max: 100 },
-            stripeAccountId: { type: String, trim: true },
+            stripeAccountId: { type: String, trim: true, select: false },
             payoutsStartAt: { type: Date },
-            payoutClaimedAt: { type: Date },
+            payoutClaimedAt: { type: Date, select: false },
             updatedAt: { type: Date },
-            updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+            updatedBy: { type: Schema.Types.ObjectId, ref: 'User', select: false },
         },
     },
     {

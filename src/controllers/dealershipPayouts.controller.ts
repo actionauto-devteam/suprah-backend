@@ -90,11 +90,13 @@ export const getDealershipPayouts = asyncHandler(async (req: Request, res: Respo
 
 /**
  * GET /api/admin/suprahpay/payouts: this week's list, one row per dealership
- * with SuprahPay on or a payout account, and the latest payouts.
+ * with SuprahPay on or a payout account, and the latest payouts. An archived
+ * dealership stays on the list while Suprah still owes it money, or a payment
+ * is on hold for a dispute (2026-11-23).
  */
 export const listPayoutsForAdmin = asyncHandler(async (_req: Request, res: Response) => {
-  const orgs = await Organization.find({ status: { $ne: 'archived' } })
-    .select('name subscription.tier suprahPay')
+  const orgs = await Organization.find({})
+    .select('name status subscription.tier suprahPay')
     .sort({ name: 1 })
     .limit(1000)
     .lean();
@@ -104,14 +106,20 @@ export const listPayoutsForAdmin = asyncHandler(async (_req: Request, res: Respo
     owedByDealership(relevant.map((org) => ({ _id: org._id, payoutsStartAt: org.suprahPay?.payoutsStartAt })), cutoff),
     recentPayouts({}, 50),
   ]);
+  const listed = relevant.filter((org) => {
+    if (org.status !== 'archived') return true;
+    const row = owed.get(String(org._id));
+    return !!row && (row.amount !== 0 || row.heldCount > 0);
+  });
 
   res.json(new ApiResponse(200, {
     cutoff,
-    dealerships: relevant.map((org) => {
+    dealerships: listed.map((org) => {
       const row = owed.get(String(org._id));
       return {
         _id: String(org._id),
         name: org.name,
+        archived: org.status === 'archived',
         suprahPayOn: suprahPayOn(org),
         payoutAccountConnected: !!org.suprahPay?.stripeAccountId,
         sending: !!org.suprahPay?.payoutClaimedAt,

@@ -44,6 +44,8 @@ jest.mock('../../src/services/activity.service', () => ({
 jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null, emitToUser: jest.fn() }));
 jest.mock('../../src/socket/supraspace.socket', () => ({ getIO: () => null }));
 jest.mock('../../src/utils/safeNotification', () => ({ safeCreateNotification: jest.fn(), notifyOrgAdmins: jest.fn() }));
+// Deleting a dealership first checks for loads with a driver on them (2026-11-23 tests).
+jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: { find: jest.fn() } }));
 
 import paymentController from '../../src/controllers/payment.controller';
 import Payment from '../../src/models/Payment.model';
@@ -395,5 +397,106 @@ describe('dealership payouts: the payout account (dealership admins)', () => {
     const { error } = await call(connectDealershipPayoutAccount, { user: STAFF, orgId: ORG_ID, orgRole: 'member' });
     expect(error?.statusCode).toBe(403);
     expect(stripe.accounts.create).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Review fixes (2026-11-23) ───────────────────────────────────────────────
+import Load from '../../src/models/Load.model';
+import { listPayoutsForAdmin } from '../../src/controllers/dealershipPayouts.controller';
+import { deleteOrganization } from '../../src/controllers/organization.controller';
+
+describe('review fixes: both card forms check like the payment page', () => {
+  const invoice = { _id: 'pay-1', amount: 120, status: 'pending', organizationId: ORG_ID, customerEmail: 'pat@example.com', description: 'Carwash' };
+
+  it('the customer card form refuses a refunded invoice and one over the limit', async () => {
+    dealership({}, { feePercent: 0, maxPaymentAmount: 100 });
+    const pay = () => call(paymentController.createCustomerPaymentIntent, { user: { email: 'pat@example.com' }, body: { paymentId: 'pay-1' } });
+    payments.findById.mockResolvedValueOnce({ ...invoice });
+    let r = await pay();
+    expect(r.error?.statusCode).toBe(400);
+    expect(r.error?.message).toMatch(/SuprahPay's limit for one online payment\. Please contact the dealership/);
+    payments.findById.mockResolvedValueOnce({ ...invoice, amount: 50, status: 'refunded' });
+    r = await pay();
+    expect(r.error?.message).toBe('This invoice has been refunded');
+    expect(stripe.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  it('the staff card form does too', async () => {
+    dealership({}, { feePercent: 0, maxPaymentAmount: 100 });
+    const pay = () => call(paymentController.createPaymentIntent, { user: STAFF, orgId: ORG_ID, body: { paymentId: 'pay-1' } });
+    payments.findOne.mockResolvedValueOnce({ ...invoice });
+    let r = await pay();
+    expect(r.error?.statusCode).toBe(400);
+    expect(r.error?.message).toMatch(/can't be paid by card here/);
+    payments.findOne.mockResolvedValueOnce({ ...invoice, amount: 50, status: 'refunded' });
+    r = await pay();
+    expect(r.error?.message).toBe('This invoice has been refunded');
+    expect(stripe.paymentIntents.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('review fixes: private SuprahPay details stay on the server', () => {
+  it('the payout account, the payout lock and who changed the settings are left out unless named', () => {
+    const actual = jest.requireActual('../../src/models/Organization.model').default;
+    for (const path of ['suprahPay.stripeAccountId', 'suprahPay.payoutClaimedAt', 'suprahPay.updatedBy']) {
+      expect(actual.schema.path(path).options.select).toBe(false);
+    }
+    for (const path of ['suprahPay.enabled', 'suprahPay.defaultTaxRate']) {
+      expect(actual.schema.path(path).options.select).toBeUndefined();
+    }
+  });
+});
+
+describe('review fixes: dealerships Suprah still owes', () => {
+  const START = new Date('2026-11-01T00:00:00Z');
+  const paidLastWeek = new Date(weekStartUtah(new Date()).getTime() - 24 * 60 * 60 * 1000);
+  const ARCHIVED_OWED = '64b7f0c2a1b2c3d4e5f60a01';
+  const ARCHIVED_PAID = '64b7f0c2a1b2c3d4e5f60a02';
+
+  it('an archived dealership stays on the payouts list while it is owed money', async () => {
+    orgs.find.mockReturnValue(lean([
+      { _id: ARCHIVED_OWED, name: 'Archived Owed', status: 'archived', suprahPay: { stripeAccountId: 'acct_a', payoutsStartAt: START } },
+      { _id: ARCHIVED_PAID, name: 'Archived Paid', status: 'archived', suprahPay: { stripeAccountId: 'acct_b', payoutsStartAt: START } },
+      { _id: ORG_ID, name: 'Action Auto Utah', status: 'active', subscription: { tier: 'suprah_origin' }, suprahPay: {} },
+    ]));
+    configs.findOne.mockReturnValue(lean(null));
+    payouts.aggregate.mockResolvedValue([]);
+    payouts.find.mockReturnValue(lean([]));
+    payments.find.mockReturnValue(lean([
+      { _id: '64b7f0c2a1b2c3d4e5f60b01', organizationId: ARCHIVED_OWED, status: 'succeeded', amount: 50, suprahFeePercent: 0, paidAt: paidLastWeek },
+    ]));
+
+    const { res, error } = await call(listPayoutsForAdmin, {});
+    expect(error).toBeUndefined();
+    expect(orgs.find).toHaveBeenCalledWith({});
+    const rows = res.body.data.dealerships;
+    expect(rows.map((row: any) => row.name)).toEqual(['Archived Owed', 'Action Auto Utah']);
+    expect(rows[0]).toMatchObject({ archived: true, amount: 50 });
+    expect(rows[1]).toMatchObject({ archived: false });
+  });
+
+  it('deleting a dealership that is owed money warns with the amount; confirming goes ahead', async () => {
+    const owner = { _id: { toString: () => 'sa-1' }, role: 'super_admin' };
+    const org = { _id: ORG_ID, name: 'Action Auto Utah', ownerId: { toString: () => 'sa-1' }, suprahPay: { payoutsStartAt: START } };
+    (Load as unknown as Record<string, jest.Mock>).find.mockReturnValue(lean([]));
+    configs.findOne.mockReturnValue(lean(null));
+    payouts.aggregate.mockResolvedValue([]);
+    payments.find.mockReturnValue(lean([
+      { _id: '64b7f0c2a1b2c3d4e5f60b02', organizationId: ORG_ID, status: 'succeeded', amount: 1250, suprahFeePercent: 0, paidAt: paidLastWeek },
+    ]));
+
+    orgs.findById.mockResolvedValueOnce(org);
+    const refused = await call(deleteOrganization, { user: owner, params: { id: ORG_ID } });
+    expect(refused.res.statusCode).toBe(409);
+    expect(refused.res.body.message).toMatch(/Suprah still owes Action Auto Utah \$1,250\.00 from SuprahPay card payments/);
+    expect(refused.res.body.message).toMatch(/confirmOwed=true/);
+    expect(refused.res.body.data).toEqual({ owedAmount: 1250, heldCount: 0 });
+
+    // Confirmed: it goes past the warning (the next step looks up the members).
+    const reached = new Error('reached the next step');
+    (User as unknown as Record<string, jest.Mock>).find = jest.fn(() => ({ distinct: () => Promise.reject(reached) }));
+    orgs.findById.mockResolvedValueOnce(org);
+    const confirmed = await call(deleteOrganization, { user: owner, params: { id: ORG_ID }, query: { confirmOwed: 'true' } });
+    expect(confirmed.error).toBe(reached);
   });
 });

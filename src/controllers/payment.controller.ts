@@ -470,6 +470,22 @@ const getPaymentById = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, payment, 'Payment fetched successfully'));
 });
 
+/**
+ * Checks before any way of paying opens (2026-11-23): Stripe's payment page
+ * and both card forms. A refunded invoice can't be paid again, and nothing
+ * over SuprahPay's limit for one payment (it may have been lowered after the
+ * invoice was sent).
+ */
+async function refuseRefundedOrOverLimit(payment: { status?: string; amount: number }, payer: 'customer' | 'staff') {
+  if (payment.status === 'refunded') throw new ApiError(400, 'This invoice has been refunded');
+  const { maxPaymentAmount } = await getPlatformSettings();
+  if (payment.amount > maxPaymentAmount) {
+    throw new ApiError(400, payer === 'customer'
+      ? "This invoice is more than SuprahPay's limit for one online payment. Please contact the dealership."
+      : "This invoice is more than SuprahPay's limit for one online payment, so it can't be paid by card here.");
+  }
+}
+
 // ─── Create Payment Intent (dealer-side, existing Elements flow kept) ─────────
 const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
@@ -480,6 +496,7 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
   if (!payment) throw new ApiError(404, 'Payment not found');
   if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This payment has been cancelled');
+  await refuseRefundedOrOverLimit(payment, 'staff');
 
   if (payment.stripePaymentIntentId) {
     try {
@@ -642,12 +659,7 @@ const createCustomerCheckoutSession = asyncHandler(async (req: Request, res: Res
   }
   if (payment.status === 'succeeded') throw new ApiError(400, 'This invoice has already been paid');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This invoice has been cancelled');
-  if (payment.status === 'refunded') throw new ApiError(400, 'This invoice has been refunded');
-  // SuprahPay's limit for one online payment (2026-11-21), in case it was lowered after the invoice was sent.
-  const { maxPaymentAmount } = await getPlatformSettings();
-  if (payment.amount > maxPaymentAmount) {
-    throw new ApiError(400, "This invoice is more than SuprahPay's limit for one online payment. Please contact the dealership.");
-  }
+  await refuseRefundedOrOverLimit(payment, 'customer');
 
   // A payment page was opened before: make sure it wasn't paid, and close it.
   if ((await settleEarlierCheckout(payment)) === 'paid') {
@@ -1139,6 +1151,7 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) throw new ApiError(403, 'You are not authorized to pay this invoice');
   if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This payment has been cancelled');
+  await refuseRefundedOrOverLimit(payment, 'customer');
 
   if (payment.stripePaymentIntentId) {
     try {

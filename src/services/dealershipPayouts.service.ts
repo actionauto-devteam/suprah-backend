@@ -304,7 +304,7 @@ export async function checkSendingPayout(payoutId: string, approvedBy: string) {
   if (!payout) throw new ApiError(404, "That payout couldn't be found.");
   if (payout.status !== 'sending') throw new ApiError(409, 'Only a payout that is still sending can be checked.');
   if (Date.now() - payout.createdAt.getTime() > SAFE_RETRY_MS) {
-    throw new ApiError(409, 'This payout is too old to check here safely. Look for it in the Stripe dashboard and tell sir RJ what you find.');
+    throw new ApiError(409, 'This payout is too old to check here safely. Look for it in the Stripe dashboard and tell the Suprah team what you find before sending anything else.');
   }
   try {
     const transfer = await transferFor(payout);

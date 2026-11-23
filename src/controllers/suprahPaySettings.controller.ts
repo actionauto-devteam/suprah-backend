@@ -8,7 +8,7 @@ import AuditLog from '../models/AuditLog.model';
 import activityService from '../services/activity.service';
 import { notifyOrgAdmins } from '../utils/safeNotification';
 import logger from '../utils/logger';
-import { hasFinanceAccess } from '../utils/financeAccess';
+import { financeAccessNow } from '../utils/financeAccess';
 import {
   STRIPE_MAX_PAYMENT,
   dealershipTaxRate,
@@ -146,9 +146,10 @@ export const getDealershipSettings = asyncHandler(async (req: Request, res: Resp
   const orgId = req.orgId;
   if (!orgId || !mongoose.isValidObjectId(orgId)) throw new ApiError(400, 'Choose a dealership first.');
 
-  const [org, platform] = await Promise.all([
-    Organization.findById(orgId).select('subscription.tier suprahPay').lean(),
+  const [org, platform, canManagePayments] = await Promise.all([
+    Organization.findById(orgId).select('subscription.tier suprahPay.enabled suprahPay.defaultTaxRate').lean(),
     getPlatformSettings(),
+    financeAccessNow(req),
   ]);
   if (!org) throw new ApiError(404, "Your dealership couldn't be found.");
 
@@ -159,7 +160,7 @@ export const getDealershipSettings = asyncHandler(async (req: Request, res: Resp
     feePercent: platform.feePercent,
     canEdit: isDealershipAdmin(req),
     /** Can send payment requests and invoices, cancel and refund (Finance access). */
-    canManagePayments: hasFinanceAccess(req.user as never, orgId, req.orgRole),
+    canManagePayments,
   }, 'SuprahPay settings'));
 });
 
