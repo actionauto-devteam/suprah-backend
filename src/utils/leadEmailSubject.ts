@@ -24,3 +24,14 @@ export function encodeEmailHeader(value: string): string {
   if (!/[^\x20-\x7e]/.test(value)) return value;
   return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
 }
+
+export function formatEmailFrom(name: unknown, address: string): string {
+  const clean = String(name ?? '')
+    .replace(/[\u0000-\u001f\u007f<>"\\]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 64)
+    .trim();
+  if (!clean || clean.includes('@')) return address;
+  return /[^\x20-\x7e]/.test(clean) ? `${encodeEmailHeader(clean)} <${address}>` : `"${clean}" <${address}>`;
+}

@@ -7,6 +7,7 @@ import WebChatSession from '../models/WebChatSession.model';
 import MailConversation from '../models/MailConversation.model';
 import MailMessage from '../models/MailMessage.model';
 import LeadHandlingEvent, { LeadHandlingAction, LeadHandlingChannel } from '../models/LeadHandlingEvent.model';
+import ComposerSendClaim from '../models/ComposerSendClaim.model';
 import { CallLog, CommunicationMessage, Conversation } from '../models/communication.model';
 import { normalizePhone } from './communication.service';
 import { getLeadIntakeMode } from './leadIntakeControl.service';
@@ -40,10 +41,16 @@ export interface LeadHandlerAssignment {
   at: string;
 }
 
+export interface LeadOpener {
+  name: string;
+  at: string;
+}
+
 export interface LeadHandlersResult {
   people: LeadHandlerPerson[];
   assignedTo: { name: string; at: string | null } | null;
   assignments: LeadHandlerAssignment[];
+  opened: { people: LeadOpener[]; total: number } | null;
 }
 
 export interface LeadHandlingTimelineEntry {
@@ -143,6 +150,64 @@ async function loadIdentities(ids: Iterable<string>): Promise<Map<string, Identi
   return result;
 }
 
+export const EMAIL_SENDER_MATCH_MS = 3 * 60 * 1000;
+
+export async function emailReplySenders(
+  organizationId: string,
+  leadId: unknown,
+  emails: Array<{ gmailId: string; occurredAt: string | Date }>,
+): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  const leadKey = String(leadId || '');
+  if (!emails.length || !mongoose.isValidObjectId(organizationId) || !mongoose.isValidObjectId(leadKey)) return names;
+  const [claims, events]: [any[], any[]] = await Promise.all([
+    ComposerSendClaim.find({
+      organizationId,
+      leadId: leadKey,
+      channel: 'email',
+      'result.gmailMessageId': { $in: emails.map((email) => email.gmailId) },
+    }).select('userId result.gmailMessageId').lean(),
+    LeadHandlingEvent.find({ organizationId, leadId: leadKey, action: 'email_sent' }).select('actor at').sort({ at: 1 }).lean(),
+  ]);
+  const identities = await loadIdentities([
+    ...claims.map((claim) => String(claim.userId || '')),
+    ...events.map((event) => String(event.actor?.userId || '')),
+  ]);
+  const claimUser = new Map(claims.map((claim) => [String(claim.result?.gmailMessageId || ''), String(claim.userId || '')]));
+  const pairs: Array<{ gmailId: string; event: number; gap: number }> = [];
+  const usedEvents = new Set<number>();
+  for (const email of emails) {
+    const at = new Date(email.occurredAt).getTime();
+    const claimUserId = claimUser.get(email.gmailId) || '';
+    const fromClaim = identities.get(claimUserId)?.name;
+    if (fromClaim) {
+      names.set(email.gmailId, fromClaim);
+      let own = -1;
+      events.forEach((event, index) => {
+        if (String(event.actor?.userId || '') !== claimUserId || !Number.isFinite(at)) return;
+        const gap = Math.abs(new Date(event.at).getTime() - at);
+        if (gap <= EMAIL_SENDER_MATCH_MS && (own < 0 || gap < Math.abs(new Date(events[own].at).getTime() - at))) own = index;
+      });
+      if (own >= 0) usedEvents.add(own);
+      continue;
+    }
+    if (!Number.isFinite(at)) continue;
+    events.forEach((event, index) => {
+      const gap = Math.abs(new Date(event.at).getTime() - at);
+      if (gap <= EMAIL_SENDER_MATCH_MS) pairs.push({ gmailId: email.gmailId, event: index, gap });
+    });
+  }
+  for (const pair of pairs.sort((a, b) => a.gap - b.gap)) {
+    if (names.has(pair.gmailId) || usedEvents.has(pair.event)) continue;
+    const event = events[pair.event];
+    const name = identities.get(String(event.actor?.userId || ''))?.name || String(event.actor?.name || '').trim();
+    if (!name || name.includes('@')) continue;
+    usedEvents.add(pair.event);
+    names.set(pair.gmailId, name);
+  }
+  return names;
+}
+
 function personKey(actorId: string, actorName: string, actorEmail: string, identities: Map<string, Identity>): string {
   if (actorId === AI_ACTOR_ID) return 'ai';
   const identity = identities.get(actorId);
@@ -164,7 +229,7 @@ function emptyCounts(): Record<LeadHandlerCountKey, number> {
 export async function getLeadHandlers(orgId: string, leadId: string): Promise<LeadHandlersResult> {
   if (!mongoose.isValidObjectId(leadId)) throw new ApiError(404, 'Lead not found');
   const lead: any = await Lead.findOne({ _id: leadId, organizationId: orgId })
-    .select('phone email normalizedEmail notes statusHistory assignmentHistory assignedTo assignedAt aiPausedAt aiPausedBy')
+    .select('phone email normalizedEmail notes statusHistory assignmentHistory assignedTo assignedAt aiPausedAt aiPausedBy openedBy')
     .lean();
   if (!lead) throw new ApiError(404, 'Lead not found');
 
@@ -255,10 +320,12 @@ export async function getLeadHandlers(orgId: string, leadId: string): Promise<Le
   }
 
   const assignmentIds = (lead.assignmentHistory || []).flatMap((entry: any) => [entry?.to, entry?.from, entry?.changedBy]);
+  const openers: any[] = Array.isArray(lead.openedBy) ? lead.openedBy : [];
   const identities = await loadIdentities([
     ...touches.map((touch) => touch.actorId),
     ...assignmentIds.filter(Boolean).map(String),
     ...(lead.assignedTo ? [String(lead.assignedTo)] : []),
+    ...openers.map((entry) => String(entry?.userId || '')),
   ]);
 
   const people = new Map<string, LeadHandlerPerson & { firstMs: number; lastMs: number; contactMs: number; tookOverMs: number; assignedEver: boolean }>();
@@ -367,7 +434,26 @@ export async function getLeadHandlers(orgId: string, leadId: string): Promise<Le
     people: result,
     assignedTo: assigneeId ? { name: assigneeName, at: assignedAt ? assignedAt.toISOString() : null } : null,
     assignments,
+    opened: Array.isArray(lead.openedBy) ? leadOpeners(openers, identities) : null,
   };
+}
+
+function leadOpeners(openers: any[], identities: Map<string, Identity>): { people: LeadOpener[]; total: number } {
+  const seen = new Set<string>();
+  const people: LeadOpener[] = [];
+  const ordered = openers
+    .map((entry) => ({ entry, at: validDate(entry?.at) }))
+    .filter((item): item is { entry: any; at: Date } => Boolean(item.at))
+    .sort((a, b) => a.at.getTime() - b.at.getTime());
+  for (const { entry, at } of ordered) {
+    const userId = String(entry?.userId || '');
+    const identity = identities.get(userId);
+    const key = identity?.email ? `email:${identity.email}` : `id:${userId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    people.push({ name: identity?.name || String(entry?.name || '').trim() || 'Team member', at: at.toISOString() });
+  }
+  return { people, total: people.length };
 }
 
 export async function leadHandlingTimeline(

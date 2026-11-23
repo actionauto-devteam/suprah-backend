@@ -112,6 +112,7 @@ export interface ILead extends Document {
   sourceInquiryId?: mongoose.Types.ObjectId;
   intakeIdentity?: 'unverified';
   combinedInto?: { leadId: mongoose.Types.ObjectId; at: Date; previousStatus: string; via?: 'combine' | 'link' };
+  openedBy?: Array<{ userId: string; name?: string; at: Date }>;
   intakeSlots?: string[];
   lastInquiryAt?: Date;
   inquiryCount?: number;
@@ -465,6 +466,19 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       ),
       default: undefined,
     },
+    openedBy: {
+      type: [
+        new mongoose.Schema(
+          {
+            userId: { type: String, required: true },
+            name: { type: String, trim: true, maxlength: 120 },
+            at: { type: Date, required: true },
+          },
+          { _id: false },
+        ),
+      ],
+      default: undefined,
+    },
     intakeSlots: { type: [String], default: undefined },
     lastInquiryAt: { type: Date },
     inquiryCount: { type: Number, min: 0 },
@@ -802,6 +816,7 @@ for (const { collection, key, name } of CUSTOMER_IDENTITY_INDEXES) {
 }
 
 LeadSchema.pre('validate', function () {
+  if (this.isNew && this.openedBy === undefined) this.openedBy = [];
   this.$locals.syncCustomerIdentity = this.isNew || this.isModified('email') || this.isModified('phone') || this.isModified('identityEmailExcluded');
   if (this.$locals.syncCustomerIdentity) {
     const identity = contactIdentity({ email: this.identityEmailExcluded ? undefined : this.email, phone: this.phone });
@@ -857,6 +872,15 @@ LeadSchema.pre('findOneAndUpdate', function () {
   (this as any).syncCustomerArea = Boolean(this.getOptions().upsert) || ['phone', 'address'].some(field =>
     Object.prototype.hasOwnProperty.call(update?.$set || update || {}, field)
     || Object.prototype.hasOwnProperty.call(update?.$unset || {}, field));
+  if (this.getOptions().upsert && update && !Array.isArray(update)) {
+    const setsOpened = Object.prototype.hasOwnProperty.call(update, 'openedBy')
+      || ['$set', '$setOnInsert', '$push', '$addToSet', '$unset'].some((operator) =>
+        Boolean(update[operator]) && Object.prototype.hasOwnProperty.call(update[operator], 'openedBy'));
+    if (!setsOpened) {
+      update.$setOnInsert = { ...(update.$setOnInsert || {}), openedBy: [] };
+      this.setUpdate(update);
+    }
+  }
   if (shouldSync && update && !Array.isArray(update)) {
     update.$set = { ...(update.$set || {}), 'customerLink.status': 'pending', 'customerLink.nextRetryAt': new Date() };
     this.setUpdate(update);
