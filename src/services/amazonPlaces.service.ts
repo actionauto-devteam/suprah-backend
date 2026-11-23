@@ -189,6 +189,30 @@ export async function positionOfPlace(query: string, settings = amazonPlacesSett
   return match ? placeFields(match).position : null;
 }
 
+/** A mapped address point, or a house number placed along its street. */
+const HOUSE_LEVEL = new Set(["PointAddress", "InterpolatedAddress"]);
+
+/**
+ * Where a street address is, only when Amazon matched the house itself (not
+ * just the street, ZIP code or city), for the Service Network's partner
+ * location pins (2026-11-18). Saved, so asked for with the "Storage" use.
+ */
+export async function positionOfStreetAddress(
+  query: string,
+  settings = amazonPlacesSettings(),
+): Promise<(PlaceFields & { position: { lat: number; lng: number } }) | null> {
+  const response = await send(settings, "geocode_address", (places, abortSignal) =>
+    places.send(
+      new GeocodeCommand({ QueryText: query, MaxResults: 1, Filter: { IncludeCountries: ["USA"] }, IntendedUse: "Storage" }),
+      { abortSignal },
+    ),
+  );
+  const match = response.ResultItems?.[0];
+  if (!match || !HOUSE_LEVEL.has(String(match.PlaceType ?? ""))) return null;
+  const fields = placeFields(match);
+  return fields.position ? { ...fields, position: fields.position } : null;
+}
+
 /** The middle of a US ZIP code, for quote distances and nearby drivers (2026-11-12). */
 export async function positionOfZip(zip: string, settings = amazonPlacesSettings()): Promise<{ lat: number; lng: number } | null> {
   const response = await send(settings, "geocode_zip", (places, abortSignal) =>

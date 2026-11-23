@@ -4,6 +4,7 @@ import { cacheService } from "./cache.service";
 import { calculateDistance, getCoordinatesFromZip } from "../utils/calculations";
 import logger from "../utils/logger";
 import { GPS_RECENT_FOR_DISTANCE_MS } from "../constants/driverGps";
+import { placeLookupAvailable, positionOf } from "./placeLookup.service";
 
 export type ServiceAreaCompatibilityStatus = "within" | "outside" | "unknown";
 export type PreferredRouteCompatibilityStatus =
@@ -317,6 +318,20 @@ async function geocodeHomeBase(profile: any): Promise<CoordinatePair | null> {
 
   const lookup = (async (): Promise<CoordinatePair | null> => {
     try {
+      // The app's place lookup first (Amazon Location, or Google until Amazon
+      // is on), like ZIP positions; OpenStreetMap only when it has no answer
+      // (2026-11-18).
+      if (placeLookupAvailable()) {
+        const position = await positionOf(`${city}, ${state}`);
+        const lat = finiteNumber(position?.lat);
+        const lon = finiteNumber(position?.lng);
+        if (lat != null && lon != null) {
+          const result = { lat, lon };
+          await cacheService.set(cacheKey, result, 86400 * 7);
+          return result;
+        }
+      }
+
       const query = encodeURIComponent(`${city}, ${state}, USA`);
       const response = await axios.get(
         `https://nominatim.openstreetmap.org/search?q=${query}&countrycodes=us&format=json&limit=1`,
