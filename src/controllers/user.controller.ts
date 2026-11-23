@@ -68,44 +68,51 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, user, 'User profile fetched successfully'));
 });
 
-/** The account fields a person can change on their own profile. */
-export const PROFILE_UPDATE_FIELDS = [
-    'name', 'avatar', 'theme', 'onlineStatus', 'customStatus', 'personalInfo', 'signatureDataUrl',
-] as const;
+/**
+ * The only account detail this route changes (2026-11-23): the Create Load
+ * signature, the one thing the website saves here. Name, photo, theme, status
+ * and personal details are changed on the Profile page (/api/profile), which
+ * keeps the photo safeguard and copies a driver's new phone to Dispatch.
+ */
+export const PROFILE_UPDATE_FIELDS = ['signatureDataUrl'] as const;
+
+/** The account's limit for a saved signature, in characters. */
+export const SIGNATURE_MAX_LENGTH = 200_000;
+/** A drawn signature: the PNG picture the signature pad makes. */
+const SIGNATURE_IMAGE = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
 
 /** Never sent back after a profile change. */
 const PRIVATE_ACCOUNT_FIELDS =
     '-password -passwordHash -otpCode -otpExpiresAt -passwordResetToken -passwordResetExpires';
 
-/** Text fields must be text; photo, status and signature may also be cleared; personal info is an object. */
+/** The signature must be a PNG picture within the limit, or null to remove it. */
 export function profileValueOk(field: string, value: unknown): boolean {
-    if (field === 'personalInfo') return value !== null && typeof value === 'object' && !Array.isArray(value);
-    if (value === null) return field === 'avatar' || field === 'customStatus' || field === 'signatureDataUrl';
-    return typeof value === 'string';
+    if (field !== 'signatureDataUrl') return false;
+    if (value === null) return true;
+    return typeof value === 'string' && value.length <= SIGNATURE_MAX_LENGTH && SIGNATURE_IMAGE.test(value);
 }
 
 const updateProfile = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
 
-    // Only these fields can be changed here (2026-11-21). Everything else on
-    // the account (wallet balance and earnings, payout account, referral code,
-    // role and permissions, suspension, monitoring and password fields) is
-    // ignored, so nobody can change them on their own account. The website
-    // uses this route to save the Create Load signature; the main profile
-    // route (/api/profile) allows the same other fields.
-    const safeData: Record<string, unknown> = {};
+    // Only the Create Load signature is saved here (2026-11-23). Everything
+    // else sent is ignored: other profile details are changed on the Profile
+    // page, and the rest of the account (wallet balance and earnings, payout
+    // account, referral code, role and permissions, suspension, monitoring and
+    // password fields) can't be changed by its owner at all.
     const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
-    for (const field of PROFILE_UPDATE_FIELDS) {
-        if (body[field] === undefined) continue;
-        if (!profileValueOk(field, body[field])) {
-            throw new ApiError(400, "That profile change isn't valid. Please refresh and try again.");
-        }
-        safeData[field] = body[field];
+    const signature = body.signatureDataUrl;
+    if (signature === undefined) {
+        throw new ApiError(400, 'Only your Create Load signature is saved here. Change other details on your Profile page.');
+    }
+    if (!profileValueOk('signatureDataUrl', signature)) {
+        throw new ApiError(400, "That signature couldn't be saved. Clear it, draw it again and save.");
     }
 
     const user = await User.findByIdAndUpdate(
         userId,
-        { $set: safeData },
+        // The signature's date goes with it, as when the account itself is saved.
+        { $set: { signatureDataUrl: signature, signatureUpdatedAt: signature ? new Date() : null } },
         { new: true, runValidators: true }
     ).select(PRIVATE_ACCOUNT_FIELDS);
 
@@ -113,7 +120,7 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
         await activityService.logProfileUpdate(
             user._id.toString(),
             user.organizationId?.toString(),
-            Object.keys(safeData),
+            [...PROFILE_UPDATE_FIELDS],
             req.ip,
             req.get('user-agent')
         );
