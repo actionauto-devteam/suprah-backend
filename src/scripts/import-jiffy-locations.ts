@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx';
 import path from 'path';
 import dotenv from 'dotenv';
 import ServiceLocation from '../models/ServiceLocation.model';
+import { findStorePin } from '../services/storeLocationPin.service';
 
 dotenv.config();
 
@@ -11,33 +12,11 @@ const MONGODB_URI = process.env.MONGODB_URI || '';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function geocodeAddress(addressStr: string): Promise<[number, number]> {
-    try {
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addressStr)}`;
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'ActionAutoApp/1.0 (Development Import Script)'
-            }
-        });
-
-        if (!response.ok) {
-            console.warn(`Geocoding HTTP Error ${response.status} for ${addressStr}`);
-            return [0, 0];
-        }
-
-        const data: any = await response.json();
-
-        if (data && data.length > 0) {
-            return [parseFloat(data[0].lon), parseFloat(data[0].lat)];
-        }
-
-        console.warn(`No coordinates found for ${addressStr}`);
-        return [0, 0];
-    } catch (e) {
-        console.error(`Geocoding failed for ${addressStr}`, e);
-        return [0, 0];
-    }
-}
+// Pins come from a match to the house itself (US Census, then Amazon where it's
+// switched on), never only a street or city (2026-11-18). A store without such
+// a match is saved with 0,0, which the website doesn't show; run
+// fix-service-location-pins.ts to list those stores.
+const NO_PIN: [number, number] = [0, 0];
 
 async function importLocations() {
     if (!MONGODB_URI) {
@@ -83,10 +62,12 @@ async function importLocations() {
             const fullAddress = `${address}, ${city}, UT ${zipCode}`;
             console.log(`Geocoding (${i - 1}/${data.length - 2}): ${fullAddress}`);
 
-            const coordinates = await geocodeAddress(fullAddress);
+            const found = await findStorePin({ address, city, state: 'UT', zipCode });
+            if (!found.pin) console.warn(`No house-level match for ${fullAddress}; saved without a map pin`);
+            const coordinates = found.pin?.coordinates ?? NO_PIN;
 
-            // Respect Nominatim's strict usage policy (absolute max 1 request/second)
-            await sleep(1200);
+            // Gentle on the free Census address lookup
+            await sleep(300);
 
             locationsToImport.push({
                 name: `Jiffy Lube - ${city} (${address})`,
