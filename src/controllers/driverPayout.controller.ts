@@ -12,6 +12,7 @@ import config from '../config';
 import logger from '../utils/logger';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
 import { payoutAccountStatus, payoutFailedNotice } from '../utils/driverPayoutAccount';
+import { driverPayoutFailureReason, isStripeError, payoutSetupProblemMessage, stripeErrorForLog } from '../utils/stripeErrors';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: "2026-02-25.clover",
@@ -268,7 +269,10 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
     res.status(201).json(new ApiResponse(201, payout, 'Payout sent successfully'));
   } catch (stripeError: any) {
     payout.status = "failed";
-    payout.failureReason = stripeError?.message || "Stripe transfer failed";
+    // Plain words on the payout (staff and the driver see it); Stripe's own
+    // text stays out of it and out of the log.
+    payout.failureReason = driverPayoutFailureReason(stripeError);
+    logger.warn({ payoutId: payout._id, ...stripeErrorForLog(stripeError) }, "Driver payout not sent");
     await payout.save();
     // The driver is told too, so they can fix their payout account.
     safeCreateNotification({
@@ -401,12 +405,21 @@ const initiateDriverOnboarding = asyncHandler(async (req: Request, res: Response
   const user = await User.findById(userId);
   if (!user || user.role !== 'driver') throw new ApiError(403, 'Payout details are only available on driver accounts.');
 
+  // Stripe's refusal (for example, payout accounts not switched on in
+  // Suprah's Stripe account) is logged by type and code; the driver gets a
+  // plain message, never Stripe's developer text (2026-11-23).
+  const refused = (error: unknown): never => {
+    if (!isStripeError(error)) throw error;
+    logger.warn({ userId, ...stripeErrorForLog(error) }, 'Driver payout account setup refused');
+    throw new ApiError(502, payoutSetupProblemMessage(error));
+  };
+
   let accountId = user.stripeConnectAccountId;
   if (!accountId) {
     const account = await stripe.accounts.create({
       type: 'express', email: user.email, capabilities: { transfers: { requested: true } },
       metadata: { userId },
-    });
+    }).catch(refused);
     accountId = account.id;
     user.stripeConnectAccountId = accountId;
     await user.save();
@@ -418,7 +431,7 @@ const initiateDriverOnboarding = asyncHandler(async (req: Request, res: Response
     refresh_url: `${frontendUrl}/driver/settings?stripe=refresh`,
     return_url: `${frontendUrl}/driver/settings?stripe=success`,
     type: 'account_onboarding',
-  });
+  }).catch(refused);
 
   res.json(new ApiResponse(200, { url: accountLink.url }, 'URL generated'));
 });

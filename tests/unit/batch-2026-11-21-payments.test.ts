@@ -34,14 +34,14 @@ jest.mock('../../src/models/SystemConfig.model', () => ({
   __esModule: true,
   default: { findOne: jest.fn(), findOneAndUpdate: jest.fn() },
 }));
-jest.mock('../../src/models/User.model', () => ({ __esModule: true, default: { findOne: jest.fn() } }));
+jest.mock('../../src/models/User.model', () => ({ __esModule: true, default: { findOne: jest.fn(), findById: jest.fn() } }));
 jest.mock('../../src/services/referral.service', () => ({ __esModule: true, default: { processPaymentReward: jest.fn() } }));
 jest.mock('../../src/services/membership.service', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/services/activity.service', () => ({
   __esModule: true,
   default: { createActivity: jest.fn(() => Promise.resolve()), logFinancialActivity: jest.fn() },
 }));
-jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null, emitToUser: jest.fn() }));
+jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null, emitToUser: jest.fn(), streamLogToAdmins: jest.fn() }));
 jest.mock('../../src/socket/supraspace.socket', () => ({ getIO: () => null }));
 jest.mock('../../src/utils/safeNotification', () => ({ safeCreateNotification: jest.fn(), notifyOrgAdmins: jest.fn() }));
 // Deleting a dealership first checks for loads with a driver on them (2026-11-23 tests).
@@ -498,5 +498,112 @@ describe('review fixes: dealerships Suprah still owes', () => {
     orgs.findById.mockResolvedValueOnce(org);
     const confirmed = await call(deleteOrganization, { user: owner, params: { id: ORG_ID }, query: { confirmOwed: 'true' } });
     expect(confirmed.error).toBe(reached);
+  });
+});
+
+// ─── Stripe's own text never reaches a screen (2026-11-23) ───────────────────
+import { mapKnownError } from '../../src/utils/errorMapping';
+import { errorHandler } from '../../src/middleware/error.middleware';
+import { ApiError } from '../../src/utils/ApiError';
+import driverPayoutController from '../../src/controllers/driverPayout.controller';
+import { cardFailureReason, driverPayoutFailureReason, refundProblemMessage } from '../../src/utils/stripeErrors';
+
+describe("Stripe's own text never reaches a screen", () => {
+  // What Stripe really says when payout accounts aren't switched on.
+  const CONNECT_OFF = {
+    type: 'StripeInvalidRequestError',
+    statusCode: 400,
+    requestId: 'req_123',
+    message: "You can only create new accounts if you've signed up for Connect, which you can do at https://dashboard.stripe.com/connect.",
+  };
+  const STRIPE_WORDS = /Connect|dashboard|stripe\.com|MCP|CLI|signed up/i;
+  const logged = (spy: jest.SpyInstance) => JSON.stringify(spy.mock.calls);
+
+  it('any Stripe error that reaches the error handler gets a plain message; the log keeps only its type, code and request id', () => {
+    expect(mapKnownError(CONNECT_OFF)).toEqual({
+      statusCode: 502,
+      message: expect.stringMatching(/^This payment action couldn't be completed right now\./),
+      errorType: 'PAYMENT_PROVIDER_ERROR',
+    });
+    expect(mapKnownError({ type: 'StripeConnectionError', message: 'socket hang up' })?.message).toMatch(/couldn't be reached just now/);
+    expect(mapKnownError({ type: 'StripeCardError', statusCode: 402, message: 'Your card was declined.' }))
+      .toMatchObject({ statusCode: 402, errorType: 'CARD_DECLINED' });
+    // Everything else is unchanged.
+    expect(mapKnownError(new ApiError(404, 'Not here'))).toBeNull();
+    expect(mapKnownError({ name: 'CastError', path: '_id' })?.statusCode).toBe(400);
+
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => undefined as any);
+    const res: any = { status: jest.fn(() => res), send: jest.fn() };
+    errorHandler(CONNECT_OFF, { url: '/x', method: 'POST', body: {}, params: {}, query: {} } as any, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(502);
+    const sent = res.send.mock.calls[0][0];
+    expect(sent.message).toMatch(/contact Suprah AI support/);
+    expect(sent.message).not.toMatch(STRIPE_WORDS);
+    expect(logged(error)).toContain('req_123');
+    expect(logged(error)).not.toMatch(/signed up for Connect/);
+    error.mockRestore();
+  });
+
+  it('a dealership admin setting up the payout account gets a plain message when Stripe refuses', async () => {
+    const warn = jest.spyOn(logger, 'warn');
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: {} }));
+    stripe.accounts.create.mockRejectedValueOnce(CONNECT_OFF);
+    const refused = await payoutAccountLink(ORG_ID, 'owner@example.com').catch((e) => e);
+    expect(refused).toMatchObject({ statusCode: 502, message: expect.stringMatching(/^Payout account setup isn't available right now\./) });
+    expect(refused.message).not.toMatch(STRIPE_WORDS);
+    expect(logged(warn)).toContain('StripeInvalidRequestError');
+    expect(logged(warn)).not.toMatch(/signed up for Connect|owner@example\.com/);
+
+    stripe.accounts.create.mockRejectedValueOnce({ type: 'StripeConnectionError', message: 'socket hang up' });
+    await expect(payoutAccountLink(ORG_ID, 'owner@example.com')).rejects.toMatchObject({ message: expect.stringMatching(/couldn't be reached just now/) });
+    warn.mockRestore();
+  });
+
+  it('a driver setting up their payout account gets the same plain message', async () => {
+    const save = jest.fn();
+    (User as unknown as Record<string, jest.Mock>).findById.mockResolvedValueOnce({ _id: 'drv-1', role: 'driver', email: 'd@example.com', save });
+    stripe.accounts.create.mockRejectedValueOnce(CONNECT_OFF);
+    const { error } = await call(driverPayoutController.initiateDriverOnboarding, { user: { _id: 'drv-1', role: 'driver' } });
+    expect(error).toMatchObject({ statusCode: 502, message: expect.stringMatching(/^Payout account setup isn't available right now\./) });
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('card failures, refunds and driver payouts are explained in plain words', () => {
+    expect(cardFailureReason({ type: 'card_error', code: 'card_declined', decline_code: 'insufficient_funds', message: 'Your card has insufficient funds.' }))
+      .toBe("The card doesn't have enough funds. Use another card.");
+    expect(cardFailureReason({ type: 'card_error', code: 'expired_card' })).toBe('The card has expired. Use another card.');
+    expect(cardFailureReason({ type: 'card_error', code: 'card_declined', decline_code: 'generic_decline' })).toMatch(/^The card was declined/);
+    expect(cardFailureReason({ type: 'invalid_request_error', message: 'No such PaymentMethod: pm_x' })).toMatch(/^The payment didn't go through/);
+    expect(cardFailureReason(null)).toMatch(/^The payment didn't go through/);
+
+    expect(refundProblemMessage({ type: 'StripeInvalidRequestError', code: 'charge_already_refunded', message: 'Charge ch_1 has already been refunded.' }))
+      .toMatch(/already fully refunded/);
+    expect(refundProblemMessage({ type: 'StripeInvalidRequestError', code: 'charge_disputed' })).toMatch(/open dispute/);
+    expect(refundProblemMessage(CONNECT_OFF)).not.toMatch(STRIPE_WORDS);
+
+    expect(driverPayoutFailureReason({ type: 'StripeInvalidRequestError', code: 'balance_insufficient' })).toMatch(/enough available money/);
+    expect(driverPayoutFailureReason(CONNECT_OFF)).toMatch(/payout account is fully set up/);
+  });
+
+  it('a payout Stripe refused gives the super admin a plain reason', async () => {
+    const paidLastWeek = new Date(weekStartUtah(new Date()).getTime() - 24 * 60 * 60 * 1000);
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { stripeAccountId: 'acct_dealer', payoutsStartAt: new Date('2026-11-01T00:00:00Z') } }));
+    orgs.findOneAndUpdate.mockReturnValue(lean({ _id: ORG_ID }));
+    configs.findOne.mockReturnValue(lean(null));
+    stripe.accounts.retrieve.mockResolvedValue(READY_ACCOUNT);
+    payouts.aggregate.mockResolvedValue([]);
+    payments.find.mockReturnValue(lean([{ _id: '64b7f0c2a1b2c3d4e5f60c01', organizationId: ORG_ID, status: 'succeeded', amount: 100, suprahFeePercent: 0, paidAt: paidLastWeek }]));
+    payouts.create.mockImplementation((doc: any) => Promise.resolve({ _id: 'po-1', createdAt: new Date(), ...doc }));
+    stripe.transfers.create.mockRejectedValueOnce({
+      type: 'StripeInvalidRequestError',
+      code: 'insufficient_capabilities_for_transfer',
+      message: 'Your destination account needs to have at least one of the following capabilities enabled: transfers, crypto_transfers, legacy_payments',
+    });
+
+    const refused = await sendDealershipPayout(ORG_ID, 100, 'sa-1').catch((e) => e);
+    expect(refused.statusCode).toBe(402);
+    expect(refused.message).toMatch(/^The payout wasn't sent, so no money left Suprah's account\./);
+    expect(refused.message).not.toMatch(/capabilities|crypto_transfers/);
+    expect(payouts.updateOne).toHaveBeenCalledWith({ _id: 'po-1', status: 'sending' }, { $set: { status: 'failed', failureReason: refused.message } });
   });
 });

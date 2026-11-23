@@ -39,6 +39,7 @@ import { paymentPurposeFrom } from '../utils/paymentPurpose';
 import { dealershipForPayments, getPlatformSettings, paymentLimitProblem } from '../services/suprahPaySettings.service';
 import Organization from '../models/Organization.model';
 import { statementSuffixFor } from '../utils/paymentBranding';
+import { cardFailureReason, refundProblemMessage, stripeErrorForLog } from '../utils/stripeErrors';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-02-25.clover',
@@ -772,7 +773,7 @@ const confirmPayment = asyncHandler(async (req: Request, res: Response) => {
 
   if (paymentIntent.status === 'requires_payment_method') {
     payment.status = 'failed';
-    payment.failureReason = paymentIntent.last_payment_error?.message || 'Payment method failed';
+    payment.failureReason = cardFailureReason(paymentIntent.last_payment_error);
     await payment.save();
     return res.json(new ApiResponse(200, payment, 'Payment failed - new payment method required'));
   }
@@ -833,8 +834,8 @@ const refundPayment = asyncHandler(async (req: Request, res: Response) => {
   try {
     refund = await stripe.refunds.create(refundParams);
   } catch (error: any) {
-    logger.warn({ err: error?.message, paymentId: payment._id }, 'Stripe refused a refund');
-    throw new ApiError(402, `The refund didn't go through, so nothing was refunded. Stripe said: ${error?.message || 'no reason given'}`);
+    logger.warn({ ...stripeErrorForLog(error), paymentId: payment._id }, 'Stripe refused a refund');
+    throw new ApiError(402, refundProblemMessage(error));
   }
 
   // Our best estimate, then Stripe's own totals when we can read them.
@@ -1044,7 +1045,7 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
 
     case 'payment_intent.payment_failed': {
       const pi = event.data.object as Stripe.PaymentIntent;
-      await claimFailed({ stripePaymentIntentId: pi.id }, pi.last_payment_error?.message || 'Payment failed');
+      await claimFailed({ stripePaymentIntentId: pi.id }, cardFailureReason(pi.last_payment_error));
       break;
     }
 
@@ -1229,7 +1230,7 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
 
   if (paymentIntent.status === 'requires_payment_method') {
     payment.status = 'failed';
-    payment.failureReason = paymentIntent.last_payment_error?.message || 'Payment method failed';
+    payment.failureReason = cardFailureReason(paymentIntent.last_payment_error);
     await payment.save();
     return res.json(new ApiResponse(200, customerInvoiceView(payment), 'Payment failed'));
   }

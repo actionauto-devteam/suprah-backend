@@ -4,6 +4,7 @@
  * raw Mongoose message.
  */
 import { INVALID_LINK, describeValidationIssues, fieldLabelForPath } from "./userMessages";
+import { isStripeError, stripeProblemMessage } from "./stripeErrors";
 
 /** "pickupLocation.zip" -> "pickup ZIP code"; "vehicles.0.year" -> "vehicle 1 year". */
 function humanizeField(path: string) {
@@ -61,6 +62,20 @@ function isMongooseValidationError(err: any) {
 
 export function mapKnownError(err: any): MappedError | null {
   if (!err || typeof err !== "object") return null;
+
+  // Stripe's own wording is for developers (dashboard pages, tools, how
+  // Suprah's Stripe account is set up), so it never reaches a screen
+  // (2026-11-23). Checked before the status below: Stripe errors carry
+  // Stripe's status code, and a request Stripe refused is Suprah's problem,
+  // not the user's.
+  if (isStripeError(err)) {
+    const card = err.type === "StripeCardError";
+    return {
+      statusCode: card ? 402 : 502,
+      message: stripeProblemMessage(err),
+      errorType: card ? "CARD_DECLINED" : "PAYMENT_PROVIDER_ERROR",
+    };
+  }
 
   // Explicit ApiError / http-errors style status wins.
   if (Number.isInteger(err.statusCode) && err.statusCode >= 400) return null;

@@ -190,11 +190,11 @@ describe('a payment is marked paid exactly once', () => {
   it('never marks a paid or refunded invoice as failed', async () => {
     await stripeUpdate({
       type: 'payment_intent.payment_failed',
-      data: { object: { id: 'pi_1', last_payment_error: { message: 'Your card was declined.' } } },
+      data: { object: { id: 'pi_1', last_payment_error: { type: 'card_error', code: 'card_declined', message: 'Your card was declined.' } } },
     });
     expect(payments.findOneAndUpdate).toHaveBeenCalledWith(
       { stripePaymentIntentId: 'pi_1', status: { $nin: ['succeeded', 'refunded', 'cancelled'] } },
-      { $set: { status: 'failed', failureReason: 'Your card was declined.' } },
+      { $set: { status: 'failed', failureReason: "The card was declined, so nothing was charged. Try another card, or contact the card's bank." } },
       { new: true },
     );
   });
