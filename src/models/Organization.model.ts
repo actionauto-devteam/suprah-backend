@@ -37,6 +37,19 @@ export interface IOrganization extends Document {
         payoutsStartAt?: Date;
         /** Set while a payout is being sent, so only one is sent at a time. */
         payoutClaimedAt?: Date | null;
+        /** When the current payout account was set up (2026-11-23). */
+        payoutAccountSetAt?: Date;
+        /**
+         * The payout account, and its bank account in Stripe, that a super admin
+         * confirmed (2026-11-23). Payouts wait until the current account is the
+         * confirmed one.
+         */
+        payoutConfirmedAccountId?: string;
+        payoutConfirmedBankId?: string | null;
+        payoutConfirmedAt?: Date;
+        payoutConfirmedBy?: mongoose.Types.ObjectId;
+        /** Set when the bank details changed in Stripe after they were confirmed. */
+        payoutBankChangedAt?: Date | null;
         updatedAt?: Date;
         updatedBy?: mongoose.Types.ObjectId;
     };
@@ -116,6 +129,13 @@ const OrganizationSchema = new Schema<IOrganization>(
             stripeAccountId: { type: String, trim: true, select: false },
             payoutsStartAt: { type: Date },
             payoutClaimedAt: { type: Date, select: false },
+            // Who confirmed which payout account (2026-11-23): server only, like the account itself.
+            payoutAccountSetAt: { type: Date, select: false },
+            payoutConfirmedAccountId: { type: String, trim: true, select: false },
+            payoutConfirmedBankId: { type: String, trim: true, select: false },
+            payoutConfirmedAt: { type: Date, select: false },
+            payoutConfirmedBy: { type: Schema.Types.ObjectId, ref: 'User', select: false },
+            payoutBankChangedAt: { type: Date, select: false },
             updatedAt: { type: Date },
             updatedBy: { type: Schema.Types.ObjectId, ref: 'User', select: false },
         },

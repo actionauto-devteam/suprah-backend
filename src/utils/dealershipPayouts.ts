@@ -125,3 +125,49 @@ export function owedFor(
   }
   return owed;
 }
+
+/* ─────────────────────────── Payout account safety ──────────────────────── */
+
+/**
+ * Why a dealership's payouts are on hold (2026-11-23): its payout account was
+ * set up and no super admin has confirmed it yet ('new'), it was replaced by
+ * another account since it was confirmed ('replaced'), or its bank details
+ * changed in Stripe since then ('bank_changed'). Null when payouts can go.
+ */
+export type PayoutAccountHold = 'new' | 'replaced' | 'bank_changed';
+
+export function payoutAccountHold(suprahPay?: {
+  stripeAccountId?: string | null;
+  payoutConfirmedAccountId?: string | null;
+  payoutBankChangedAt?: Date | null;
+} | null): PayoutAccountHold | null {
+  if (!suprahPay?.stripeAccountId) return null;
+  if (!suprahPay.payoutConfirmedAccountId) return 'new';
+  if (suprahPay.payoutConfirmedAccountId !== suprahPay.stripeAccountId) return 'replaced';
+  if (suprahPay.payoutBankChangedAt) return 'bank_changed';
+  return null;
+}
+
+/** What a super admin is told when a payout is held, and what to do. */
+export function payoutHoldMessage(hold: PayoutAccountHold): string {
+  if (hold === 'replaced') {
+    return 'This dealership set up a different payout account since it was confirmed. Check it with the dealership, then press Confirm account.';
+  }
+  if (hold === 'bank_changed') {
+    return "This dealership's bank details changed in Stripe since they were confirmed. Check them with the dealership, then press Confirm account.";
+  }
+  return "This dealership's payout account hasn't been confirmed yet. Check it with the dealership, then press Confirm account.";
+}
+
+/**
+ * The bank account Stripe pays a connected account out to (its default for
+ * US dollars), when Stripe shares it with Suprah. Null when it doesn't.
+ */
+export function payoutBankOf(account: {
+  external_accounts?: { data?: Array<{ id?: string; object?: string; bank_name?: string | null; last4?: string | null; default_for_currency?: boolean | null }> } | null;
+}): { id: string; bankName: string | null; last4: string | null } | null {
+  const list = account.external_accounts?.data ?? [];
+  const bank = list.find((item) => item?.default_for_currency) ?? list[0];
+  if (!bank?.id) return null;
+  return { id: bank.id, bankName: bank.bank_name ?? null, last4: bank.last4 ?? null };
+}

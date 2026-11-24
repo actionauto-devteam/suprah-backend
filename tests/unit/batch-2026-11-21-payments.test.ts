@@ -304,7 +304,7 @@ describe('dealership payouts: sending (super admins)', () => {
   const paidLastWeek = new Date(weekStartUtah(new Date()).getTime() - 24 * 60 * 60 * 1000);
 
   function setUp({ amount = 100, claimed = true }: { amount?: number; claimed?: boolean } = {}) {
-    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { stripeAccountId: 'acct_dealer', payoutsStartAt: START } }));
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { stripeAccountId: 'acct_dealer', payoutConfirmedAccountId: 'acct_dealer', payoutsStartAt: START } }));
     orgs.findOneAndUpdate.mockReturnValue(lean(claimed ? { _id: ORG_ID } : null));
     configs.findOne.mockReturnValue(lean(null));
     stripe.accounts.retrieve.mockResolvedValue(READY_ACCOUNT);
@@ -391,7 +391,7 @@ describe('dealership payouts: the payout account (dealership admins)', () => {
     orgs.findOneAndUpdate.mockReturnValue(lean({ suprahPay: { stripeAccountId: 'acct_new' } }));
     stripe.accountLinks.create.mockResolvedValueOnce({ url: 'https://connect.stripe.com/setup/x' });
 
-    expect(await payoutAccountLink(ORG_ID, 'owner@example.com')).toBe('https://connect.stripe.com/setup/x');
+    expect(await payoutAccountLink(ORG_ID, { email: 'owner@example.com', name: 'Olivia Owner' })).toBe('https://connect.stripe.com/setup/x');
     expect(stripe.accounts.create).toHaveBeenCalledWith(expect.objectContaining({ type: 'express', capabilities: { transfers: { requested: true } } }));
     const update = orgs.findOneAndUpdate.mock.calls[0][1];
     expect(update[0].$set['suprahPay.payoutsStartAt']).toEqual({ $ifNull: ['$suprahPay.payoutsStartAt', '$$NOW'] });
@@ -553,14 +553,14 @@ describe("Stripe's own text never reaches a screen", () => {
     const warn = jest.spyOn(logger, 'warn');
     orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: {} }));
     stripe.accounts.create.mockRejectedValueOnce(CONNECT_OFF);
-    const refused = await payoutAccountLink(ORG_ID, 'owner@example.com').catch((e) => e);
+    const refused = await payoutAccountLink(ORG_ID, { email: 'owner@example.com', name: 'Olivia Owner' }).catch((e) => e);
     expect(refused).toMatchObject({ statusCode: 502, message: expect.stringMatching(/^Payout account setup isn't available right now\./) });
     expect(refused.message).not.toMatch(STRIPE_WORDS);
     expect(logged(warn)).toContain('StripeInvalidRequestError');
     expect(logged(warn)).not.toMatch(/signed up for Connect|owner@example\.com/);
 
     stripe.accounts.create.mockRejectedValueOnce({ type: 'StripeConnectionError', message: 'socket hang up' });
-    await expect(payoutAccountLink(ORG_ID, 'owner@example.com')).rejects.toMatchObject({ message: expect.stringMatching(/couldn't be reached just now/) });
+    await expect(payoutAccountLink(ORG_ID, { email: 'owner@example.com', name: 'Olivia Owner' })).rejects.toMatchObject({ message: expect.stringMatching(/couldn't be reached just now/) });
     warn.mockRestore();
   });
 
@@ -592,7 +592,7 @@ describe("Stripe's own text never reaches a screen", () => {
 
   it('a payout Stripe refused gives the super admin a plain reason', async () => {
     const paidLastWeek = new Date(weekStartUtah(new Date()).getTime() - 24 * 60 * 60 * 1000);
-    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { stripeAccountId: 'acct_dealer', payoutsStartAt: new Date('2026-11-01T00:00:00Z') } }));
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { stripeAccountId: 'acct_dealer', payoutConfirmedAccountId: 'acct_dealer', payoutsStartAt: new Date('2026-11-01T00:00:00Z') } }));
     orgs.findOneAndUpdate.mockReturnValue(lean({ _id: ORG_ID }));
     configs.findOne.mockReturnValue(lean(null));
     stripe.accounts.retrieve.mockResolvedValue(READY_ACCOUNT);
@@ -767,5 +767,149 @@ describe('batch 6: Stripe records Stripe no longer has', () => {
     const { error } = await call(paymentController.handleStripeWebhook, { headers: { 'stripe-signature': 'sig' }, rawBody: Buffer.from('{}') });
     expect(error).toBeUndefined();
     expect(payments.findOneAndUpdate.mock.calls[1][0]).toEqual({ _id: INVOICE });
+  });
+});
+
+// ─── Batch 7 (2026-11-23): a new or replaced payout account is held until a super admin confirms it ──
+import { payoutAccountHold, payoutBankOf } from '../../src/utils/dealershipPayouts';
+import { confirmPayoutAccount, payoutAccountFor, payoutAccountForAdmin } from '../../src/services/dealershipPayouts.service';
+import { notifyOrgAdmins } from '../../src/utils/safeNotification';
+
+describe('batch 7: payout account safety', () => {
+  const BANK = { id: 'ba_1', object: 'bank_account', bank_name: 'STRIPE TEST BANK', last4: '6789', default_for_currency: true };
+  const readyWithBank = (bank = BANK) => ({ ...READY_ACCOUNT, business_profile: { name: 'Action Auto Utah LLC' }, external_accounts: { data: [bank] } });
+  const superAdmins = () => {
+    (User as unknown as Record<string, jest.Mock>).find = jest.fn(() => lean([{ _id: 'sa-1', organizationId: null }]));
+  };
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('the hold rule: new, replaced or bank changed, and nothing to hold without an account', () => {
+    expect(payoutAccountHold(undefined)).toBeNull();
+    expect(payoutAccountHold({})).toBeNull();
+    expect(payoutAccountHold({ stripeAccountId: 'acct_1' })).toBe('new');
+    expect(payoutAccountHold({ stripeAccountId: 'acct_2', payoutConfirmedAccountId: 'acct_1' })).toBe('replaced');
+    expect(payoutAccountHold({ stripeAccountId: 'acct_1', payoutConfirmedAccountId: 'acct_1', payoutBankChangedAt: new Date() })).toBe('bank_changed');
+    expect(payoutAccountHold({ stripeAccountId: 'acct_1', payoutConfirmedAccountId: 'acct_1' })).toBeNull();
+    expect(payoutBankOf({ external_accounts: { data: [{ id: 'ba_x' }, BANK] } })).toEqual({ id: 'ba_1', bankName: 'STRIPE TEST BANK', last4: '6789' });
+    expect(payoutBankOf({})).toBeNull();
+  });
+
+  it('setting up a payout account tells the dealership admins (with who did it) and the super admins', async () => {
+    superAdmins();
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: {} }));
+    stripe.accounts.create.mockResolvedValueOnce({ id: 'acct_new' });
+    orgs.findOneAndUpdate.mockReturnValue(lean({ suprahPay: { stripeAccountId: 'acct_new' } }));
+    stripe.accountLinks.create.mockResolvedValueOnce({ url: 'https://connect.stripe.com/setup/x' });
+
+    await payoutAccountLink(ORG_ID, { email: 'owner@example.com', name: 'Olivia Owner' });
+    await flush();
+    expect(orgs.findOneAndUpdate.mock.calls[0][1][0].$set['suprahPay.payoutAccountSetAt']).toBe('$$NOW');
+    const [orgId, , title, message] = (notifyOrgAdmins as jest.Mock).mock.calls[0];
+    expect(orgId).toBe(ORG_ID);
+    expect(title).toBe('SuprahPay payout account set up');
+    expect(message).toMatch(/^Olivia Owner started setting up your dealership's SuprahPay payout account\. Suprah checks it before any payout goes to it\./);
+    const superNotice = (safeCreateNotification as jest.Mock).mock.calls.map(([n]) => n).find((n) => n.type === 'admin_system_alert');
+    expect(superNotice).toMatchObject({ userId: 'sa-1', title: 'Payout account needs confirming', metadata: { route: '/admin/suprahpay' } });
+    expect(superNotice.message).toMatch(/Action Auto Utah is setting up a SuprahPay payout account\. Its payouts are on hold/);
+  });
+
+  it('a replaced account says so to the super admins', async () => {
+    superAdmins();
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { payoutConfirmedAccountId: 'acct_old' } }));
+    stripe.accounts.create.mockResolvedValueOnce({ id: 'acct_new' });
+    orgs.findOneAndUpdate.mockReturnValue(lean({ suprahPay: { stripeAccountId: 'acct_new' } }));
+    stripe.accountLinks.create.mockResolvedValueOnce({ url: 'https://connect.stripe.com/setup/y' });
+
+    await payoutAccountLink(ORG_ID, { email: 'owner@example.com', name: 'Olivia Owner' });
+    await flush();
+    const superNotice = (safeCreateNotification as jest.Mock).mock.calls.map(([n]) => n).find((n) => n.type === 'admin_system_alert');
+    expect(superNotice.message).toMatch(/Action Auto Utah replaced its SuprahPay payout account/);
+  });
+
+  it('nothing is sent to an account no super admin has confirmed, or one that was replaced', async () => {
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { stripeAccountId: 'acct_dealer' } }));
+    stripe.accounts.retrieve.mockResolvedValue(readyWithBank());
+    await expect(sendDealershipPayout(ORG_ID, 100, 'sa-1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/hasn't been confirmed yet/) });
+
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { stripeAccountId: 'acct_dealer', payoutConfirmedAccountId: 'acct_other' } }));
+    await expect(sendDealershipPayout(ORG_ID, 100, 'sa-1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/set up a different payout account/) });
+    expect(payouts.create).not.toHaveBeenCalled();
+    expect(stripe.transfers.create).not.toHaveBeenCalled();
+  });
+
+  it('bank details changed in Stripe since they were confirmed: held, everyone told once, nothing sent', async () => {
+    superAdmins();
+    orgs.findById.mockReturnValue(lean({
+      _id: ORG_ID, name: 'Action Auto Utah',
+      suprahPay: { stripeAccountId: 'acct_dealer', payoutConfirmedAccountId: 'acct_dealer', payoutConfirmedBankId: 'ba_old' },
+    }));
+    stripe.accounts.retrieve.mockResolvedValue(readyWithBank());
+    orgs.updateOne.mockResolvedValueOnce({ modifiedCount: 1 });
+
+    await expect(sendDealershipPayout(ORG_ID, 100, 'sa-1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/bank details changed in Stripe/) });
+    await flush();
+    expect(orgs.updateOne).toHaveBeenCalledWith(
+      { _id: ORG_ID, 'suprahPay.payoutConfirmedBankId': 'ba_old', 'suprahPay.payoutBankChangedAt': null },
+      { $set: { 'suprahPay.payoutBankChangedAt': expect.any(Date) } },
+    );
+    expect((notifyOrgAdmins as jest.Mock).mock.calls[0][2]).toBe('SuprahPay payout bank details changed');
+    expect((safeCreateNotification as jest.Mock).mock.calls.some(([n]) => n.title === 'Payout bank details changed')).toBe(true);
+    expect(stripe.transfers.create).not.toHaveBeenCalled();
+  });
+
+  it('a super admin sees the bank to check, and confirms only what they saw on a ready account', async () => {
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, name: 'Action Auto Utah', suprahPay: { stripeAccountId: 'acct_dealer' } }));
+    stripe.accounts.retrieve.mockResolvedValue(readyWithBank());
+    expect(await payoutAccountForAdmin(ORG_ID)).toMatchObject({
+      ready: true, businessName: 'Action Auto Utah LLC', bank: { id: 'ba_1', bankName: 'STRIPE TEST BANK', last4: '6789' }, hold: 'new',
+    });
+
+    // A different bank than the one shown: refused, nothing saved.
+    await expect(confirmPayoutAccount(ORG_ID, 'ba_other', 'sa-1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/changed since you opened this/) });
+    // Not ready yet: refused.
+    stripe.accounts.retrieve.mockResolvedValueOnce({ ...readyWithBank(), payouts_enabled: false });
+    await expect(confirmPayoutAccount(ORG_ID, 'ba_1', 'sa-1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/isn't ready yet/) });
+    expect(orgs.findOneAndUpdate).not.toHaveBeenCalled();
+
+    orgs.findOneAndUpdate.mockReturnValueOnce(lean({ _id: ORG_ID }));
+    expect(await confirmPayoutAccount(ORG_ID, 'ba_1', 'sa-1')).toMatchObject({ confirmed: true, bankLast4: '6789' });
+    expect(orgs.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: ORG_ID, 'suprahPay.stripeAccountId': 'acct_dealer' },
+      {
+        $set: {
+          'suprahPay.payoutConfirmedAccountId': 'acct_dealer',
+          'suprahPay.payoutConfirmedBankId': 'ba_1',
+          'suprahPay.payoutConfirmedAt': expect.any(Date),
+          'suprahPay.payoutConfirmedBy': 'sa-1',
+        },
+        $unset: { 'suprahPay.payoutBankChangedAt': '' },
+      },
+      { new: true, projection: { _id: 1 } },
+    );
+    expect((notifyOrgAdmins as jest.Mock).mock.calls[0][3]).toMatch(/Suprah confirmed your dealership's SuprahPay payout account \(bank account ending in 6789\)/);
+  });
+
+  it("the dealership sees it's waiting for Suprah, and the super admin list shows why", async () => {
+    orgs.findById.mockReturnValue(lean({ _id: ORG_ID, suprahPay: { stripeAccountId: 'acct_dealer' } }));
+    stripe.accounts.retrieve.mockResolvedValue(readyWithBank());
+    expect(await payoutAccountFor(ORG_ID)).toMatchObject({ ready: true, awaitingConfirmation: true });
+
+    orgs.find.mockReturnValue(lean([
+      { _id: ORG_ID, name: 'Action Auto Utah', status: 'active', subscription: { tier: 'suprah_origin' },
+        suprahPay: { stripeAccountId: 'acct_dealer', payoutConfirmedAccountId: 'acct_old', payoutAccountSetAt: new Date('2026-11-23T10:00:00Z') } },
+    ]));
+    configs.findOne.mockReturnValue(lean(null));
+    payouts.aggregate.mockResolvedValue([]);
+    payouts.find.mockReturnValue(lean([]));
+    payments.find.mockReturnValue(lean([]));
+    const { res } = await call(listPayoutsForAdmin, {});
+    expect(res.body.data.dealerships[0]).toMatchObject({ payoutAccountHold: 'replaced', payoutAccountConnected: true });
+  });
+
+  it('who confirmed which account stays on the server', () => {
+    const actual = jest.requireActual('../../src/models/Organization.model').default;
+    for (const path of ['payoutAccountSetAt', 'payoutConfirmedAccountId', 'payoutConfirmedBankId', 'payoutConfirmedAt', 'payoutConfirmedBy', 'payoutBankChangedAt']) {
+      expect(actual.schema.path(`suprahPay.${path}`).options.select).toBe(false);
+    }
   });
 });

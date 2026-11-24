@@ -17,7 +17,13 @@ import {
   setDealershipSuprahPayForAdmin,
   updatePlatformSettingsForAdmin,
 } from "../controllers/suprahPaySettings.controller";
-import { checkPayoutForAdmin, listPayoutsForAdmin, sendPayoutForAdmin } from "../controllers/dealershipPayouts.controller";
+import {
+  checkPayoutForAdmin,
+  confirmPayoutAccountForAdmin,
+  getPayoutAccountForAdmin,
+  listPayoutsForAdmin,
+  sendPayoutForAdmin,
+} from "../controllers/dealershipPayouts.controller";
 import auth from "../middleware/auth.middleware";
 import { requireSuperAdmin } from "../middleware/rbac.middleware";
 
@@ -36,6 +42,9 @@ router.put("/suprahpay/dealerships/:id", setDealershipSuprahPayForAdmin);
 // Weekly payouts to dealerships: review the list, then Send per dealership.
 router.get("/suprahpay/payouts", listPayoutsForAdmin);
 router.post("/suprahpay/payouts/:orgId/send", sendPayoutForAdmin);
+// A new or replaced payout account is held until a super admin confirms it (2026-11-23).
+router.get("/suprahpay/payouts/:orgId/payout-account", getPayoutAccountForAdmin);
+router.post("/suprahpay/payouts/:orgId/confirm-account", confirmPayoutAccountForAdmin);
 router.post("/suprahpay/payouts/record/:payoutId/check", checkPayoutForAdmin);
 router.get("/users", adminController.getAllUsers);
 router.get("/stats", adminController.getSystemStats);

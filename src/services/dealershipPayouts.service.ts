@@ -7,9 +7,19 @@ import DealershipPayout, { IDealershipPayout } from '../models/DealershipPayout.
 import AuditLog from '../models/AuditLog.model';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
-import { notifyOrgAdmins } from '../utils/safeNotification';
+import { notifyOrgAdmins, safeCreateNotification } from '../utils/safeNotification';
+import User from '../models/User.model';
+import { SUPPORT_EMAIL } from '../utils/userMessages';
 import { payoutAccountStatus } from '../utils/driverPayoutAccount';
-import { OwedSummary, PayoutPayment, owedFor, weekStartUtah } from '../utils/dealershipPayouts';
+import {
+  OwedSummary,
+  PayoutPayment,
+  owedFor,
+  payoutAccountHold,
+  payoutBankOf,
+  payoutHoldMessage,
+  weekStartUtah,
+} from '../utils/dealershipPayouts';
 import { getPlatformSettings } from './suprahPaySettings.service';
 import { isStripeError, payoutSetupProblemMessage, stripeErrorForLog } from '../utils/stripeErrors';
 
@@ -89,11 +99,18 @@ const isMissingAccount = (error: any) =>
 
 /** The dealership's payout account status (connected, ready, or what Stripe still needs). */
 export async function payoutAccountFor(orgId: string) {
-  const org = await Organization.findById(orgId).select('suprahPay.stripeAccountId suprahPay.payoutsStartAt').lean();
+  const org = await Organization.findById(orgId)
+    .select('suprahPay.stripeAccountId suprahPay.payoutsStartAt suprahPay.payoutConfirmedAccountId suprahPay.payoutBankChangedAt')
+    .lean();
   const accountId = org?.suprahPay?.stripeAccountId;
   if (!accountId) return { connected: false as const };
   try {
-    return { ...payoutAccountStatus(await stripe.accounts.retrieve(accountId)), payoutsStartAt: org?.suprahPay?.payoutsStartAt };
+    return {
+      ...payoutAccountStatus(await stripe.accounts.retrieve(accountId)),
+      payoutsStartAt: org?.suprahPay?.payoutsStartAt,
+      // Payouts wait until a Suprah super admin confirms the account (2026-11-23).
+      awaitingConfirmation: payoutAccountHold(org?.suprahPay) !== null,
+    };
   } catch (error: any) {
     if (isMissingAccount(error)) {
       // The account isn't in this Stripe account any more (for example after a
@@ -109,9 +126,65 @@ export async function payoutAccountFor(orgId: string) {
   }
 }
 
+/** Tells every Suprah super admin. A notice that fails never stops the action. */
+async function notifySuperAdmins(title: string, message: string) {
+  try {
+    const superAdmins = await User.find({ role: 'super_admin' }).select('_id organizationId').lean();
+    await Promise.all(superAdmins.map((admin) => safeCreateNotification({
+      userId: String(admin._id),
+      organizationId: admin.organizationId ? String(admin.organizationId) : 'global',
+      type: 'admin_system_alert',
+      title,
+      message,
+      metadata: { route: '/admin/suprahpay' },
+    })));
+  } catch {
+    logger.warn('Super admins were not told about a payout account change');
+  }
+}
+
+/**
+ * Payout account safety (2026-11-23): when a payout account is set up or
+ * replaced, the dealership's admins and Suprah's super admins are told, and
+ * the dealership's payouts wait until a super admin confirms the account.
+ */
+function alertPayoutAccountSetUp(orgId: string, dealership: string, setUpBy: string, replaced: boolean) {
+  void notifyOrgAdmins(
+    orgId,
+    'admin_broadcast',
+    'SuprahPay payout account set up',
+    `${setUpBy} started setting up your dealership's SuprahPay payout account. Suprah checks it before any payout goes to it. If this wasn't expected, contact Suprah AI support at ${SUPPORT_EMAIL}.`,
+    { route: '/billing' },
+  );
+  void notifySuperAdmins(
+    'Payout account needs confirming',
+    replaced
+      ? `${dealership} replaced its SuprahPay payout account. Its payouts are on hold until a super admin confirms the new one in Admin, SuprahPay.`
+      : `${dealership} is setting up a SuprahPay payout account. Its payouts are on hold until a super admin confirms it in Admin, SuprahPay.`,
+  );
+}
+
+function alertPayoutBankChanged(orgId: string, dealership: string) {
+  void notifyOrgAdmins(
+    orgId,
+    'admin_broadcast',
+    'SuprahPay payout bank details changed',
+    `The bank details on your dealership's SuprahPay payout account changed in Stripe. Suprah holds your payouts until it confirms them with you. If this wasn't expected, contact Suprah AI support at ${SUPPORT_EMAIL}.`,
+    { route: '/billing' },
+  );
+  void notifySuperAdmins(
+    'Payout bank details changed',
+    `${dealership}'s payout bank details changed in Stripe since they were confirmed. Its payouts are on hold until a super admin confirms them in Admin, SuprahPay.`,
+  );
+}
+
 /** A Stripe setup link for the dealership's payout account, created on first use. */
-export async function payoutAccountLink(orgId: string, adminEmail: string | undefined): Promise<string> {
-  const org = await Organization.findById(orgId).select('name suprahPay.stripeAccountId').lean();
+export async function payoutAccountLink(
+  orgId: string,
+  admin: { email?: string; name?: string } = {},
+): Promise<string> {
+  const adminEmail = admin.email;
+  const org = await Organization.findById(orgId).select('name suprahPay.stripeAccountId suprahPay.payoutConfirmedAccountId').lean();
   if (!org) throw new ApiError(404, "Your dealership couldn't be found.");
 
   // Stripe's refusal (for example, payout accounts not switched on in
@@ -143,10 +216,19 @@ export async function payoutAccountLink(orgId: string, adminEmail: string | unde
         $set: {
           'suprahPay.stripeAccountId': account.id,
           'suprahPay.payoutsStartAt': { $ifNull: ['$suprahPay.payoutsStartAt', '$$NOW'] },
+          'suprahPay.payoutAccountSetAt': '$$NOW',
         },
       }],
       { new: true, projection: { 'suprahPay.stripeAccountId': 1 } },
     ).lean();
+    if (saved?.suprahPay?.stripeAccountId === account.id) {
+      alertPayoutAccountSetUp(
+        String(orgId),
+        String(org.name || 'A dealership'),
+        admin.name?.trim() || 'One of your admins',
+        !!org.suprahPay?.payoutConfirmedAccountId,
+      );
+    }
     accountId = saved?.suprahPay?.stripeAccountId
       ?? (await Organization.findById(orgId).select('suprahPay.stripeAccountId').lean())?.suprahPay?.stripeAccountId
       ?? account.id;
@@ -220,6 +302,99 @@ async function markSent(payout: IDealershipPayout, transferId: string, approvedB
   }).catch(() => undefined);
 }
 
+/** The dealership's Stripe payout account, or a plain reason it can't be read. */
+async function retrievePayoutAccount(accountId: string): Promise<Stripe.Account> {
+  try {
+    return await stripe.accounts.retrieve(accountId);
+  } catch (error: any) {
+    throw new ApiError(409, isMissingAccount(error)
+      ? "This dealership's payout account isn't in Suprah's Stripe account. Ask them to connect it again."
+      : "Stripe couldn't be reached to check the payout account. Try again in a moment.");
+  }
+}
+
+async function dealershipWithPayoutAccount(orgId: string) {
+  if (!mongoose.isValidObjectId(orgId)) throw new ApiError(400, "That dealership couldn't be found.");
+  const org = await Organization.findById(orgId).select('name suprahPay').lean();
+  if (!org) throw new ApiError(404, "That dealership couldn't be found.");
+  const accountId = org.suprahPay?.stripeAccountId;
+  if (!accountId) throw new ApiError(409, "This dealership hasn't connected a Stripe payout account yet.");
+  return { org, accountId, account: await retrievePayoutAccount(accountId) };
+}
+
+/**
+ * What a super admin checks before confirming a payout account (2026-11-23):
+ * whether it's ready, the business name and the bank it pays out to.
+ */
+export async function payoutAccountForAdmin(orgId: string) {
+  const { org, account } = await dealershipWithPayoutAccount(orgId);
+  const status = payoutAccountStatus(account);
+  const bank = payoutBankOf(account);
+  const confirmedBank = org.suprahPay?.payoutConfirmedBankId;
+  return {
+    ready: status.ready,
+    needsMoreInfo: status.needsMoreInfo,
+    businessName: account.business_profile?.name ?? account.company?.name ?? null,
+    bank,
+    hold: payoutAccountHold(org.suprahPay) ?? (confirmedBank && bank && bank.id !== confirmedBank ? 'bank_changed' : null),
+    setAt: org.suprahPay?.payoutAccountSetAt ?? null,
+    confirmedAt: org.suprahPay?.payoutConfirmedAt ?? null,
+  };
+}
+
+/**
+ * A super admin confirms the payout account they checked (2026-11-23): the
+ * bank they saw must still be the one in Stripe. Payouts can then go to it;
+ * the dealership's admins are told, and it's recorded.
+ */
+export async function confirmPayoutAccount(orgId: string, bankIdSeen: unknown, confirmedBy: string) {
+  if (bankIdSeen !== undefined && bankIdSeen !== null && typeof bankIdSeen !== 'string') {
+    throw new ApiError(400, 'Open the payout account again and confirm what you see.');
+  }
+  const { org, accountId, account } = await dealershipWithPayoutAccount(orgId);
+  if (!payoutAccountStatus(account).ready) {
+    throw new ApiError(409, "This dealership's payout account isn't ready yet: Stripe needs more details or is still checking them. Confirm it once it's ready.");
+  }
+  const bank = payoutBankOf(account);
+  if ((bankIdSeen ?? null) !== (bank?.id ?? null)) {
+    throw new ApiError(409, 'The bank details changed since you opened this. Close it and check them again.');
+  }
+
+  const confirmed = await Organization.findOneAndUpdate(
+    { _id: orgId, 'suprahPay.stripeAccountId': accountId },
+    {
+      $set: {
+        'suprahPay.payoutConfirmedAccountId': accountId,
+        'suprahPay.payoutConfirmedBankId': bank?.id ?? null,
+        'suprahPay.payoutConfirmedAt': new Date(),
+        'suprahPay.payoutConfirmedBy': confirmedBy,
+      },
+      $unset: { 'suprahPay.payoutBankChangedAt': '' },
+    },
+    { new: true, projection: { _id: 1 } },
+  ).lean();
+  if (!confirmed) throw new ApiError(409, "This dealership's payout account changed a moment ago. Refresh and check it again.");
+
+  AuditLog.create({
+    entityType: 'Billing',
+    entityId: String(orgId),
+    organizationId: String(orgId),
+    action: 'UPDATE',
+    reason: 'SuprahPay payout account confirmed',
+    performedBy: confirmedBy,
+    changes: { bankLast4: bank?.last4 ?? null },
+  }).catch(() => undefined);
+  void notifyOrgAdmins(
+    String(orgId),
+    'admin_broadcast',
+    'SuprahPay payout account confirmed',
+    `Suprah confirmed your dealership's SuprahPay payout account${bank?.last4 ? ` (bank account ending in ${bank.last4})` : ''}. Weekly payouts go to it from now on. If you don't recognize it, contact Suprah AI support at ${SUPPORT_EMAIL}.`,
+    { route: '/billing' },
+  );
+  logger.info({ orgId: String(orgId) }, 'Dealership payout account confirmed');
+  return { confirmed: true as const, dealership: org.name, bankLast4: bank?.last4 ?? null };
+}
+
 /**
  * Sends a dealership what it's owed for this week (super admins). The amount
  * the super admin reviewed must still be right.
@@ -234,15 +409,23 @@ export async function sendDealershipPayout(orgId: string, expectedAmount: unknow
   const accountId = org.suprahPay?.stripeAccountId;
   if (!accountId) throw new ApiError(409, "This dealership hasn't connected a Stripe payout account yet.");
 
-  let ready = false;
-  try {
-    ready = payoutAccountStatus(await stripe.accounts.retrieve(accountId)).ready;
-  } catch (error: any) {
-    throw new ApiError(409, isMissingAccount(error)
-      ? "This dealership's payout account isn't in Suprah's Stripe account. Ask them to connect it again."
-      : "Stripe couldn't be reached to check the payout account. Try again in a moment.");
+  const account = await retrievePayoutAccount(accountId);
+  if (!payoutAccountStatus(account).ready) throw new ApiError(409, "This dealership's Stripe payout account isn't ready yet: Stripe needs more details or is still checking them.");
+
+  // Payout account safety (2026-11-23): only to an account a super admin
+  // confirmed, with the bank details that were confirmed.
+  const hold = payoutAccountHold(org.suprahPay);
+  if (hold) throw new ApiError(409, payoutHoldMessage(hold));
+  const bank = payoutBankOf(account);
+  const confirmedBank = org.suprahPay?.payoutConfirmedBankId;
+  if (confirmedBank && bank && bank.id !== confirmedBank) {
+    const flagged = await Organization.updateOne(
+      { _id: orgId, 'suprahPay.payoutConfirmedBankId': confirmedBank, 'suprahPay.payoutBankChangedAt': null },
+      { $set: { 'suprahPay.payoutBankChangedAt': new Date() } },
+    );
+    if (flagged.modifiedCount) alertPayoutBankChanged(String(orgId), String(org.name || 'A dealership'));
+    throw new ApiError(409, payoutHoldMessage('bank_changed'));
   }
-  if (!ready) throw new ApiError(409, "This dealership's Stripe payout account isn't ready yet: Stripe needs more details or is still checking them.");
 
   // One payout at a time for this dealership (a stuck claim expires after 10 minutes).
   const claimed = await Organization.findOneAndUpdate(
