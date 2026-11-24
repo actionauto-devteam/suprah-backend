@@ -69,8 +69,9 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * The only account detail this route changes (2026-11-23): the Create Load
- * signature, the one thing the website saves here. Name, photo, theme, status
+ * The only account detail this route changes (2026-11-23): the signature a
+ * driver draws on the transport contract (requesting or accepting a load),
+ * the one thing the website saves here. Name, photo, theme, status
  * and personal details are changed on the Profile page (/api/profile), which
  * keeps the photo safeguard and copies a driver's new phone to Dispatch.
  */
@@ -95,7 +96,7 @@ export function profileValueOk(field: string, value: unknown): boolean {
 const updateProfile = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
 
-    // Only the Create Load signature is saved here (2026-11-23). Everything
+    // Only the transport contract signature is saved here (2026-11-23). Everything
     // else sent is ignored: other profile details are changed on the Profile
     // page, and the rest of the account (wallet balance and earnings, payout
     // account, referral code, role and permissions, suspension, monitoring and
@@ -103,7 +104,7 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
     const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
     const signature = body.signatureDataUrl;
     if (signature === undefined) {
-        throw new ApiError(400, 'Only your Create Load signature is saved here. Change other details on your Profile page.');
+        throw new ApiError(400, 'Only your signature is saved here. Change other details on your Profile page.');
     }
     if (!profileValueOk('signatureDataUrl', signature)) {
         throw new ApiError(400, "That signature couldn't be saved. Clear it, draw it again and save.");
