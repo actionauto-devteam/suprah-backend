@@ -11,6 +11,7 @@ import { notifyOrgAdmins } from '../utils/safeNotification';
 import { payoutAccountStatus } from '../utils/driverPayoutAccount';
 import { OwedSummary, PayoutPayment, owedFor, weekStartUtah } from '../utils/dealershipPayouts';
 import { getPlatformSettings } from './suprahPaySettings.service';
+import { isStripeError, payoutSetupProblemMessage, stripeErrorForLog } from '../utils/stripeErrors';
 
 /**
  * Suprah's weekly payouts to dealerships (2026-11-21, decision A4): each
@@ -104,7 +105,7 @@ export async function payoutAccountFor(orgId: string) {
       return { connected: false as const, needsReconnect: true };
     }
     logger.warn({ orgId, code: error?.code }, 'Could not check a dealership payout account');
-    return { connected: true as const, error: "Stripe couldn't be reached. Try again in a moment." };
+    return { connected: true as const, error: "The payout account couldn't be checked just now. Try again in a moment." };
   }
 }
 
@@ -112,6 +113,15 @@ export async function payoutAccountFor(orgId: string) {
 export async function payoutAccountLink(orgId: string, adminEmail: string | undefined): Promise<string> {
   const org = await Organization.findById(orgId).select('name suprahPay.stripeAccountId').lean();
   if (!org) throw new ApiError(404, "Your dealership couldn't be found.");
+
+  // Stripe's refusal (for example, payout accounts not switched on in
+  // Suprah's Stripe account) is logged by type and code; the dealership's
+  // admin gets a plain message, never Stripe's developer text (2026-11-23).
+  const refused = (error: unknown): never => {
+    if (!isStripeError(error)) throw error;
+    logger.warn({ orgId, ...stripeErrorForLog(error) }, 'Dealership payout account setup refused');
+    throw new ApiError(502, payoutSetupProblemMessage(error));
+  };
 
   let accountId = org.suprahPay?.stripeAccountId;
   if (!accountId) {
@@ -123,7 +133,7 @@ export async function payoutAccountLink(orgId: string, adminEmail: string | unde
       business_profile: { name: String(org.name || '').slice(0, 100) || undefined },
       capabilities: { transfers: { requested: true } },
       metadata: { organizationId: String(orgId) },
-    });
+    }).catch(refused);
     // Saved only if no other admin connected one at the same moment. Payouts
     // count payments from the first time a payout account was connected; a
     // later reconnect keeps that date, so no payment is ever skipped.
@@ -148,7 +158,7 @@ export async function payoutAccountLink(orgId: string, adminEmail: string | unde
     refresh_url: `${site}/billing?payoutAccount=refresh`,
     return_url: `${site}/billing?payoutAccount=done`,
     type: 'account_onboarding',
-  });
+  }).catch(refused);
   return link.url;
 }
 
@@ -167,7 +177,8 @@ function stripeRefusal(error: any): { definite: boolean; message: string } {
   return {
     definite,
     message: definite
-      ? `Stripe didn't send the payout: ${String(error?.message || 'no reason given')}`
+      // Stripe's own text stays off the screen; its type and code are logged.
+      ? "The payout wasn't sent, so no money left Suprah's account. Check that the dealership's payout account is ready, then try again. If it keeps happening, ask the Suprah developers to check the payment logs."
       : "Stripe didn't confirm the payout. It stays marked as sending so it can't be sent twice; press Check again, or look in the Stripe dashboard.",
   };
 }
