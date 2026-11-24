@@ -29,7 +29,15 @@ jest.mock('../../src/models/transaction.model', () => ({
 }));
 jest.mock('../../src/models/User.model', () => ({
   __esModule: true,
-  default: { findOneAndUpdate: jest.fn(), exists: jest.fn(), findById: jest.fn() },
+  default: {
+    findOneAndUpdate: jest.fn(),
+    exists: jest.fn(),
+    findById: jest.fn(),
+    // Finance access is read fresh for staff (2026-11-23): these staff have it.
+    findOne: jest.fn(() => ({
+      select: () => ({ lean: () => Promise.resolve({ role: 'employee', financeOrganizationIds: ['org-1'] }) }),
+    })),
+  },
 }));
 jest.mock('../../src/models/AuditLog.model', () => ({ __esModule: true, default: { create: jest.fn() } }));
 jest.mock('../../src/models/referral.model', () => ({ __esModule: true, default: {} }));

@@ -15,6 +15,8 @@ import { revokeTrayDevicesForEmail } from '../services/trayDevice.service';
 import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
 import { removeMemberFromOrganization } from '../services/memberRemoval.service';
 import { isValidTier, TIER_SEAT_LIMITS, TIER_LABELS } from '../config/subscriptionTiers';
+import AuditLog from '../models/AuditLog.model';
+import { owedByDealership } from '../services/dealershipPayouts.service';
 
 export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
     const organizations = await Organization.find({ status: { $ne: 'suspended' } })
@@ -244,6 +246,26 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
         return;
     }
 
+    // SuprahPay (2026-11-23): warn before deleting a dealership Suprah still
+    // owes money to. The super admin can confirm and delete anyway; that money
+    // then has to be paid by hand in Stripe, so the amount is recorded.
+    const owed = (await owedByDealership([{ _id: id, payoutsStartAt: org.suprahPay?.payoutsStartAt }], new Date())).get(String(id));
+    const owedAmount = owed && owed.amount > 0 ? owed.amount : 0;
+    const heldCount = owed?.heldCount ?? 0;
+    const owedConfirmed = req.query.confirmOwed === 'true' || req.body?.confirmOwed === true;
+    if ((owedAmount > 0 || heldCount > 0) && !owedConfirmed) {
+        const parts = [
+            owedAmount > 0 ? `$${owedAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} from SuprahPay card payments` : '',
+            heldCount > 0 ? `${heldCount} payment${heldCount === 1 ? '' : 's'} on hold for a card dispute` : '',
+        ].filter(Boolean);
+        res.status(409).json({
+            success: false,
+            message: `Suprah still owes ${org.name} ${parts.join(', plus ')}. Send their payout first in Admin, SuprahPay. To delete anyway, send the request again with confirmOwed=true; that money then has to be paid to them by hand in Stripe.`,
+            data: { owedAmount, heldCount },
+        });
+        return;
+    }
+
     const affectedUserIds = await User.find({
         $or: [
             { organizationId: id },
@@ -270,6 +292,20 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
 
     await Organization.findByIdAndDelete(id);
     invalidateActiveOrganizations();
+    if (owedAmount > 0 || heldCount > 0) {
+        logger.warn({ orgId: id, owedAmount, heldCount }, 'Dealership deleted while SuprahPay still owed it money');
+        AuditLog.create({
+            entityType: 'Organization',
+            entityId: String(id),
+            organizationId: String(id),
+            action: 'DELETE',
+            reason: 'Dealership deleted while SuprahPay still owed it money: pay it by hand in Stripe',
+            performedBy: req.user?._id ? String(req.user._id) : undefined,
+            changes: { organizationName: org.name, owedAmount, heldCount },
+        }).catch((error: unknown) => {
+            logger.error({ error, orgId: id }, 'Non-fatal: failed to record the SuprahPay amount owed to a deleted dealership');
+        });
+    }
 
     // Drivers with a pending request on a removed load must see it disappear.
     const io = getSocketIO();
