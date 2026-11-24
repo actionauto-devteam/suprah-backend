@@ -21,7 +21,7 @@ import {
   remainingRefundable,
   roundCents,
 } from '../utils/paymentRefund';
-import { CUSTOMER_INVOICE_FIELDS, customerInvoiceView, isAwaitingPayment } from '../utils/customerPayments';
+import { AWAITING_PAYMENT_STATUSES, CUSTOMER_INVOICE_FIELDS, customerInvoiceView, isAwaitingPayment } from '../utils/customerPayments';
 import { claimFailed, claimPaid } from '../utils/paymentPaid';
 import {
   KEPT_AMOUNT,
@@ -106,6 +106,17 @@ async function afterPaid(payment: any, source: string) {
  * when something changed (opened, won or lost). The same news arriving twice
  * tells nobody twice.
  */
+/** Suprah's invoice id saved on a Stripe payment, or null when there isn't a usable one. */
+async function invoiceIdOnStripePayment(paymentIntentId: string): Promise<string | null> {
+  try {
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    const id = intent?.metadata?.paymentId;
+    return id && mongoose.isValidObjectId(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 async function recordDispute(dispute: Stripe.Dispute) {
   const piId = typeof dispute.payment_intent === 'string' ? dispute.payment_intent : dispute.payment_intent?.id;
   const chargeId = typeof dispute.charge === 'string' ? dispute.charge : dispute.charge?.id;
@@ -117,7 +128,13 @@ async function recordDispute(dispute: Stripe.Dispute) {
 
   const details: StripeDisputeLike = { id: dispute.id, status: dispute.status, amount: dispute.amount, reason: dispute.reason };
   // Returns the invoice as it was before this update, to tell what changed.
-  const before = await Payment.findOneAndUpdate({ $or: match }, disputeUpdate(details, new Date()), { new: false });
+  let before = await Payment.findOneAndUpdate({ $or: match }, disputeUpdate(details, new Date()), { new: false });
+  if (!before && piId) {
+    // The paid notice may never have arrived, so the card payment isn't on the
+    // invoice yet; Stripe's payment carries Suprah's invoice id (2026-11-23).
+    const invoiceId = await invoiceIdOnStripePayment(piId);
+    if (invoiceId) before = await Payment.findOneAndUpdate({ _id: invoiceId }, disputeUpdate(details, new Date()), { new: false });
+  }
   if (!before) {
     logger.warn({ disputeId: dispute.id }, 'Stripe dispute for a payment Suprah does not know');
     return;
@@ -452,7 +469,9 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
 // ─── Get Pending Payments ─────────────────────────────────────────────────────
 const getPendingPayments = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
-  const payments = await Payment.find({ organizationId: orgId, status: { $in: ['pending', 'failed'] } })
+  // The same invoices as the customer's "To pay" list (2026-11-23): not paid
+  // yet, failed, or a payment the customer started but didn't finish.
+  const payments = await Payment.find({ organizationId: orgId, status: { $in: [...AWAITING_PAYMENT_STATUSES] } })
     .populate('quoteId', 'firstName lastName vehicleName')
     .sort({ dueDate: 1, createdAt: -1 })
     .lean();
@@ -508,13 +527,7 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
     } catch { /* expired — create new */ }
   }
 
-  let stripeCustomerId = payment.stripeCustomerId;
-  if (!stripeCustomerId) {
-    const customers = await stripe.customers.list({ email: payment.customerEmail, limit: 1 });
-    stripeCustomerId = customers.data.length > 0
-      ? customers.data[0].id
-      : (await stripe.customers.create({ name: payment.customerName, email: payment.customerEmail, phone: payment.customerPhone, metadata: { organizationId: orgId } })).id;
-  }
+  const stripeCustomerId = await stripeCustomerFor(payment);
 
   const paymentIntent = await stripe.paymentIntents.create({
     amount: Math.round(payment.amount * 100),
@@ -531,23 +544,40 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, { clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id }, 'Payment intent created successfully'));
 });
 
+// ─── The invoice's Stripe customer ────────────────────────────────────────────
+/**
+ * The saved Stripe customer while Stripe still has it; otherwise the one with
+ * the invoice's email, or a new one (2026-11-23). A customer saved under
+ * another Stripe account (for example before a move to a new account) no
+ * longer exists, and reusing it would stop the invoice from being paid.
+ */
+async function stripeCustomerFor(payment: any): Promise<string> {
+  const saved = payment.stripeCustomerId;
+  if (saved) {
+    try {
+      const existing = await stripe.customers.retrieve(saved);
+      if (!(existing as Stripe.DeletedCustomer).deleted) return saved;
+    } catch (error: any) {
+      if (error?.code !== 'resource_missing') throw error;
+    }
+  }
+  const customers = await stripe.customers.list({ email: payment.customerEmail, limit: 1 });
+  if (customers.data.length > 0) return customers.data[0].id;
+  const created = await stripe.customers.create({
+    name: payment.customerName,
+    email: payment.customerEmail,
+    phone: payment.customerPhone,
+    metadata: { organizationId: String(payment.organizationId) },
+  });
+  return created.id;
+}
+
 // ─── Build a hosted Stripe Checkout Session for an invoice ────────────────────
 // Charges exactly `payment.amount` as a single Checkout line so the total always
 // matches the invoice (the itemised breakdown lives in our own UI). Used by both
 // the customer "Pay Now" button and "Buy Now".
 async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Session> {
-  let stripeCustomerId = payment.stripeCustomerId;
-  if (!stripeCustomerId) {
-    const customers = await stripe.customers.list({ email: payment.customerEmail, limit: 1 });
-    stripeCustomerId = customers.data.length > 0
-      ? customers.data[0].id
-      : (await stripe.customers.create({
-          name: payment.customerName,
-          email: payment.customerEmail,
-          phone: payment.customerPhone,
-          metadata: { organizationId: payment.organizationId },
-        })).id;
-  }
+  const stripeCustomerId = await stripeCustomerFor(payment);
 
   // SuprahPay branding with the dealership's name (2026-11-21): the payment
   // page, Stripe's receipt and the card statement say which dealership it's for.
@@ -621,7 +651,15 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
  */
 async function settleEarlierCheckout(payment: any): Promise<'paid' | 'closed' | 'none'> {
   if (!payment.stripeCheckoutSessionId) return 'none';
-  let session = await stripe.checkout.sessions.retrieve(payment.stripeCheckoutSessionId);
+  let session: Stripe.Checkout.Session;
+  try {
+    session = await stripe.checkout.sessions.retrieve(payment.stripeCheckoutSessionId);
+  } catch (error: any) {
+    // A page Stripe no longer has (for example one made under another Stripe
+    // account) has nothing to settle or close (2026-11-23).
+    if (error?.code === 'resource_missing') return 'none';
+    throw error;
+  }
   if (session.status === 'open') {
     try {
       session = await stripe.checkout.sessions.expire(session.id);
@@ -790,13 +828,39 @@ const cancelPayment = asyncHandler(async (req: Request, res: Response) => {
   const payment = await Payment.findOne({ _id: id, organizationId: orgId });
   if (!payment) throw new ApiError(404, 'Payment not found');
   if (payment.status === 'succeeded') throw new ApiError(400, 'Cannot cancel a completed payment. Use refund instead.');
+  // Only an invoice still waiting for payment can be cancelled (2026-11-23):
+  // a refunded or cancelled one keeps its status, so payouts stay right.
+  if (!isAwaitingPayment(payment.status)) {
+    throw new ApiError(400, "Only an invoice that's still waiting for payment can be cancelled.");
+  }
+
+  // Close the customer's Stripe payment page if it's still open, so a
+  // cancelled invoice can't be paid there (the customer's own Cancel does the
+  // same). If they've just paid, the invoice is marked paid instead.
+  let earlier: Awaited<ReturnType<typeof settleEarlierCheckout>>;
+  try {
+    earlier = await settleEarlierCheckout(payment);
+  } catch {
+    throw new ApiError(409, "The customer's payment page couldn't be checked, so the invoice wasn't cancelled. Try again in a moment.");
+  }
+  if (earlier === 'paid') {
+    throw new ApiError(409, 'The customer has just paid this invoice, so it was marked paid instead of cancelled. Refresh to see it.');
+  }
 
   if (payment.stripePaymentIntentId) {
     try { await stripe.paymentIntents.cancel(payment.stripePaymentIntentId); } catch { /* already cancelled */ }
   }
 
+  // Cancelled only if it's still waiting: a payment confirmed a moment ago wins.
+  const cancelled = await Payment.findOneAndUpdate(
+    { _id: payment._id, organizationId: orgId, status: { $in: [...AWAITING_PAYMENT_STATUSES] } },
+    { $set: { status: 'cancelled' } },
+    { new: true },
+  );
+  if (!cancelled) {
+    throw new ApiError(409, 'This invoice changed a moment ago (it may have just been paid). Refresh to see it.');
+  }
   payment.status = 'cancelled';
-  await payment.save();
 
   notifyOrgAdmins(orgId, 'general', 'Payment Cancelled',
     `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} was cancelled.`,
@@ -861,6 +925,10 @@ const refundPayment = asyncHandler(async (req: Request, res: Response) => {
     { paymentId: payment._id.toString() },
   );
 
+  // The customer is told too (decision B5): how much, from which dealership,
+  // and that it can take 5-10 business days to show on their card.
+  void notifyCustomerOfRefund(saved ?? payment, refunded, orgId);
+
   await activityService.createActivity({
     userId: (req.user?._id as any).toString(),
     organizationId: orgId, type: 'wallet_adjustment',
@@ -872,6 +940,42 @@ const refundPayment = asyncHandler(async (req: Request, res: Response) => {
   logger.info({ paymentId: payment._id, amount: refunded, full: state.fullyRefunded }, 'Payment refunded');
   res.json(new ApiResponse(200, saved ?? payment, state.fullyRefunded ? 'Payment refunded' : 'Payment partly refunded'));
 });
+
+/**
+ * Tells the customer their refund is on its way (2026-11-23, decision B5).
+ * Only a verified account with the invoice's email gets it, the same rule as
+ * seeing the invoice. A failed notice never undoes the refund.
+ */
+async function notifyCustomerOfRefund(
+  payment: { _id: unknown; customerEmail?: string; description?: string; invoiceNumber?: string },
+  refunded: number,
+  orgId: string,
+) {
+  try {
+    const email = String(payment.customerEmail ?? '').toLowerCase();
+    if (!email) return;
+    const customer = await User.findOne({ email, emailVerified: true }).select('_id').lean();
+    if (!customer) return;
+    const dealership = await Organization.findById(orgId).select('name').lean();
+    const from = dealership?.name ? ` by ${dealership.name}` : '';
+    const what = payment.description ? ` for "${payment.description}"` : '';
+    await safeCreateNotification({
+      userId: customer._id as any,
+      organizationId: orgId,
+      type: 'payment_refunded',
+      title: 'Your refund is on its way',
+      message: `$${refunded.toFixed(2)} was refunded to you${from}${what}. It can take 5–10 business days to show on your card.`,
+      metadata: {
+        paymentId: String(payment._id),
+        invoiceNumber: payment.invoiceNumber,
+        amount: refunded,
+        route: '/customer/payments',
+      },
+    });
+  } catch {
+    logger.warn({ paymentId: String(payment._id) }, 'Customer refund notice not sent');
+  }
+}
 
 // ─── Update Payment ───────────────────────────────────────────────────────────
 const updatePayment = asyncHandler(async (req: Request, res: Response) => {
@@ -957,7 +1061,8 @@ const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, {
     byStatus: formatted, totalCount, totalRevenue,
-    pendingAmount: formatted.pending.totalAmount + formatted.failed.totalAmount,
+    // Everything still to be paid, the same invoices as Awaiting payment (2026-11-23).
+    pendingAmount: roundCents(formatted.pending.totalAmount + formatted.failed.totalAmount + formatted.processing.totalAmount),
     monthlyRevenue: fillMonthlyRevenue(trend.months, monthlyRows),
   }, 'Payment statistics fetched successfully'));
 });
@@ -1092,8 +1197,9 @@ const requestPaymentFromCustomer = asyncHandler(async (req: Request, res: Respon
   const dealerName = dealership.name || dealer?.name || 'the dealer';
 
   await safeCreateNotification({
-    userId: customer._id as any, organizationId: orgId, type: 'payment_request', title: 'Payment Request',
-    message: `You have a pending payment of $${payment.amount.toFixed(2)} for "${payment.description}" from ${dealerName}. Please log in to complete your payment.`,
+    // SuprahPay branding with the dealership's name (decision B8, 2026-11-23).
+    userId: customer._id as any, organizationId: orgId, type: 'payment_request', title: `SuprahPay invoice from ${dealerName}`,
+    message: `${dealerName} sent you an invoice of $${payment.amount.toFixed(2)} for "${payment.description}". Open SuprahPay to pay it.`,
     metadata: { paymentId: payment._id.toString(), amount: payment.amount, description: payment.description, invoiceNumber: payment.invoiceNumber, route: '/customer/payments' },
   });
 
@@ -1123,7 +1229,8 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
     p.dealershipName = dealershipNames.get(String(p.organizationId)) || undefined;
   }
 
-  const totalOwed = payments.filter(p => p.status === 'pending' || p.status === 'failed').reduce((s, p) => s + p.amount, 0);
+  // Owed = the "To pay" list, so the total and the list always agree (2026-11-23).
+  const totalOwed = roundCents(payments.filter(p => isAwaitingPayment(p.status)).reduce((s, p) => s + p.amount, 0));
   // Paid minus anything refunded to them since.
   const totalPaid = roundCents(
     payments.filter(p => p.status === 'succeeded').reduce((s, p) => s + keptAmount(p), 0),
@@ -1163,13 +1270,7 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
     } catch { /* create new */ }
   }
 
-  let stripeCustomerId = payment.stripeCustomerId;
-  if (!stripeCustomerId) {
-    const customers = await stripe.customers.list({ email: payment.customerEmail, limit: 1 });
-    stripeCustomerId = customers.data.length > 0
-      ? customers.data[0].id
-      : (await stripe.customers.create({ name: payment.customerName, email: payment.customerEmail, phone: payment.customerPhone })).id;
-  }
+  const stripeCustomerId = await stripeCustomerFor(payment);
 
   const paymentIntent = await stripe.paymentIntents.create({
     amount: Math.round(payment.amount * 100),

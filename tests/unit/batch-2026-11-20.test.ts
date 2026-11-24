@@ -7,7 +7,7 @@ jest.mock('stripe', () => {
     webhooks: { constructEvent: jest.fn() },
     paymentIntents: { retrieve: jest.fn(), create: jest.fn(), cancel: jest.fn() },
     charges: { retrieve: jest.fn() },
-    customers: { list: jest.fn(), create: jest.fn() },
+    customers: { list: jest.fn(), create: jest.fn(), retrieve: jest.fn((id: string) => Promise.resolve({ id })) },
     checkout: { sessions: { retrieve: jest.fn(), create: jest.fn(), expire: jest.fn() } },
   };
   return { __esModule: true, default: jest.fn(() => instance), instance };
