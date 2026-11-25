@@ -392,3 +392,42 @@ describe("batch 8: customers and Suprah's invoices", () => {
     expect(payments.findOne.mock.calls[0][0]).toEqual({ _id: '64b7f0c2a1b2c3d4e5f60b02', organizationId: SUPRAH_BILLING_ORG, forOrganizationId: ORG_ID, billedTo: 'dealership' });
   });
 });
+
+describe("Stripe's payment page: cards only, and closing it leaves the invoice due", () => {
+  it('opens with cards only (no Link, bank or Klarna), in US dollars, without changing the invoice', async () => {
+    suprahPay();
+    payments.findById.mockResolvedValueOnce({ _id: 'pay-1', amount: 10, status: 'pending', organizationId: ORG_ID, customerEmail: 'pat@example.com', customerName: 'Pat', stripeCustomerId: 'cus_1' });
+    stripe.checkout.sessions.create.mockResolvedValueOnce({ id: 'cs_1', url: 'https://checkout.example/cs_1' });
+    payments.findOneAndUpdate.mockResolvedValueOnce({ _id: 'pay-1', status: 'pending' });
+    const { error } = await call(paymentController.createCustomerCheckoutSession, { user: { email: 'pat@example.com' }, body: { paymentId: 'pay-1' } });
+    expect(error).toBeUndefined();
+    const params = stripe.checkout.sessions.create.mock.calls[0][0];
+    expect(params.payment_method_types).toEqual(['card']);
+    expect(params.wallet_options).toEqual({ link: { display: 'never' } });
+    expect(params.adaptive_pricing).toEqual({ enabled: false });
+    expect(payments.findOneAndUpdate.mock.calls[0][1]).toEqual({ $set: { stripeCheckoutSessionId: 'cs_1', stripeCustomerId: 'cus_1' } });
+  });
+
+  it('a "Payment started" invoice whose Stripe page was closed goes back to due; a paid one shows paid; a bank still processing stays', async () => {
+    payments.find.mockReturnValueOnce(q([
+      { _id: 'p-closed', status: 'processing', stripeCheckoutSessionId: 'cs_closed', organizationId: ORG_ID, amount: 10 },
+      { _id: 'p-paid', status: 'processing', stripeCheckoutSessionId: 'cs_paid', organizationId: ORG_ID, amount: 20 },
+      { _id: 'p-bank', status: 'processing', stripeCheckoutSessionId: 'cs_old', stripePaymentIntentId: 'pi_bank', organizationId: ORG_ID, amount: 30 },
+    ]));
+    orgs.find.mockReturnValueOnce(q([{ _id: ORG_ID, name: 'Action Auto Utah' }]));
+    stripe.checkout.sessions.retrieve.mockImplementation((id: string) => Promise.resolve(
+      id === 'cs_paid' ? { id, payment_status: 'paid', payment_intent: 'pi_paid' } : { id, status: 'open', payment_status: 'unpaid' },
+    ));
+    stripe.paymentIntents.retrieve.mockResolvedValueOnce({ id: 'pi_bank', status: 'processing' });
+    payments.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    payments.findOneAndUpdate.mockResolvedValueOnce({ _id: 'p-paid', status: 'succeeded', organizationId: ORG_ID, amount: 20, customerName: 'Pat' });
+
+    const { res } = await call(paymentController.getMyPaymentsAsCustomer, { user: { email: 'pat@example.com' } });
+    const status = Object.fromEntries(res.body.data.payments.map((p: any) => [p._id, p.status]));
+    expect(status).toEqual({ 'p-closed': 'pending', 'p-paid': 'succeeded', 'p-bank': 'processing' });
+    expect(payments.updateOne).toHaveBeenCalledTimes(1);
+    expect(payments.updateOne).toHaveBeenCalledWith({ _id: 'p-closed', status: 'processing' }, { $set: { status: 'pending' } });
+    // Stripe's ids are only used here, never sent to the customer.
+    expect(JSON.stringify(res.body.data)).not.toMatch(/cs_closed|pi_bank/);
+  });
+});

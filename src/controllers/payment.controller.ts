@@ -601,13 +601,13 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
 /**
  * Records a card form payment on the invoice, but only while the invoice is
  * still waiting for payment (2026-11-25): a payment confirmed a moment ago is
- * never turned back into "payment started". Otherwise the new card payment is
- * cancelled and the request refused.
+ * never overwritten. Otherwise the new card payment is cancelled and the
+ * request refused. The invoice stays due until the card payment goes through.
  */
 async function startCardPayment(paymentId: unknown, paymentIntentId: string, stripeCustomerId: string) {
   const started = await Payment.findOneAndUpdate(
     { _id: paymentId, status: { $in: [...AWAITING_PAYMENT_STATUSES] } },
-    { $set: { stripePaymentIntentId: paymentIntentId, stripeCustomerId, status: 'processing' } },
+    { $set: { stripePaymentIntentId: paymentIntentId, stripeCustomerId } },
     { new: true },
   );
   if (started) return started;
@@ -704,6 +704,11 @@ async function buildCheckoutSession(
     customer: stripeCustomerId,
     // Card only (2026-11-21); Apple Pay and Google Pay come with cards.
     payment_method_types: ['card'],
+    // Not Stripe's Link wallet: it would also offer bank payments and Klarna
+    // (cards only, confirmed 2026-11-25).
+    wallet_options: { link: { display: 'never' } },
+    // US dollars only (2026-11-21): no paying in the customer's local currency.
+    adaptive_pricing: { enabled: false },
     line_items: [
       {
         quantity: 1,
@@ -746,10 +751,13 @@ async function buildCheckoutSession(
   }
 
   // Only an invoice still waiting for payment (2026-11-25): one paid a moment
-  // ago is never turned back into "payment started", and the new page closes.
+  // ago is never overwritten, and the new page closes. The invoice stays due
+  // while the page is open: nobody can tell if the customer closes Stripe's
+  // tab, and Stripe's paid notice (or Pay again, which closes this page
+  // first) settles it.
   const opened = await Payment.findOneAndUpdate(
     { _id: payment._id, status: { $in: [...AWAITING_PAYMENT_STATUSES] } },
-    { $set: { stripeCheckoutSessionId: session.id, stripeCustomerId, status: 'processing' } },
+    { $set: { stripeCheckoutSessionId: session.id, stripeCustomerId } },
     { new: true },
   );
   if (!opened) {
@@ -842,7 +850,7 @@ const leaveCheckout = asyncHandler(async (req: Request, res: Response) => {
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
     throw new ApiError(403, 'You are not authorized to change this invoice');
   }
-  if (payment.status !== 'processing' || !payment.stripeCheckoutSessionId) {
+  if (!isAwaitingPayment(payment.status) || !payment.stripeCheckoutSessionId) {
     return res.json(new ApiResponse(200, { status: payment.status }, 'Nothing to change'));
   }
 
@@ -1400,10 +1408,24 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
   // "Total paid" needs (those two are left out of what is sent back).
   // A dealership's own bills from Suprah aren't a person's invoices (2026-11-25).
   const payments = await Payment.find({ customerEmail: user.email.toLowerCase(), billedTo: { $ne: 'dealership' } })
-    .select([...CUSTOMER_INVOICE_FIELDS, 'disputeStatus', 'disputedAmount', 'organizationId'].join(' '))
+    .select([...CUSTOMER_INVOICE_FIELDS, 'disputeStatus', 'disputedAmount', 'organizationId', 'stripeCheckoutSessionId', 'stripePaymentIntentId'].join(' '))
     .populate('aftermarketProductId', 'name media')
     .sort({ createdAt: -1 })
     .lean();
+
+  // Invoices left at "Payment started" by a Stripe page the customer closed
+  // go back to due, or to paid if Stripe says so (2026-11-25). The Stripe ids
+  // read for this are never sent back (customerInvoiceView).
+  const settled = await releaseAbandonedCheckouts(
+    payments.filter((p) => p.status === 'processing' && p.stripeCheckoutSessionId).slice(0, 5),
+  );
+  for (const p of payments as Array<Record<string, unknown>>) {
+    const now = settled.get(String(p._id));
+    if (now) {
+      p.status = now;
+      if (now === 'succeeded') p.paidAt = new Date();
+    }
+  }
 
   // Each invoice shows the dealership it's from (2026-11-21): one lookup for all of them.
   const orgIds = [...new Set(payments.map((p) => String(p.organizationId)).filter((id) => mongoose.isValidObjectId(id)))];
@@ -1431,6 +1453,45 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
     'Payments fetched successfully',
   ));
 });
+
+/**
+ * "Payment started" invoices whose Stripe page wasn't paid (the customer
+ * closed the tab, or it expired) go back to due; one Stripe says was paid is
+ * marked paid, once. A card form payment that's really going through (a bank
+ * still processing it) stays as it is. A few at a time; never blocks the list.
+ */
+async function releaseAbandonedCheckouts(
+  started: Array<{ _id: unknown; stripeCheckoutSessionId?: string | null; stripePaymentIntentId?: string | null }>,
+): Promise<Map<string, 'pending' | 'succeeded'>> {
+  const settled = new Map<string, 'pending' | 'succeeded'>();
+  try {
+    for (const payment of started) {
+      if (!payment.stripeCheckoutSessionId) continue;
+      try {
+        const session = await stripe.checkout.sessions.retrieve(payment.stripeCheckoutSessionId);
+        if (session.payment_status === 'paid') {
+          const piId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+          const claimed = await claimPaid({ _id: payment._id }, { stripeCheckoutSessionId: session.id, ...(piId ? { stripePaymentIntentId: piId } : {}) });
+          // Paid, whatever happens to the follow-ups (notices, rewards).
+          settled.set(String(payment._id), 'succeeded');
+          if (claimed) await afterPaid(claimed, 'STRIPE_CHECKOUT_CHECK');
+          continue;
+        }
+        if (payment.stripePaymentIntentId) {
+          const intent = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
+          if (intent.status === 'processing') continue;
+        }
+        const back = await Payment.updateOne({ _id: payment._id, status: 'processing' }, { $set: { status: 'pending' } });
+        if (back?.modifiedCount) settled.set(String(payment._id), 'pending');
+      } catch {
+        // Checked again the next time the customer opens SuprahPay.
+      }
+    }
+  } catch (error) {
+    logger.warn({ err: (error as Error)?.message }, 'Could not check payment pages left open');
+  }
+  return settled;
+}
 
 // ─── Customer: Create Payment Intent (legacy Elements path, kept) ─────────────
 const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Response) => {
@@ -1701,7 +1762,7 @@ const paySuprahBill = asyncHandler(async (req: Request, res: Response) => {
 // POST /api/payments/suprah-bills/:id/check — back from Stripe's page: paid, or put back to unpaid.
 const checkSuprahBill = asyncHandler(async (req: Request, res: Response) => {
   const bill = await dealershipBill(req);
-  if (bill.status !== 'processing' || !bill.stripeCheckoutSessionId) {
+  if (!isAwaitingPayment(bill.status) || !bill.stripeCheckoutSessionId) {
     return res.json(new ApiResponse(200, { status: bill.status }, 'Bill status'));
   }
   const session = await stripe.checkout.sessions.retrieve(bill.stripeCheckoutSessionId);
