@@ -7,14 +7,17 @@ import Organization from '../models/Organization.model';
 import { suprahPayOn } from '../services/suprahPaySettings.service';
 import {
   checkSendingPayout,
+  confirmPayoutAccount,
   owedByDealership,
   payoutAccountFor,
   payoutAccountLink,
+  payoutAccountForAdmin,
   recentPayouts,
   sendDealershipPayout,
   weekStartUtah,
 } from '../services/dealershipPayouts.service';
 import { isDealershipAdmin } from './suprahPaySettings.controller';
+import { payoutAccountHold } from '../utils/dealershipPayouts';
 
 /**
  * Suprah's weekly payouts to dealerships (2026-11-21). Dealership routes sit
@@ -38,7 +41,8 @@ export const getDealershipPayoutAccount = asyncHandler(async (req: Request, res:
 /** POST /api/payments/payout-account/connect (dealership admins): a Stripe setup link. */
 export const connectDealershipPayoutAccount = asyncHandler(async (req: Request, res: Response) => {
   if (!isDealershipAdmin(req)) throw new ApiError(403, "Only your dealership's admins can set up the payout account.");
-  const url = await payoutAccountLink(orgIdOf(req), req.user?.email);
+  // Who set it up goes in the alert to the dealership's admins (2026-11-23).
+  const url = await payoutAccountLink(orgIdOf(req), { email: req.user?.email, name: req.user?.name });
   res.json(new ApiResponse(200, { url }, 'Payout account setup link'));
 });
 
@@ -122,6 +126,9 @@ export const listPayoutsForAdmin = asyncHandler(async (_req: Request, res: Respo
         archived: org.status === 'archived',
         suprahPayOn: suprahPayOn(org),
         payoutAccountConnected: !!org.suprahPay?.stripeAccountId,
+        // Held until a super admin confirms the payout account (2026-11-23).
+        payoutAccountHold: payoutAccountHold(org.suprahPay),
+        payoutAccountSetAt: org.suprahPay?.payoutAccountSetAt ?? null,
         sending: !!org.suprahPay?.payoutClaimedAt,
         amount: row?.amount ?? 0,
         paymentsTotal: row?.paymentsTotal ?? 0,
@@ -150,6 +157,17 @@ export const listPayoutsForAdmin = asyncHandler(async (_req: Request, res: Respo
 export const sendPayoutForAdmin = asyncHandler(async (req: Request, res: Response) => {
   const payout = await sendDealershipPayout(req.params.orgId, req.body?.amount, String(req.user?._id));
   res.json(new ApiResponse(200, payout, 'Payout sent'));
+});
+
+/** GET /api/admin/suprahpay/payouts/:orgId/payout-account — what to check before confirming it. */
+export const getPayoutAccountForAdmin = asyncHandler(async (req: Request, res: Response) => {
+  res.json(new ApiResponse(200, await payoutAccountForAdmin(req.params.orgId), 'Payout account'));
+});
+
+/** POST /api/admin/suprahpay/payouts/:orgId/confirm-account  { bankId } — the bank the super admin checked. */
+export const confirmPayoutAccountForAdmin = asyncHandler(async (req: Request, res: Response) => {
+  const result = await confirmPayoutAccount(req.params.orgId, req.body?.bankId, String(req.user?._id));
+  res.json(new ApiResponse(200, result, 'Payout account confirmed'));
 });
 
 /** POST /api/admin/suprahpay/payouts/record/:payoutId/check — a payout Stripe didn't confirm. */
