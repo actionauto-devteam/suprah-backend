@@ -29,6 +29,12 @@ import { closeOpenPaymentPages } from '../controllers/payment.controller';
 
 /** The billing fields that are left out of load reads unless named. */
 export const BILLING_PRIVATE_FIELDS = '+billing.customerName +billing.customerEmail +billing.shippingPrice';
+/**
+ * Every billing field, hidden ones included, named one by one. Never
+ * "billing" together with its hidden fields: the database refuses a read that
+ * asks for a section and a field inside it ("path collision").
+ */
+export const BILLING_ALL_FIELDS = `billing.billTo billing.method billing.outside billing.invoiceId billing.cashConfirmedAt billing.cashNotReceivedAt billing.cashCustomerConfirmedAt billing.decidedAt billing.decidedBy ${BILLING_PRIVATE_FIELDS}`;
 
 const money = (value: number) => `$${value.toFixed(2)}`;
 
@@ -40,7 +46,7 @@ export async function loadBillingOn(orgId: string): Promise<boolean> {
 }
 
 async function loadWithBilling(loadId: unknown) {
-  return Load.findById(loadId).select(`organizationId loadNumber status quoteId createdBy pricing billing ${BILLING_PRIVATE_FIELDS}`);
+  return Load.findById(loadId).select(`organizationId loadNumber status quoteId createdBy pricing ${BILLING_ALL_FIELDS}`);
 }
 
 /** The load's automatic invoice, if it has one. */
@@ -222,10 +228,10 @@ export async function setLoadBilling(loadId: unknown, organizationId: string, in
     if ((await cancelLoadInvoice(load._id)) === 'paid') {
       throw new ApiError(409, "This load's shipping was paid a moment ago, so it stays paid through SuprahPay. Refresh the load.");
     }
-    return Load.findById(load._id).select(`billing ${BILLING_PRIVATE_FIELDS}`).lean();
+    return Load.findById(load._id).select(BILLING_ALL_FIELDS).lean();
   }
   await issueLoadInvoice(load._id);
-  return Load.findById(load._id).select(`billing ${BILLING_PRIVATE_FIELDS}`).lean();
+  return Load.findById(load._id).select(BILLING_ALL_FIELDS).lean();
 }
 
 /**

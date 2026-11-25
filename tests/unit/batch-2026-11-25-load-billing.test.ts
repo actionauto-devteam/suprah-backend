@@ -449,3 +449,20 @@ describe("Stripe's payment page: the dealership's name, cards only, and back to 
     expect(payments.findOneAndUpdate.mock.calls[0][0]).toMatchObject({ _id: 'p-paid' });
   });
 });
+
+describe("batch 8: reading a load's billing from the database", () => {
+  it('never asks for "billing" and a field inside it together (the database refuses that: path collision)', () => {
+    const { BILLING_ALL_FIELDS } = jest.requireActual('../../src/services/loadBilling.service');
+    const RealLoad = jest.requireActual('../../src/models/Load.model').default;
+    for (const select of [`organizationId loadNumber status quoteId createdBy pricing ${BILLING_ALL_FIELDS}`, BILLING_ALL_FIELDS]) {
+      const query = RealLoad.findById('64b7f0c2a1b2c3d4e5f60a01').select(select);
+      query._applyPaths();
+      const paths = Object.keys(query._fields);
+      for (const path of paths) {
+        expect(paths.filter((other: string) => other.startsWith(`${path}.`))).toEqual([]);
+      }
+      // The hidden customer details and the invoice are both read.
+      expect(paths).toEqual(expect.arrayContaining(['billing.customerEmail', 'billing.shippingPrice', 'billing.invoiceId', 'billing.method']));
+    }
+  });
+});
