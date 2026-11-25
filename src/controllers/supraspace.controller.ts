@@ -14,7 +14,7 @@ import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
 import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
-import { emitPresenceUpdate, emitToCrmUser } from '../utils/socketEmitter';
+import { emitPresenceUpdate, emitToCrmUser, emitToUser } from '../utils/socketEmitter';
 import profileService from '../services/profile.service';
 import { storageService, BucketType } from '../services/storage.service';
 import { getCachedSignedUrl } from '../utils/signedUrlCache';
@@ -757,6 +757,34 @@ async function notifyMentionedMembers(params: {
   }
 }
 
+function messageReactionNoticeKey(targetUserId: string, messageId: string, reactorId: string, emoji: string) {
+  return `supraspace-reaction:${targetUserId}:${messageId}:${reactorId}:${emoji}`;
+}
+
+async function withdrawMessageReactionNotice(params: {
+  targetUserId: string;
+  reactorId: string;
+  emoji: string;
+  messageId: string;
+}) {
+  try {
+    if (!params.targetUserId || params.targetUserId === params.reactorId) return;
+    const notices = await Notification.find({
+      userId: params.targetUserId,
+      dedupeKey: messageReactionNoticeKey(params.targetUserId, params.messageId, params.reactorId, params.emoji),
+    }).select('_id').lean();
+    if (!notices.length) return;
+    await Notification.deleteMany({ _id: { $in: notices.map((notice: any) => notice._id) } });
+    notices.forEach((notice: any) => {
+      const notificationId = notice._id.toString();
+      emitToUser(params.targetUserId, 'notification:deleted', { notificationId });
+      emitToCrmUser(params.targetUserId, 'crm:notification:deleted', { notificationId });
+    });
+  } catch (err) {
+    logger.warn({ err, messageId: params.messageId }, '[SupraSpace] Failed to withdraw message reaction notification');
+  }
+}
+
 async function notifyMessageReaction(params: {
   conversation: any;
   targetUserId: string;
@@ -793,7 +821,7 @@ async function notifyMessageReaction(params: {
         reaction: params.emoji,
         reactorId: params.reactorId,
       },
-      dedupeKey: `supraspace-reaction:${params.targetUserId}:${params.messageId}:${params.reactorId}:${params.emoji}`,
+      dedupeKey: messageReactionNoticeKey(params.targetUserId, params.messageId, params.reactorId, params.emoji),
       groupWindowMinutes: 5,
     });
   } catch (err) {
@@ -2791,6 +2819,12 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
       organizationId: (req.crmUser!.organizationId as any).toString(),
     });
   } else if (reactionRemoved) {
+    void withdrawMessageReactionNotice({
+      targetUserId,
+      reactorId: userId.toString(),
+      emoji: emojiValue,
+      messageId: messageIdString,
+    });
     const storedReaction = (conversation as any).lastReaction;
     const shouldClearLastReaction =
       storedReaction?.messageId?.toString?.() === messageIdString &&
