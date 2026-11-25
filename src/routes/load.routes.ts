@@ -5,6 +5,7 @@ import loadCalendarController from "../controllers/loadCalendar.controller";
 import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
 import authorize from "../middleware/role.middleware";
+import { requireFinanceAccess } from "../utils/financeAccess";
 import { uploadProofImage, validateUploadedImageContent } from "../middleware/upload.middleware";
 import { mapPlaceLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
 import mapPlacesController from "../controllers/mapPlaces.controller";
@@ -68,8 +69,10 @@ router
   .put(staffOnly, loadController.updateLoad)
   .delete(staffOnly, loadController.deleteLoad);
 
-// Who pays for the load's shipping (SuprahPay, 2026-11-25).
-router.put("/:id/billing", staffOnly, loadController.updateLoadBilling);
+// Who pays for the load's shipping (SuprahPay, 2026-11-25). It sends or
+// cancels invoices, so like every invoice action it's for dealership admins
+// and staff with Finance access (decision B4).
+router.put("/:id/billing", staffOnly, requireFinanceAccess, loadController.updateLoadBilling);
 
 router.post("/:id/notes", staffOnly, loadController.addNote);
 

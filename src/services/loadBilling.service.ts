@@ -71,8 +71,8 @@ async function announceInvoice(
     userId: customer._id as any,
     organizationId: load.organizationId,
     type: 'payment_request',
-    title: 'SuprahPay invoice for your shipment',
-    message: `Suprah AI sent you an invoice of ${money(invoice.amount)} for shipping your vehicle${dealershipName ? ` with ${dealershipName}` : ''} (load ${load.loadNumber}). Open SuprahPay to pay it.`,
+    title: dealershipName ? `SuprahPay invoice from ${dealershipName}` : 'SuprahPay invoice for your shipment',
+    message: `${dealershipName || 'Your dealership'} sent you an invoice of ${money(invoice.amount)} for shipping your vehicle (load ${load.loadNumber}). Open SuprahPay to pay it.`,
     metadata: { paymentId: String(invoice._id), amount: invoice.amount, route: '/customer/payments' },
   });
 }

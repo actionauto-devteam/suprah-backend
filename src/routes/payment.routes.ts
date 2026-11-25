@@ -26,6 +26,8 @@ router.get('/checkout-session/:sessionId', paymentController.getCheckoutSessionS
 
 router.post('/:id/cancel-mine', paymentController.cancelMyPayment);
 router.post('/:id/left-checkout', paymentController.leaveCheckout);
+// Back on SuprahPay after Stripe's page (2026-11-25).
+router.post('/checkout-return', paymentController.returnFromCheckout);
 
 // Everything below works on the dealership's own payment records (the list,
 // totals, sending requests, refunds), so only its staff may use it. Customers

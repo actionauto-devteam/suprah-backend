@@ -42,7 +42,7 @@ import { statementSuffixFor } from '../utils/paymentBranding';
 import { cardFailureReason, refundProblemMessage, stripeErrorForLog } from '../utils/stripeErrors';
 import { notifySuperAdmins } from '../services/dealershipPayouts.service';
 import { SUPPORT_EMAIL } from '../utils/userMessages';
-import { SUPRAH_BILLING_ORG, SUPRAH_ISSUER_NAME, isSuprahBilled } from '../utils/loadBilling';
+import { SUPRAH_BILLING_ORG, isSuprahBilled } from '../utils/loadBilling';
 
 /** The dealership an invoice belongs to: for Suprah's own shipping invoices, the load's dealership (2026-11-25). */
 const dealershipOf = (payment: { organizationId?: unknown; forOrganizationId?: unknown }) =>
@@ -691,12 +691,13 @@ async function buildCheckoutSession(
   const stripeCustomerId = await stripeCustomerFor(payment);
 
   // SuprahPay branding with the dealership's name (2026-11-21): the payment
-  // page, Stripe's receipt and the card statement say which dealership it's for.
-  const org = mongoose.isValidObjectId(payment.organizationId)
-    ? await Organization.findById(payment.organizationId).select('name').lean()
+  // page, Stripe's receipt and the card statement say which dealership it's
+  // for. A load's shipping invoice shows the load's dealership (2026-11-25).
+  const dealershipId = dealershipOf(payment);
+  const org = mongoose.isValidObjectId(dealershipId)
+    ? await Organization.findById(dealershipId).select('name').lean()
     : null;
-  // Suprah's own shipping invoices are signed Suprah AI (2026-11-25).
-  const dealershipName = isSuprahBilled(payment) ? SUPRAH_ISSUER_NAME : String(org?.name || '').trim();
+  const dealershipName = String(org?.name || '').trim();
   const description = String(payment.description || '').trim();
   const invoiceTitle = payment.invoiceNumber ? `Invoice ${payment.invoiceNumber}` : description || 'Invoice';
   const sessionParams: Stripe.Checkout.SessionCreateParams = {
@@ -709,6 +710,10 @@ async function buildCheckoutSession(
     wallet_options: { link: { display: 'never' } },
     // US dollars only (2026-11-21): no paying in the customer's local currency.
     adaptive_pricing: { enabled: false },
+    // SuprahPay's look (2026-11-25): the dealership's name at the top (B8),
+    // SuprahPay's green button and rounded corners, and a SuprahPay line above Pay.
+    ...(dealershipName ? { branding_settings: suprahPayPageBranding(dealershipName) } : {}),
+    custom_text: { submit: { message: SUPRAHPAY_PAGE_NOTE } },
     line_items: [
       {
         quantity: 1,
@@ -737,27 +742,35 @@ async function buildCheckoutSession(
     cancel_url: returnTo?.cancel ?? `${CUSTOMER_APP_URL}/customer/payments?status=cancelled&invoice=${payment._id.toString()}`,
   };
   const suffix = statementSuffixFor(dealershipName);
-  let session: Stripe.Checkout.Session;
-  try {
-    session = await stripe.checkout.sessions.create(
-      suffix
-        ? { ...sessionParams, payment_intent_data: { ...sessionParams.payment_intent_data, statement_descriptor_suffix: suffix } }
-        : sessionParams,
-    );
-  } catch (error: any) {
-    // The card statement wording is a nice-to-have: never let it stop a payment.
-    if (!suffix || !/statement_descriptor/i.test(String(error?.param || error?.message || ''))) throw error;
-    session = await stripe.checkout.sessions.create(sessionParams);
+  // The card statement wording and the page's look are nice-to-haves: if
+  // Stripe refuses either, the page opens without it, never stopping a payment.
+  let useSuffix = !!suffix;
+  let useLook = true;
+  let session: Stripe.Checkout.Session | null = null;
+  while (!session) {
+    const params: Stripe.Checkout.SessionCreateParams = { ...sessionParams };
+    if (useSuffix && suffix) params.payment_intent_data = { ...sessionParams.payment_intent_data, statement_descriptor_suffix: suffix };
+    if (!useLook) {
+      delete params.branding_settings;
+      delete params.custom_text;
+    }
+    try {
+      session = await stripe.checkout.sessions.create(params);
+    } catch (error: any) {
+      const refused = String(error?.param || error?.message || '');
+      if (useLook && /branding_settings|custom_text/i.test(refused)) useLook = false;
+      else if (useSuffix && /statement_descriptor/i.test(refused)) useSuffix = false;
+      else throw error;
+    }
   }
 
   // Only an invoice still waiting for payment (2026-11-25): one paid a moment
-  // ago is never overwritten, and the new page closes. The invoice stays due
-  // while the page is open: nobody can tell if the customer closes Stripe's
-  // tab, and Stripe's paid notice (or Pay again, which closes this page
-  // first) settles it.
+  // ago is never overwritten, and the new page closes. It shows "Payment
+  // started" while the customer is on Stripe's page, and goes back to due
+  // when they come back to SuprahPay without paying (checkout-return).
   const opened = await Payment.findOneAndUpdate(
     { _id: payment._id, status: { $in: [...AWAITING_PAYMENT_STATUSES] } },
-    { $set: { stripeCheckoutSessionId: session.id, stripeCustomerId } },
+    { $set: { stripeCheckoutSessionId: session.id, stripeCustomerId, status: 'processing' } },
     { new: true },
   );
   if (!opened) {
@@ -1117,7 +1130,7 @@ async function recordRefund(filter: Record<string, unknown>, state: { refundedAm
   // How much, from which dealership, and that it can take 5-10 business days to show on their card.
   // A dealership's own bill from Suprah is told to its admins above, not to one person (2026-11-25).
   if (before.billedTo !== 'dealership') {
-    void notifyCustomerOfRefund(before, refunded, orgId, isSuprahBilled(before) ? SUPRAH_ISSUER_NAME : undefined);
+    void notifyCustomerOfRefund(before, refunded, orgId);
   }
   return (await Payment.findById(before._id)) ?? before;
 }
@@ -1408,33 +1421,20 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
   // "Total paid" needs (those two are left out of what is sent back).
   // A dealership's own bills from Suprah aren't a person's invoices (2026-11-25).
   const payments = await Payment.find({ customerEmail: user.email.toLowerCase(), billedTo: { $ne: 'dealership' } })
-    .select([...CUSTOMER_INVOICE_FIELDS, 'disputeStatus', 'disputedAmount', 'organizationId', 'stripeCheckoutSessionId', 'stripePaymentIntentId'].join(' '))
+    .select([...CUSTOMER_INVOICE_FIELDS, 'disputeStatus', 'disputedAmount', 'organizationId', 'forOrganizationId'].join(' '))
     .populate('aftermarketProductId', 'name media')
     .sort({ createdAt: -1 })
     .lean();
 
-  // Invoices left at "Payment started" by a Stripe page the customer closed
-  // go back to due, or to paid if Stripe says so (2026-11-25). The Stripe ids
-  // read for this are never sent back (customerInvoiceView).
-  const settled = await releaseAbandonedCheckouts(
-    payments.filter((p) => p.status === 'processing' && p.stripeCheckoutSessionId).slice(0, 5),
-  );
-  for (const p of payments as Array<Record<string, unknown>>) {
-    const now = settled.get(String(p._id));
-    if (now) {
-      p.status = now;
-      if (now === 'succeeded') p.paidAt = new Date();
-    }
-  }
-
   // Each invoice shows the dealership it's from (2026-11-21): one lookup for all of them.
-  const orgIds = [...new Set(payments.map((p) => String(p.organizationId)).filter((id) => mongoose.isValidObjectId(id)))];
+  // A load's shipping invoice is from the load's dealership (2026-11-25).
+  const orgIds = [...new Set(payments.map((p) => dealershipOf(p)).filter((id) => mongoose.isValidObjectId(id)))];
   const orgs = orgIds.length
     ? await Organization.find({ _id: { $in: orgIds } }).select('name').lean()
     : [];
   const dealershipNames = new Map(orgs.map((org) => [String(org._id), String(org.name || '')]));
   for (const p of payments as Array<Record<string, unknown>>) {
-    p.dealershipName = isSuprahBilled(p) ? SUPRAH_ISSUER_NAME : dealershipNames.get(String(p.organizationId)) || undefined;
+    p.dealershipName = dealershipNames.get(dealershipOf(p)) || undefined;
   }
 
   // Owed = the "To pay" list, so the total and the list always agree (2026-11-23).
@@ -1492,6 +1492,26 @@ async function releaseAbandonedCheckouts(
   }
   return settled;
 }
+
+// POST /api/payments/checkout-return — the customer is back on SuprahPay
+// (2026-11-25). Since pressing Pay takes them to Stripe's page in the same
+// tab, being back means they left it: their "Payment started" invoices go
+// back to due (or to paid, if Stripe says they were paid).
+const returnFromCheckout = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?.email) throw new ApiError(401, 'User not authenticated');
+  const started = await Payment.find({
+    customerEmail: user.email.toLowerCase(),
+    status: 'processing',
+    stripeCheckoutSessionId: { $exists: true, $ne: null },
+    billedTo: { $ne: 'dealership' },
+  })
+    .select('_id stripeCheckoutSessionId stripePaymentIntentId')
+    .limit(5)
+    .lean();
+  const settled = await releaseAbandonedCheckouts(started);
+  res.json(new ApiResponse(200, { changed: settled.size }, 'Checked'));
+});
 
 // ─── Customer: Create Payment Intent (legacy Elements path, kept) ─────────────
 const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Response) => {
@@ -1704,6 +1724,18 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
 
 // ─── Shipping Suprah bills for loads (2026-11-25) ─────────────────────────────
 
+/** SuprahPay's look on Stripe's payment page: the dealership's name (B8), green button, rounded corners. */
+function suprahPayPageBranding(dealershipName: string): Stripe.Checkout.SessionCreateParams.BrandingSettings {
+  return {
+    display_name: dealershipName.slice(0, 100),
+    button_color: '#16A34A',
+    border_style: 'rounded',
+    font_family: 'be_vietnam_pro',
+  };
+}
+const SUPRAHPAY_PAGE_NOTE =
+  "Secured by SuprahPay, Suprah AI's payment service. Your card details go straight to Stripe; Suprah never stores them.";
+
 /** A dealership's bill from Suprah is paid on the dealership's SuprahPay page, not from a personal account. */
 function refuseDealershipBill(payment: { billedTo?: string }) {
   if (payment.billedTo === 'dealership') {
@@ -1805,5 +1837,6 @@ export default {
   createCustomerCheckoutSession,
   getCheckoutSessionStatus,
   leaveCheckout,
+  returnFromCheckout,
   cancelMyPayment,
 };
