@@ -48,6 +48,8 @@ export const NOTIFICATION_TYPES = [
   // What those alerts become once the load has left the board.
   'new_load_unavailable',
   'payment_received', 'payment_pending', 'payment_failed', 'payment_request', 'payout_processed',
+  // A customer's refund on its way (SuprahPay, 2026-11-23).
+  'payment_refunded',
   'wallet_low_balance', 'wallet_payout_failed',
   'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',
   'team_invite_sent', 'team_member_joined', 'team_member_left', 'role_changed', 'board_note_posted',

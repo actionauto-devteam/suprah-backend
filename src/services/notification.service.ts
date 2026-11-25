@@ -87,7 +87,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   driver_status_request_rejected: 'driverTracker', driver_status_request_completed: 'driverTracker',
   driver_emergency_request: 'driverTracker',
 
-  payment_received: 'wallet', payment_pending: 'wallet', payment_failed: 'wallet', payment_request: 'wallet',
+  payment_received: 'wallet', payment_pending: 'wallet', payment_failed: 'wallet', payment_request: 'wallet', payment_refunded: 'wallet',
   payout_processed: 'wallet', wallet_low_balance: 'wallet', wallet_payout_failed: 'wallet',
 
   team_invite_sent: 'team', team_member_joined: 'team', team_member_left: 'team', role_changed: 'team',
@@ -343,6 +343,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       new_load_available: metadata?.route || '/driver/available-loads',
       new_load_check_first: metadata?.route || '/driver/available-loads',
       payment_request: metadata?.route || '/customer/payments',
+      payment_refunded: metadata?.route || '/customer/payments',
       payment_received: metadata?.route || '/billing',
       payment_pending: metadata?.route || '/billing',
       payment_failed: metadata?.route || '/billing',
