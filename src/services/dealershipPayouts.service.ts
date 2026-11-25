@@ -127,7 +127,7 @@ export async function payoutAccountFor(orgId: string) {
 }
 
 /** Tells every Suprah super admin. A notice that fails never stops the action. */
-async function notifySuperAdmins(title: string, message: string) {
+export async function notifySuperAdmins(title: string, message: string) {
   try {
     const superAdmins = await User.find({ role: 'super_admin' }).select('_id organizationId').lean();
     await Promise.all(superAdmins.map((admin) => safeCreateNotification({

@@ -40,6 +40,8 @@ import { dealershipForPayments, getPlatformSettings, paymentLimitProblem } from 
 import Organization from '../models/Organization.model';
 import { statementSuffixFor } from '../utils/paymentBranding';
 import { cardFailureReason, refundProblemMessage, stripeErrorForLog } from '../utils/stripeErrors';
+import { notifySuperAdmins } from '../services/dealershipPayouts.service';
+import { SUPPORT_EMAIL } from '../utils/userMessages';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-02-25.clover',
@@ -115,6 +117,44 @@ async function invoiceIdOnStripePayment(paymentIntentId: string): Promise<string
   } catch {
     return null;
   }
+}
+
+/**
+ * A card payment that came in after its invoice was already paid (2026-11-25),
+ * for example from a Stripe payment page and the card form both being used.
+ * Nothing on the invoice changes; the dealership's admins and Suprah's super
+ * admins are told once, so the extra payment can be refunded in Stripe.
+ */
+async function flagSecondCharge(invoiceId: unknown, paymentIntentId: string | undefined, amountCents: number | null | undefined) {
+  if (!paymentIntentId || typeof invoiceId !== 'string' || !mongoose.isValidObjectId(invoiceId)) return;
+  const flagged = await Payment.findOneAndUpdate(
+    {
+      _id: invoiceId,
+      status: { $in: ['succeeded', 'refunded'] },
+      stripePaymentIntentId: { $exists: true, $ne: paymentIntentId },
+      secondChargeIds: { $ne: paymentIntentId },
+    },
+    { $addToSet: { secondChargeIds: paymentIntentId } },
+    { new: true },
+  );
+  if (!flagged) return;
+
+  const amount = typeof amountCents === 'number' && amountCents > 0 ? ` of $${(amountCents / 100).toFixed(2)}` : '';
+  const invoice = flagged.invoiceNumber ? `invoice ${flagged.invoiceNumber}` : 'an invoice';
+  logger.warn({ paymentId: String(flagged._id), paymentIntentId }, 'A second card payment came in for a paid invoice');
+  try {
+    await notifyOrgAdmins(
+      String(flagged.organizationId),
+      'payment_failed',
+      'Customer charged twice',
+      `${flagged.customerName} paid ${invoice} a second time${amount}. Suprah has been told so the extra payment can be refunded. If you have questions, contact Suprah AI support at ${SUPPORT_EMAIL}.`,
+      { paymentId: String(flagged._id), route: '/billing/payments' },
+    );
+  } catch { /* the second payment is recorded even if the notice fails */ }
+  await notifySuperAdmins(
+    'A customer was charged twice',
+    `A second card payment${amount} came in for ${invoice}, which was already paid. Refund the extra Stripe payment (${paymentIntentId}) in Stripe's dashboard.`,
+  );
 }
 
 async function recordDispute(dispute: Stripe.Dispute) {
@@ -517,6 +557,11 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
   if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This payment has been cancelled');
   await refuseRefundedOrOverLimit(payment, 'staff');
+  // The customer's Stripe payment page is closed first, so the invoice can't
+  // be paid there and here (2026-11-25).
+  if ((await settleEarlierCheckout(payment)) === 'paid') {
+    throw new ApiError(409, 'This invoice was already paid. Refresh to see it.');
+  }
 
   if (payment.stripePaymentIntentId) {
     try {
@@ -539,10 +584,63 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
     payment_method_types: ['card'],
   });
 
-  await Payment.findByIdAndUpdate(payment._id, { stripePaymentIntentId: paymentIntent.id, stripeCustomerId, status: 'processing' });
+  await startCardPayment(payment._id, paymentIntent.id, stripeCustomerId);
 
   res.json(new ApiResponse(200, { clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id }, 'Payment intent created successfully'));
 });
+
+/**
+ * Records a card form payment on the invoice, but only while the invoice is
+ * still waiting for payment (2026-11-25): a payment confirmed a moment ago is
+ * never turned back into "payment started". Otherwise the new card payment is
+ * cancelled and the request refused.
+ */
+async function startCardPayment(paymentId: unknown, paymentIntentId: string, stripeCustomerId: string) {
+  const started = await Payment.findOneAndUpdate(
+    { _id: paymentId, status: { $in: [...AWAITING_PAYMENT_STATUSES] } },
+    { $set: { stripePaymentIntentId: paymentIntentId, stripeCustomerId, status: 'processing' } },
+    { new: true },
+  );
+  if (started) return started;
+  try { await stripe.paymentIntents.cancel(paymentIntentId); } catch { /* nothing was paid with it */ }
+  throw new ApiError(409, 'This invoice changed a moment ago (it may have just been paid). Refresh to see it.');
+}
+
+/**
+ * The invoice's card form payment, before a Stripe payment page opens
+ * (2026-11-25): if it went through, the invoice is marked paid (once); if it's
+ * still open it is cancelled, so the same invoice can't be paid in both.
+ */
+async function settleEarlierCardPayment(payment: any): Promise<'paid' | 'closed' | 'none'> {
+  if (!payment.stripePaymentIntentId) return 'none';
+  let intent: Stripe.PaymentIntent;
+  try {
+    intent = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
+  } catch (error: any) {
+    if (error?.code === 'resource_missing') return 'none';
+    throw error;
+  }
+  if (intent.status === 'processing') {
+    throw new ApiError(409, 'A card payment for this invoice is still going through. Please wait a moment, then refresh.');
+  }
+  if (intent.status !== 'succeeded' && intent.status !== 'canceled') {
+    try {
+      intent = await stripe.paymentIntents.cancel(intent.id);
+    } catch {
+      // It may have been paid at this very moment: look again.
+      intent = await stripe.paymentIntents.retrieve(intent.id);
+    }
+  }
+  if (intent.status === 'succeeded') {
+    const claimed = await claimPaid({ _id: payment._id }, await paidDetailsFromIntent(intent));
+    if (claimed) await afterPaid(claimed, 'STRIPE_CARD_CHECK');
+    return 'paid';
+  }
+  if (intent.status !== 'canceled') {
+    throw new ApiError(409, 'A card payment for this invoice is still open. Please try again in a moment.');
+  }
+  return 'closed';
+}
 
 // ─── The invoice's Stripe customer ────────────────────────────────────────────
 /**
@@ -633,11 +731,17 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
     session = await stripe.checkout.sessions.create(sessionParams);
   }
 
-  await Payment.findByIdAndUpdate(payment._id, {
-    stripeCheckoutSessionId: session.id,
-    stripeCustomerId,
-    status: 'processing',
-  });
+  // Only an invoice still waiting for payment (2026-11-25): one paid a moment
+  // ago is never turned back into "payment started", and the new page closes.
+  const opened = await Payment.findOneAndUpdate(
+    { _id: payment._id, status: { $in: [...AWAITING_PAYMENT_STATUSES] } },
+    { $set: { stripeCheckoutSessionId: session.id, stripeCustomerId, status: 'processing' } },
+    { new: true },
+  );
+  if (!opened) {
+    try { await stripe.checkout.sessions.expire(session.id); } catch { /* it expires on its own */ }
+    throw new ApiError(409, 'This invoice changed a moment ago (it may have just been paid). Refresh to see it.');
+  }
 
   return session;
 }
@@ -702,6 +806,10 @@ const createCustomerCheckoutSession = asyncHandler(async (req: Request, res: Res
 
   // A payment page was opened before: make sure it wasn't paid, and close it.
   if ((await settleEarlierCheckout(payment)) === 'paid') {
+    throw new ApiError(409, 'This invoice was already paid. Refresh to see your receipt.');
+  }
+  // So was the card form (2026-11-25): one invoice can't be paid in both.
+  if ((await settleEarlierCardPayment(payment)) === 'paid') {
     throw new ApiError(409, 'This invoice was already paid. Refresh to see your receipt.');
   }
 
@@ -809,17 +917,36 @@ const confirmPayment = asyncHandler(async (req: Request, res: Response) => {
     return res.json(new ApiResponse(200, payment, 'Payment confirmed successfully'));
   }
 
-  if (paymentIntent.status === 'requires_payment_method') {
-    payment.status = 'failed';
-    payment.failureReason = cardFailureReason(paymentIntent.last_payment_error);
-    await payment.save();
-    return res.json(new ApiResponse(200, payment, 'Payment failed - new payment method required'));
-  }
-
-  payment.status = paymentIntent.status === 'canceled' ? 'cancelled' : 'processing';
-  await payment.save();
-  res.json(new ApiResponse(200, payment, `Payment status: ${paymentIntent.status}`));
+  // Not paid: the invoice changes only while it's still waiting for payment
+  // (2026-11-25), so a payment confirmed a moment ago is never overwritten.
+  const current = await cardFormResult(payment._id, paymentIntent);
+  res.json(new ApiResponse(
+    200,
+    current,
+    paymentIntent.status === 'requires_payment_method' ? 'Payment failed - new payment method required' : `Payment status: ${paymentIntent.status}`,
+  ));
 });
+
+/**
+ * What a card form payment that didn't go through means for its invoice
+ * (2026-11-25): declined → failed; still going through → payment started. A
+ * cancelled card payment leaves the invoice as it is (a Stripe payment page
+ * may have replaced it). Nothing changes once the invoice is paid, refunded
+ * or cancelled. Returns the invoice as it is now.
+ */
+async function cardFormResult(paymentId: unknown, intent: Stripe.PaymentIntent) {
+  let updated = null;
+  if (intent.status === 'requires_payment_method') {
+    updated = await claimFailed({ _id: paymentId, stripePaymentIntentId: intent.id }, cardFailureReason(intent.last_payment_error));
+  } else if (intent.status !== 'canceled') {
+    updated = await Payment.findOneAndUpdate(
+      { _id: paymentId, stripePaymentIntentId: intent.id, status: { $in: [...AWAITING_PAYMENT_STATUSES] } },
+      { $set: { status: 'processing' } },
+      { new: true },
+    );
+  }
+  return updated ?? (await Payment.findById(paymentId));
+}
 
 // ─── Cancel Payment ───────────────────────────────────────────────────────────
 const cancelPayment = asyncHandler(async (req: Request, res: Response) => {
@@ -912,22 +1039,10 @@ const refundPayment = asyncHandler(async (req: Request, res: Response) => {
     if (chargeId) state = refundStateFromCharge(await stripe.charges.retrieve(chargeId));
   } catch { /* Stripe's charge.refunded notice brings the exact totals */ }
 
-  const saved = await Payment.findOneAndUpdate({ _id: payment._id }, refundUpdate(state, new Date()), { new: true });
-
+  // Saved, and the dealership's admins and the customer told, once: Stripe's
+  // refund notice for this same refund may land first (2026-11-25).
+  const saved = await recordRefund({ _id: payment._id }, state);
   const refunded = refundRequest.amount;
-  notifyOrgAdmins(
-    orgId,
-    'general',
-    state.fullyRefunded ? 'Payment Refunded' : 'Payment Partly Refunded',
-    state.fullyRefunded
-      ? `${payment.customerName}'s payment of $${payment.amount.toFixed(2)} was refunded.`
-      : `$${refunded.toFixed(2)} of ${payment.customerName}'s $${payment.amount.toFixed(2)} payment was refunded.`,
-    { paymentId: payment._id.toString() },
-  );
-
-  // The customer is told too (decision B5): how much, from which dealership,
-  // and that it can take 5-10 business days to show on their card.
-  void notifyCustomerOfRefund(saved ?? payment, refunded, orgId);
 
   await activityService.createActivity({
     userId: (req.user?._id as any).toString(),
@@ -940,6 +1055,46 @@ const refundPayment = asyncHandler(async (req: Request, res: Response) => {
   logger.info({ paymentId: payment._id, amount: refunded, full: state.fullyRefunded }, 'Payment refunded');
   res.json(new ApiResponse(200, saved ?? payment, state.fullyRefunded ? 'Payment refunded' : 'Payment partly refunded'));
 });
+
+/**
+ * Saves a refund's new total and tells the dealership's admins and the
+ * customer (decision B5), once per refund (2026-11-25). Suprah's Refund button
+ * and Stripe's refund notice (also sent for refunds made in Stripe's
+ * dashboard) can land in either order, or twice: whichever raises the total
+ * sends the notices. Returns the invoice as it is now, or null when Suprah
+ * doesn't know the payment.
+ */
+async function recordRefund(filter: Record<string, unknown>, state: { refundedAmount: number; fullyRefunded: boolean }) {
+  const at = new Date();
+  const before = await Payment.findOneAndUpdate(
+    {
+      ...filter,
+      $or: [{ refundedAmount: { $lt: state.refundedAmount } }, { refundedAmount: { $exists: false } }, { refundedAmount: null }],
+    },
+    refundUpdate(state, at),
+    { new: false },
+  );
+  if (!before) {
+    // Already recorded by the other path: keep the status right, tell nobody again.
+    return Payment.findOneAndUpdate(filter, refundUpdate(state, at), { new: true });
+  }
+
+  const orgId = String(before.organizationId);
+  const amount = Number(before.amount) || 0;
+  const refunded = roundCents(state.refundedAmount - (Number(before.refundedAmount) || 0));
+  notifyOrgAdmins(
+    orgId,
+    'general',
+    state.fullyRefunded ? 'Payment Refunded' : 'Payment Partly Refunded',
+    state.fullyRefunded
+      ? `${before.customerName}'s payment of $${amount.toFixed(2)} was refunded.`
+      : `$${refunded.toFixed(2)} of ${before.customerName}'s $${amount.toFixed(2)} payment was refunded.`,
+    { paymentId: String(before._id) },
+  );
+  // How much, from which dealership, and that it can take 5-10 business days to show on their card.
+  void notifyCustomerOfRefund(before, refunded, orgId);
+  return (await Payment.findById(before._id)) ?? before;
+}
 
 /**
  * Tells the customer their refund is on its way (2026-11-23, decision B5).
@@ -1112,6 +1267,9 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
       if (payment) {
         await afterPaid(payment, 'STRIPE_CHECKOUT');
         logger.info({ paymentId: payment._id, sessionId: session.id }, 'Stripe Checkout: payment success');
+      } else {
+        // Already paid: if by a different card payment, someone was charged twice (2026-11-25).
+        await flagSecondCharge(paymentId, piId, session.amount_total);
       }
       break;
     }
@@ -1140,7 +1298,16 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
     case 'payment_intent.succeeded': {
       const pi = event.data.object as Stripe.PaymentIntent;
       const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : pi.latest_charge?.id;
-      const payment = await claimPaid({ stripePaymentIntentId: pi.id }, chargeId ? { stripeChargeId: chargeId } : {});
+      let payment = await claimPaid({ stripePaymentIntentId: pi.id }, chargeId ? { stripeChargeId: chargeId } : {});
+      const invoiceId = pi.metadata?.paymentId;
+      if (!payment && invoiceId && mongoose.isValidObjectId(invoiceId)) {
+        // Not the card payment saved on the invoice (2026-11-25): Stripe's
+        // payment carries Suprah's invoice id. An unpaid invoice is paid by
+        // it; an invoice already paid by another card payment means a second
+        // charge (the same payment reported twice changes nothing).
+        payment = await claimPaid({ _id: invoiceId }, { stripePaymentIntentId: pi.id, ...(await paidDetailsFromIntent(pi)) });
+        if (!payment) await flagSecondCharge(invoiceId, pi.id, pi.amount_received ?? pi.amount);
+      }
       if (payment) {
         await afterPaid(payment, 'STRIPE_WEBHOOK');
         logger.info({ paymentId: payment._id, piId: pi.id }, 'Stripe Webhook: Payment success');
@@ -1162,10 +1329,8 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
       const paymentIntentId =
         typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
       if (paymentIntentId) {
-        await Payment.findOneAndUpdate(
-          { stripePaymentIntentId: paymentIntentId },
-          refundUpdate(refundStateFromCharge(charge), new Date()),
-        );
+        // A refund made in Stripe's dashboard tells the same people (2026-11-25).
+        await recordRefund({ stripePaymentIntentId: paymentIntentId }, refundStateFromCharge(charge));
       }
       break;
     }
@@ -1260,6 +1425,11 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
   if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This payment has been cancelled');
   await refuseRefundedOrOverLimit(payment, 'customer');
+  // The Stripe payment page is closed first, so the invoice can't be paid
+  // there and in this card form (2026-11-25).
+  if ((await settleEarlierCheckout(payment)) === 'paid') {
+    throw new ApiError(409, 'This invoice was already paid. Refresh to see your receipt.');
+  }
 
   if (payment.stripePaymentIntentId) {
     try {
@@ -1282,7 +1452,7 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
     payment_method_types: ['card'],
   });
 
-  await Payment.findByIdAndUpdate(payment._id, { stripePaymentIntentId: paymentIntent.id, stripeCustomerId, status: 'processing' });
+  await startCardPayment(payment._id, paymentIntent.id, stripeCustomerId);
 
   res.json(new ApiResponse(200, { clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id }, 'Payment intent created successfully'));
 });
@@ -1329,16 +1499,13 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
     return res.json(new ApiResponse(200, customerInvoiceView(payment), 'Payment confirmed successfully'));
   }
 
-  if (paymentIntent.status === 'requires_payment_method') {
-    payment.status = 'failed';
-    payment.failureReason = cardFailureReason(paymentIntent.last_payment_error);
-    await payment.save();
-    return res.json(new ApiResponse(200, customerInvoiceView(payment), 'Payment failed'));
-  }
-
-  payment.status = paymentIntent.status === 'canceled' ? 'cancelled' : 'processing';
-  await payment.save();
-  res.json(new ApiResponse(200, customerInvoiceView(payment), `Payment status: ${paymentIntent.status}`));
+  // Not paid: only an invoice still waiting for payment changes (2026-11-25).
+  const current = await cardFormResult(payment._id, paymentIntent);
+  res.json(new ApiResponse(
+    200,
+    customerInvoiceView(current ?? payment),
+    paymentIntent.status === 'requires_payment_method' ? 'Payment failed' : `Payment status: ${paymentIntent.status}`,
+  ));
 });
 
 // ─── Customer: Cancel an unpaid invoice ───────────────────────────────────────

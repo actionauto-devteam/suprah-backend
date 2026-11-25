@@ -205,7 +205,9 @@ describe('a payment is marked paid exactly once', () => {
       data: { object: { payment_intent: 'pi_1', amount_refunded: 1000, refunded: false } },
     });
     const [filter, update] = payments.findOneAndUpdate.mock.calls[0];
-    expect(filter).toEqual({ stripePaymentIntentId: 'pi_1' });
+    // Only a refund that raises the total is recorded and announced (2026-11-25).
+    expect(filter).toMatchObject({ stripePaymentIntentId: 'pi_1' });
+    expect(filter.$or).toContainEqual({ refundedAmount: { $lt: 10 } });
     expect(update.$max).toEqual({ refundedAmount: 10 });
   });
 
@@ -281,6 +283,7 @@ describe("leaving Stripe's payment page", () => {
     stripe.checkout.sessions.retrieve.mockResolvedValueOnce(earlierPage());
     stripe.checkout.sessions.expire.mockResolvedValueOnce(earlierPage({ status: 'expired' }));
     stripe.checkout.sessions.create.mockResolvedValueOnce({ id: 'cs_new', url: 'https://checkout.example/cs_new' });
+    payments.findOneAndUpdate.mockResolvedValueOnce(invoice({ status: 'processing', stripeCheckoutSessionId: 'cs_new' }));
 
     const { res } = await pay();
     expect(stripe.checkout.sessions.expire.mock.invocationCallOrder[0])

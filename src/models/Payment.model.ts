@@ -58,6 +58,9 @@ export interface IPayment extends Document {
    *  only a full refund marks it "refunded". */
   refundedAmount?: number;
   refundedAt?: Date;
+  /** Stripe card payments that came in after this invoice was already paid
+   *  (2026-11-25): Suprah's admins are told once so they can be refunded. */
+  secondChargeIds?: string[];
 
   /** A card dispute (chargeback). Revenue counts the payment until the bank
    *  decides; a lost dispute is left out like a refund. */
@@ -143,6 +146,7 @@ const PaymentSchema: Schema<IPayment> = new Schema(
     dueDate: { type: Date },
     refundedAmount: { type: Number, min: 0 },
     refundedAt: { type: Date },
+    secondChargeIds: { type: [String], default: undefined },
     stripeDisputeId: { type: String, trim: true },
     disputeStatus: { type: String, enum: ['open', 'won', 'lost'] },
     disputedAmount: { type: Number, min: 0 },
