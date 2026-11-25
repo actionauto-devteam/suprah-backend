@@ -144,6 +144,25 @@ async function recentCustomerPage(orgId: string, filter: Record<string, unknown>
   ]).option({ maxTimeMS: 5000 });
 }
 
+async function nameCustomerPage(filter: Record<string, unknown>, skip: number, limit: number): Promise<any[]> {
+  const projection = Object.fromEntries(CONTACT_FIELDS.split(' ').filter(Boolean).map((field) => [field, 1]));
+  return Customer.aggregate([
+    { $match: filter },
+    {
+      $addFields: {
+        sortName: {
+          $toLower: { $trim: { input: { $concat: [{ $ifNull: ['$firstName', ''] }, ' ', { $ifNull: ['$lastName', ''] }] } } },
+        },
+      },
+    },
+    { $addFields: { nameMissing: { $eq: ['$sortName', ''] } } },
+    { $sort: { nameMissing: 1, sortName: 1, _id: 1 } },
+    { $skip: skip },
+    { $limit: limit },
+    { $project: projection },
+  ]).option({ maxTimeMS: 5000 });
+}
+
 export async function listCustomerRecords(orgId: string, query: CustomerRecordsQuery) {
   if (!orgId) throw new ApiError(400, 'Organization context missing');
   const page = toInt(query.page, 1, 1, 100000);
@@ -155,15 +174,14 @@ export async function listCustomerRecords(orgId: string, query: CustomerRecordsQ
   if (status === 'inactive') filter.isActive = false;
   const search = buildCustomerSearch(query.search);
   if (search) filter.$and = [search];
-  const sort: Record<string, 1 | -1> = sortKey === 'name'
-    ? { lastName: 1, firstName: 1, _id: 1 }
-    : { createdAt: -1, _id: -1 };
   const skip = (page - 1) * limit;
   const [total, customers] = await Promise.all([
     Customer.countDocuments(filter).maxTimeMS(5000),
     sortKey === 'recent'
       ? recentCustomerPage(orgId, filter, skip, limit)
-      : Customer.find(filter).select(CONTACT_FIELDS).sort(sort).skip(skip).limit(limit).maxTimeMS(5000).lean().exec(),
+      : sortKey === 'name'
+        ? nameCustomerPage(filter, skip, limit)
+        : Customer.find(filter).select(CONTACT_FIELDS).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).maxTimeMS(5000).lean().exec(),
   ]);
   const summaries = await linkedLeadSummaries(orgId, customers.map((customer: any) => customer._id));
   return {
