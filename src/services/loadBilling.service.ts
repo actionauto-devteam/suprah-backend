@@ -315,9 +315,11 @@ export async function afterPricingSaved(loadId: unknown) {
     await Load.updateOne({ _id: load._id }, { $set: { 'billing.outside': true } }, { timestamps: false });
     return;
   }
+  // Cash is all or nothing: COP/COD loads collect the whole pay, SuprahPay loads none.
   const pay = carrierPayOf(load.pricing as any);
-  if (pay !== null && (load.billing.method === 'cop' || load.billing.method === 'cod')) {
-    await Load.updateOne({ _id: load._id }, { $set: { 'pricing.copCodAmount': pay, 'pricing.balanceAmount': 0 } }, { timestamps: false });
+  if (pay !== null && load.billing.method) {
+    const cash = load.billing.method === 'suprahpay' ? 0 : pay;
+    await Load.updateOne({ _id: load._id }, { $set: { 'pricing.copCodAmount': cash, 'pricing.balanceAmount': pay - cash } }, { timestamps: false });
   }
   // A dealership load is billed its driver's pay: a new amount replaces an unpaid bill.
   if (load.billing.billTo === 'dealership') await issueLoadInvoice(load._id);

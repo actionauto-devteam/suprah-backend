@@ -28,6 +28,8 @@ export const CUSTOMER_INVOICE_FIELDS = [
   'currency',
   'status',
   'source',
+  // 'customer' marks Suprah's shipping invoice for a booked load (2026-11-25): it can't be cancelled by the customer.
+  'billedTo',
   'dueDate',
   'paidAt',
   'receiptUrl',
