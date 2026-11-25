@@ -264,6 +264,7 @@ export async function billConvertedQuoteLoad(
           shippingPrice: quote.rate,
         };
     await setLoadBilling(loadId, organizationId, billing, userId);
+    await warnAboutUnlinkedShippingInvoices(loadId, quote, organizationId);
     if (manual.length) {
       await notifyOrgAdmins(
         organizationId,
@@ -278,6 +279,43 @@ export async function billConvertedQuoteLoad(
   } catch (error) {
     logger.warn({ loadId: String(loadId), err: (error as Error)?.message }, 'The converted quote load was not billed');
   }
+}
+
+/**
+ * Shipping invoices staff sent by hand from Leads aren't linked to a quote,
+ * so they can't be matched to this shipment for sure. The dealership's admins
+ * are told about the customer's unlinked ones instead, so the customer is
+ * never billed twice and nothing is cancelled by guesswork.
+ */
+async function warnAboutUnlinkedShippingInvoices(
+  loadId: unknown,
+  quote: { email?: string; firstName?: string; lastName?: string },
+  organizationId: string,
+) {
+  const email = String(quote.email ?? '').trim().toLowerCase();
+  if (!email) return;
+  const lookalikes = await Payment.find({
+    organizationId,
+    purpose: 'shipping',
+    customerEmail: email,
+    quoteId: { $exists: false },
+    loadId: { $exists: false },
+    status: { $in: [...AWAITING_PAYMENT_STATUSES, 'succeeded'] },
+  }).select('invoiceNumber amount status').limit(5).lean();
+  if (!lookalikes.length) return;
+  const load = await Load.findById(loadId).select('loadNumber').lean();
+  const name = `${quote.firstName ?? ''} ${quote.lastName ?? ''}`.trim() || 'This customer';
+  const list = lookalikes
+    .map((p: any) => `${p.invoiceNumber ?? 'an invoice'} for ${money(Number(p.amount) || 0)}${p.status === 'succeeded' ? ', paid' : ''}`)
+    .join('; ');
+  const anyPaid = lookalikes.some((p: any) => p.status === 'succeeded');
+  await notifyOrgAdmins(
+    organizationId,
+    'general',
+    'Check for a second shipping invoice',
+    `${name} now has Suprah's shipping invoice for load ${load?.loadNumber ?? ''}. They also have a Shipping invoice your staff sent by hand (${list}). If it was for this same shipment, cancel the unpaid one in SuprahPay so they're billed once${anyPaid ? `; if they already paid it for this shipment, contact Suprah AI support so Suprah's invoice can be cancelled` : ''}.`,
+    { loadId: String(loadId), route: '/billing/payments' },
+  );
 }
 
 /** Whether Edit Load's new pricing breaks the load's billing; the reason when it does. */

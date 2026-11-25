@@ -239,6 +239,30 @@ describe('batch 8: the automatic SuprahPay shipping invoice', () => {
   });
 });
 
+describe("batch 8: converting a quote", () => {
+  it("never cancels a hand-sent Shipping invoice it can't match to the quote: the admins are told instead", async () => {
+    suprahPay();
+    payments.find
+      .mockReturnValueOnce(q([])) // nothing linked to this quote
+      .mockReturnValueOnce(q([{ invoiceNumber: "INV-7", amount: 640, status: "pending" }]));
+    loads.findById
+      .mockReturnValueOnce(q({ _id: LOAD_ID, organizationId: ORG_ID, loadNumber: "L-200", status: "Draft", quoteId: "quote-1", createdBy: "staff-1", pricing: { isPricingEnabled: true, carrierPayAmount: 600 }, billing: {} }))
+      .mockReturnValueOnce(q({ _id: LOAD_ID, organizationId: ORG_ID, loadNumber: "L-200", status: "Draft", quoteId: "quote-1", createdBy: "staff-1", pricing: { isPricingEnabled: true, carrierPayAmount: 600 }, billing: { billTo: "customer", method: "suprahpay", customerName: "Pat Lee", customerEmail: "pat@example.com", shippingPrice: 640 } }))
+      .mockReturnValueOnce(q({ billing: { billTo: "customer" } }))
+      .mockReturnValueOnce(q({ loadNumber: "L-200" }));
+    loads.updateOne.mockResolvedValue({});
+    users.findById.mockReturnValue(q({ email: "staff@dealer.com" }));
+    payments.create.mockImplementation((doc: any) => Promise.resolve({ _id: "inv-9", ...doc }));
+    loads.findOneAndUpdate.mockReturnValueOnce(q({ _id: LOAD_ID }));
+    users.findOne.mockReturnValueOnce(q(null));
+    const { billConvertedQuoteLoad } = await import("../../src/services/loadBilling.service");
+    await billConvertedQuoteLoad(LOAD_ID, { _id: "quote-1", firstName: "Pat", lastName: "Lee", email: "Pat@Example.com", rate: 640 }, ORG_ID, "staff-1");
+    expect(payments.find.mock.calls[1][0]).toMatchObject({ organizationId: ORG_ID, purpose: "shipping", customerEmail: "pat@example.com", quoteId: { $exists: false }, loadId: { $exists: false } });
+    expect(payments.updateOne).not.toHaveBeenCalled();
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(ORG_ID, "general", "Check for a second shipping invoice", expect.stringContaining("INV-7 for $640.00"), expect.anything());
+  });
+});
+
 describe("batch 8: paying a load's driver", () => {
   const delivered = (billing: Record<string, unknown> | undefined) => ({
     _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-100', status: 'Delivered', assignedDriverId: 'driver-1',
