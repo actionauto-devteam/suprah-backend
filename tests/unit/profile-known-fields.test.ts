@@ -1,5 +1,5 @@
 /**
- * PATCH /api/users/profile saves only the Create Load signature (2026-11-21,
+ * PATCH /api/users/profile saves only the transport contract signature (2026-11-21,
  * narrowed 2026-11-23). The database is a stand-in: nothing here talks to a
  * database.
  */
@@ -37,7 +37,7 @@ const updated = (fields: Record<string, unknown>) => {
 
 beforeEach(() => jest.clearAllMocks());
 
-describe('the profile route saves only the Create Load signature', () => {
+describe('the profile route saves only the transport contract signature', () => {
   it('ignores everything else: name, photo, personal details, wallet, payout account, role, permissions and password fields', async () => {
     const select = updated({ signatureDataUrl: SIGNATURE });
     const { error } = await call(userController.updateProfile, {
@@ -96,6 +96,9 @@ describe('the profile route saves only the Create Load signature', () => {
     }
     expect(users.findByIdAndUpdate).not.toHaveBeenCalled();
     expect(PROFILE_UPDATE_FIELDS).toEqual(['signatureDataUrl']);
+    // Plain words that fit the only screen that saves here (the driver's transport contract).
+    const nothing = await call(userController.updateProfile, { user: { _id: 'user-1' }, body: { name: 'Jo' } });
+    expect(nothing.error?.message).toBe('Only your signature is saved here. Change other details on your Profile page.');
     expect(profileValueOk('avatar', 'https://example.com/a.png')).toBe(false);
     expect(profileValueOk('signatureDataUrl', SIGNATURE)).toBe(true);
   });
