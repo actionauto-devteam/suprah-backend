@@ -466,3 +466,55 @@ describe("batch 8: reading a load's billing from the database", () => {
     }
   });
 });
+
+describe('batch 8 hardening (2026-11-26)', () => {
+  it("'I wasn't paid' tells the dispatcher and admins once, however often it's pressed", async () => {
+    loads.findOne.mockReturnValueOnce(q({
+      _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-100', status: 'Delivered', assignedDriverId: 'driver-1', dispatchOwnerId: 'disp-1',
+      pricing: { isPricingEnabled: true, carrierPayAmount: 500 }, billing: { billTo: 'customer', method: 'cod', cashNotReceivedAt: new Date() },
+    }));
+    const { res, error } = await call(confirmCashAsDriver, { user: { _id: 'driver-1', name: 'Dee' }, params: { id: LOAD_ID }, body: { received: false } });
+    expect(error).toBeUndefined();
+    expect(res.body.message).toMatch(/already told/);
+    expect(loads.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(notifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('an older load without its maker is recorded as made by whoever chose who pays', async () => {
+    suprahPay();
+    loads.findById.mockReturnValueOnce(q({
+      _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-300', status: 'Delivered',
+      pricing: { isPricingEnabled: true, carrierPayAmount: 500 }, billing: { billTo: 'dealership', method: 'suprahpay', decidedBy: 'admin-9' },
+    }));
+    users.findById.mockReturnValue(q({ email: 'admin@dealer.com' }));
+    payments.create.mockImplementation((doc: any) => Promise.resolve({ _id: 'inv-3', ...doc }));
+    loads.findOneAndUpdate.mockReturnValueOnce(q({ _id: LOAD_ID }));
+    await issueLoadInvoice(LOAD_ID);
+    expect(users.findById).toHaveBeenCalledWith('admin-9');
+    expect(payments.create).toHaveBeenCalledWith(expect.objectContaining({ createdBy: 'admin-9', customerEmail: 'admin@dealer.com', amount: 500 }));
+  });
+
+  it("if Stripe refuses the cards-only or US-dollar setting, the page still opens (cards still work) and it's logged", async () => {
+    suprahPay();
+    payments.findById.mockResolvedValueOnce({ _id: 'pay-1', amount: 10, status: 'pending', organizationId: ORG_ID, customerEmail: 'pat@example.com', customerName: 'Pat', stripeCustomerId: 'cus_1' });
+    stripe.checkout.sessions.create
+      .mockRejectedValueOnce(Object.assign(new Error('Unknown parameter'), { param: 'wallet_options' }))
+      .mockResolvedValueOnce({ id: 'cs_3', url: 'https://checkout.example/cs_3' });
+    payments.findOneAndUpdate.mockResolvedValueOnce({ _id: 'pay-1', status: 'processing' });
+    const { error } = await call(paymentController.createCustomerCheckoutSession, { user: { email: 'pat@example.com' }, body: { paymentId: 'pay-1' } });
+    expect(error).toBeUndefined();
+    const retry = stripe.checkout.sessions.create.mock.calls[1][0];
+    expect(retry.wallet_options).toBeUndefined();
+    expect(retry.payment_method_types).toEqual(['card']);
+    expect(retry.adaptive_pricing).toEqual({ enabled: false });
+  });
+
+  it('a payment page error that is not about a setting still stops (nothing is hidden)', async () => {
+    suprahPay();
+    payments.findById.mockResolvedValueOnce({ _id: 'pay-1', amount: 10, status: 'pending', organizationId: ORG_ID, customerEmail: 'pat@example.com', customerName: 'Pat', stripeCustomerId: 'cus_1' });
+    stripe.checkout.sessions.create.mockRejectedValueOnce(Object.assign(new Error('Stripe is down'), { type: 'StripeAPIError' }));
+    const { error } = await call(paymentController.createCustomerCheckoutSession, { user: { email: 'pat@example.com' }, body: { paymentId: 'pay-1' } });
+    expect(error).toBeTruthy();
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
+  });
+});

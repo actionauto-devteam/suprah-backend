@@ -62,15 +62,22 @@ export const confirmCashAsDriver = asyncHandler(async (req: Request, res: Respon
     return res.json(new ApiResponse(200, cashView(load), 'The cash was already confirmed.'));
   }
 
+  // "I wasn't paid" is told once: reporting it again changes nothing.
+  if (!received && load.billing.cashNotReceivedAt) {
+    return res.json(new ApiResponse(200, cashView(load), 'Your dispatcher and the dealership were already told.'));
+  }
+
   const now = new Date();
   const updated = await Load.findOneAndUpdate(
-    { _id: load._id, assignedDriverId: driver._id, 'billing.cashConfirmedAt': null },
+    received
+      ? { _id: load._id, assignedDriverId: driver._id, 'billing.cashConfirmedAt': null }
+      : { _id: load._id, assignedDriverId: driver._id, 'billing.cashConfirmedAt': null, 'billing.cashNotReceivedAt': null },
     received
       ? { $set: { 'billing.cashConfirmedAt': now }, $unset: { 'billing.cashNotReceivedAt': '' } }
       : { $set: { 'billing.cashNotReceivedAt': now } },
     { new: true, timestamps: false },
   ).select(CASH_LOAD_FIELDS).lean<any>();
-  if (!updated) throw new ApiError(409, 'The cash for this load was confirmed a moment ago. Refresh the load.');
+  if (!updated) throw new ApiError(409, 'This cash payment changed a moment ago. Refresh the load.');
 
   if (!received) {
     // Told once per report; the driver can still confirm the cash later.

@@ -746,6 +746,10 @@ async function buildCheckoutSession(
   // Stripe refuses either, the page opens without it, never stopping a payment.
   let useSuffix = !!suffix;
   let useLook = true;
+  // Cards only and US dollars are kept unless Stripe refuses the setting
+  // itself (then it's logged, and the customer can still pay by card).
+  let useWallet = true;
+  let useCurrency = true;
   let session: Stripe.Checkout.Session | null = null;
   while (!session) {
     const params: Stripe.Checkout.SessionCreateParams = { ...sessionParams };
@@ -754,13 +758,18 @@ async function buildCheckoutSession(
       delete params.branding_settings;
       delete params.custom_text;
     }
+    if (!useWallet) delete params.wallet_options;
+    if (!useCurrency) delete params.adaptive_pricing;
     try {
       session = await stripe.checkout.sessions.create(params);
     } catch (error: any) {
       const refused = String(error?.param || error?.message || '');
       if (useLook && /branding_settings|custom_text/i.test(refused)) useLook = false;
       else if (useSuffix && /statement_descriptor/i.test(refused)) useSuffix = false;
+      else if (useWallet && /wallet_options/i.test(refused)) useWallet = false;
+      else if (useCurrency && /adaptive_pricing/i.test(refused)) useCurrency = false;
       else throw error;
+      logger.warn({ paymentId: String(payment._id), param: error?.param }, 'Stripe refused a payment page setting; opened without it');
     }
   }
 

@@ -88,7 +88,7 @@ async function announceInvoice(
  * and it doesn't have a matching one yet. Refused (nothing sent) when the
  * amount is over SuprahPay's limit for one payment. Returns the invoice.
  */
-export async function issueLoadInvoice(loadId: unknown) {
+export async function issueLoadInvoice(loadId: unknown, actorId?: string) {
   const load = await loadWithBilling(loadId);
   if (!load || load.status === 'Cancelled') return null;
   const terms = invoiceTermsFor(load.billing as LoadBillingRecord, load.pricing as any);
@@ -106,13 +106,20 @@ export async function issueLoadInvoice(loadId: unknown) {
 
   const dealership = await Organization.findById(load.organizationId).select('name').lean();
   const dealershipName = String(dealership?.name ?? '').trim();
-  const creator = load.createdBy ? await User.findById(load.createdBy).select('email').lean() : null;
+  // Recorded as made by whoever made the load, or else whoever chose who pays.
+  const madeBy = load.createdBy ?? load.billing?.decidedBy ?? actorId;
+  const creator = madeBy ? await User.findById(madeBy).select('email').lean() : null;
   const billing = load.billing!;
   const payer = terms.billedTo === 'customer'
     ? { name: String(billing.customerName ?? ''), email: String(billing.customerEmail ?? '') }
     : { name: dealershipName || 'Your dealership', email: String((creator as any)?.email ?? '') };
-  if (!payer.name || !payer.email) {
-    throw new ApiError(400, "The shipping invoice can't be sent: the customer's name and email are missing on this load.");
+  if (!madeBy || !payer.name || !payer.email) {
+    throw new ApiError(
+      400,
+      terms.billedTo === 'customer'
+        ? "The shipping invoice can't be sent: the customer's name and email are missing on this load."
+        : "The dealership's bill can't be sent: the staff member who made this load no longer has an account. Choose who pays again from the load's Billing card.",
+    );
   }
   // The earlier invoice (a different amount or payer) is closed first; one
   // paid a moment ago stays, and nothing new is sent.
@@ -134,7 +141,7 @@ export async function issueLoadInvoice(loadId: unknown) {
     purpose: 'shipping',
     description: `Shipping for load ${load.loadNumber}${dealershipName ? ` (${dealershipName})` : ''}`,
     status: 'pending',
-    createdBy: load.createdBy,
+    createdBy: madeBy,
   });
 
   // One automatic invoice per load: if another request sent one a moment ago, this one is dropped.
@@ -230,7 +237,7 @@ export async function setLoadBilling(loadId: unknown, organizationId: string, in
     }
     return Load.findById(load._id).select(BILLING_ALL_FIELDS).lean();
   }
-  await issueLoadInvoice(load._id);
+  await issueLoadInvoice(load._id, userId);
   return Load.findById(load._id).select(BILLING_ALL_FIELDS).lean();
 }
 
@@ -267,7 +274,8 @@ export async function billConvertedQuoteLoad(
           method: 'suprahpay',
           customerName: `${quote.firstName ?? ''} ${quote.lastName ?? ''}`.trim(),
           customerEmail: quote.email,
-          shippingPrice: quote.rate,
+          // The quote price in dollars and cents.
+          shippingPrice: typeof quote.rate === 'number' ? Math.round(quote.rate * 100) / 100 : quote.rate,
         };
     await setLoadBilling(loadId, organizationId, billing, userId);
     await warnAboutUnlinkedShippingInvoices(loadId, quote, organizationId);
