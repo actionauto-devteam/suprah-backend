@@ -59,6 +59,10 @@ router.post(
   connectDealershipPayoutAccount,
 );
 
+// Shipping bills from Suprah for the dealership's own loads (2026-11-25).
+router.get('/suprah-bills', paymentController.getSuprahBills);
+router.post('/suprah-bills/:id/pay', requireFinanceAccess, paymentController.paySuprahBill);
+router.post('/suprah-bills/:id/check', paymentController.checkSuprahBill);
 router.get('/', paymentController.getPayments);
 // Sending, editing, cancelling and refunding need Finance access (2026-11-21);
 // every staff member can still view payments.

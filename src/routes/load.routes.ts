@@ -68,6 +68,9 @@ router
   .put(staffOnly, loadController.updateLoad)
   .delete(staffOnly, loadController.deleteLoad);
 
+// Who pays for the load's shipping (SuprahPay, 2026-11-25).
+router.put("/:id/billing", staffOnly, loadController.updateLoadBilling);
+
 router.post("/:id/notes", staffOnly, loadController.addNote);
 
 router.post("/:id/send-email", staffOnly, loadDetailsEmailLimiter, loadController.sendDetailsEmail);

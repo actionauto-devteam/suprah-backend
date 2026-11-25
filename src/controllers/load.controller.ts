@@ -45,6 +45,18 @@
     import { findLoadQuoteOrigin } from "../services/quoteLeadLink.service";
     import { addLoadCarToGarage, loadGarageState } from "../services/loadGarageTransfer.service";
     import {
+      BILLING_PRIVATE_FIELDS,
+      afterLoadCancelled,
+      afterPricingSaved,
+      issueLoadInvoice,
+      loadBillingOn,
+      loadBillingSummary,
+      pricingEditProblem,
+      setLoadBilling,
+    } from "../services/loadBilling.service";
+    import { billingFromInput, carrierPayOf, invoiceTermsFor } from "../utils/loadBilling";
+    import { getPlatformSettings, paymentLimitProblem } from "../services/suprahPaySettings.service";
+    import {
       buildLoadMaterialChanges,
       getLoadAcceptanceMaterialVersion,
     } from "../services/loadAcceptanceMaterial.service";
@@ -431,6 +443,28 @@
         ? { ...contract, signedAt: new Date() }
         : contract;
 
+      // Who pays for shipping (SuprahPay, 2026-11-25), for dealerships with
+      // SuprahPay on. Pricing skipped: settled outside Suprah, the staff pay
+      // the driver directly. Checked before anything is saved.
+      let billing: Record<string, unknown> | undefined;
+      if (await loadBillingOn(organizationId)) {
+        const decided = billingFromInput((parsed.data as any).billing, pricing as any);
+        if (!decided.ok) throw new ApiError(400, decided.message);
+        billing = decided.billing.outside
+          ? { outside: true }
+          : { ...decided.billing, decidedAt: new Date(), decidedBy: user._id };
+        const terms = invoiceTermsFor(decided.billing, pricing as any);
+        if (terms) {
+          const limit = paymentLimitProblem(terms.amount, (await getPlatformSettings()).maxPaymentAmount);
+          if (limit) throw new ApiError(400, `The shipping invoice couldn't be sent: ${limit.charAt(0).toLowerCase()}${limit.slice(1)}`);
+        }
+        // COP/COD: the driver collects their whole pay in cash. SuprahPay: no cash.
+        const pay = carrierPayOf(pricing as any);
+        if (pay !== null && decided.billing.method && postType === "load-board") {
+          (pricing as any).copCodAmount = decided.billing.method === "suprahpay" ? 0 : pay;
+        }
+      }
+
       // Validation 1: Check for duplicate VINs
       const vins = vehicles?.map((v: any) => v.vin).filter(Boolean) || [];
       if (new Set(vins).size !== vins.length) {
@@ -545,8 +579,21 @@
         additionalInfo,
         contract: contractWithTimestamp,
         ...(soldOnDelivery !== undefined ? { soldOnDelivery } : {}),
+        ...(billing ? { billing } : {}),
         status: "Posted",
       });
+
+      // The automatic SuprahPay shipping invoice. The load is saved either way;
+      // if the invoice couldn't go out, staff can send it from the load.
+      let billingWarning: string | undefined;
+      if (billing && !billing.outside && billing.method === "suprahpay") {
+        try {
+          await issueLoadInvoice(load._id);
+        } catch (error) {
+          logger.warn({ loadId: String(load._id), err: (error as Error)?.message }, "Load shipping invoice not sent");
+          billingWarning = "The load was saved, but its SuprahPay shipping invoice wasn't sent. Open the load and send it from Billing.";
+        }
+      }
 
       const _io = getSocketIO();
       if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "created" });
@@ -579,7 +626,7 @@
 
       logger.info({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load created successfully');
 
-      const warnings = [pricingWarning, capacityWarning].filter(Boolean);
+      const warnings = [pricingWarning, capacityWarning, billingWarning].filter(Boolean);
       return res.status(201).json(
         new ApiResponse(
           201,
@@ -891,6 +938,7 @@
       const organizationId = req.orgId as string;
 
       const raw = await Load.findOne({ _id: req.params.id, organizationId })
+        .select(BILLING_PRIVATE_FIELDS)
         .populate("assignedDriverId", "name email phone avatar")
         .lean();
       if (!raw) throw new ApiError(404, LOAD_NOT_FOUND);
@@ -929,7 +977,32 @@
         });
       }
 
+      // Who pays for shipping and its SuprahPay invoice (2026-11-25). Never blocks the load page.
+      if (loadObj.billing || loadObj.status === "Delivered") {
+        loadObj.billingSummary = await loadBillingSummary(loadObj).catch((err) => {
+          logger.warn({ err, loadId: String(loadObj._id) }, "Could not read this load's shipping bill");
+          return null;
+        });
+      }
+
       return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
+    });
+
+    /**
+     * Who pays for a load's shipping, and how (SuprahPay, 2026-11-25)
+     * PUT /api/loads/:id/billing  { billTo, method, customerName, customerEmail, shippingPrice }
+     * For an older load the first time its driver is paid, switching a
+     * customer load between SuprahPay and COP/COD, or sending the invoice again.
+     */
+    const updateLoadBilling = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) throw new ApiError(404, LOAD_NOT_FOUND);
+      const saved = await setLoadBilling(req.params.id, organizationId, req.body, user._id.toString());
+      const summary = await loadBillingSummary({ _id: req.params.id, ...(saved as any) });
+      const _io = getSocketIO();
+      if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId: req.params.id });
+      return res.json(new ApiResponse(200, summary, "Load billing saved"));
     });
 
     /**
@@ -1446,6 +1519,13 @@
         };
       }
 
+      // The driver's pay can't be more than the customer's shipping price, and
+      // a paid bill fixes it (SuprahPay, 2026-11-25).
+      if (updateData.pricing) {
+        const billingProblem = await pricingEditProblem(loadId, updateData.pricing);
+        if (billingProblem) throw new ApiError(400, billingProblem);
+      }
+
       const updatedLoad = await Load.findOneAndUpdate(
         {
           _id: loadId,
@@ -1461,6 +1541,12 @@
           409,
           `Someone else changed load ${load.loadNumber} while you were editing it, so your changes were not saved. Refresh the load and apply your changes again.`,
         );
+      }
+
+      if (updateData.pricing) {
+        await afterPricingSaved(loadId).catch((error) => {
+          logger.error({ error, loadId }, "Non-fatal: the load's shipping bill wasn't updated after a pricing change");
+        });
       }
 
       if (
@@ -1566,6 +1652,7 @@
 
       // Earlier drivers' proof photos live in assignmentHistory (hidden by default).
       const load = await Load.findOne({ _id: req.params.id, organizationId }).select("+assignmentHistory");
+      const billingBefore = load ? { _id: load._id, organizationId, loadNumber: load.loadNumber, billing: (load as any).billing } : null;
       if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
       // Active loads have a driver relying on them. Deleting one here would skip
@@ -1597,6 +1684,7 @@
       // Its photos (inspection, pickup, delivery, condition) go with it; nothing
       // could open them once the load is gone. Never fails the delete.
       await deletePhotosOfDeletedLoad(collectLoadPhotoKeys(load.toObject()), load._id);
+      if (billingBefore) await afterLoadCancelled(billingBefore);
       // Drivers' new-load alerts stop offering it.
       void markNewLoadAlertsUnavailable(load._id.toString());
 
@@ -2138,4 +2226,4 @@
       res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
     });
 
-    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, addToGarage, updateLoad, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
+    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, addToGarage, updateLoad, updateLoadBilling, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };

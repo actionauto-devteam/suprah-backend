@@ -61,6 +61,14 @@ export interface IPayment extends Document {
   /** Stripe card payments that came in after this invoice was already paid
    *  (2026-11-25): Suprah's admins are told once so they can be refunded. */
   secondChargeIds?: string[];
+  /**
+   * Shipping Suprah bills for a load (2026-11-25): to the load's customer or
+   * to the dealership. These are Suprah's money: organizationId is
+   * SUPRAH_BILLING_ORG (so no dealership total or payout counts them) and
+   * forOrganizationId is the dealership whose load it is.
+   */
+  billedTo?: 'customer' | 'dealership';
+  forOrganizationId?: string;
 
   /** A card dispute (chargeback). Revenue counts the payment until the bank
    *  decides; a lost dispute is left out like a refund. */
@@ -147,6 +155,8 @@ const PaymentSchema: Schema<IPayment> = new Schema(
     refundedAmount: { type: Number, min: 0 },
     refundedAt: { type: Date },
     secondChargeIds: { type: [String], default: undefined },
+    billedTo: { type: String, enum: ['customer', 'dealership'] },
+    forOrganizationId: { type: String, index: true, sparse: true },
     stripeDisputeId: { type: String, trim: true },
     disputeStatus: { type: String, enum: ['open', 'won', 'lost'] },
     disputedAmount: { type: Number, min: 0 },

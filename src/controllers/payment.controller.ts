@@ -42,6 +42,11 @@ import { statementSuffixFor } from '../utils/paymentBranding';
 import { cardFailureReason, refundProblemMessage, stripeErrorForLog } from '../utils/stripeErrors';
 import { notifySuperAdmins } from '../services/dealershipPayouts.service';
 import { SUPPORT_EMAIL } from '../utils/userMessages';
+import { SUPRAH_BILLING_ORG, SUPRAH_ISSUER_NAME, isSuprahBilled } from '../utils/loadBilling';
+
+/** The dealership an invoice belongs to: for Suprah's own shipping invoices, the load's dealership (2026-11-25). */
+const dealershipOf = (payment: { organizationId?: unknown; forOrganizationId?: unknown }) =>
+  String((isSuprahBilled(payment) ? payment.forOrganizationId : payment.organizationId) ?? '');
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-02-25.clover',
@@ -88,12 +93,15 @@ async function afterPaid(payment: any, source: string) {
     metadata: { paymentId: payment._id.toString(), amount: payment.amount, customerName: payment.customerName },
   });
 
-  try { await ReferralService.processPaymentReward(payment, source); }
-  catch (e) { logger.error({ err: e, paymentId: payment._id }, 'Referral reward failed after payment'); }
+  // A dealership's own shipping bill from Suprah isn't a customer's payment (2026-11-25).
+  if (payment.billedTo !== 'dealership') {
+    try { await ReferralService.processPaymentReward(payment, source); }
+    catch (e) { logger.error({ err: e, paymentId: payment._id }, 'Referral reward failed after payment'); }
+  }
 
   await activityService.createActivity({
     userId: 'SYSTEM',
-    organizationId: payment.organizationId.toString(),
+    organizationId: dealershipOf(payment),
     type: 'payment_completed',
     title: 'Payment Succeeded',
     description: `Payment of $${payment.amount.toFixed(2)} received`,
@@ -144,7 +152,7 @@ async function flagSecondCharge(invoiceId: unknown, paymentIntentId: string | un
   logger.warn({ paymentId: String(flagged._id), paymentIntentId }, 'A second card payment came in for a paid invoice');
   try {
     await notifyOrgAdmins(
-      String(flagged.organizationId),
+      dealershipOf(flagged),
       'payment_failed',
       'Customer charged twice',
       `${flagged.customerName} paid ${invoice} a second time${amount}. Suprah has been told so the extra payment can be refunded. If you have questions, contact Suprah AI support at ${SUPPORT_EMAIL}.`,
@@ -185,7 +193,7 @@ async function recordDispute(dispute: Stripe.Dispute) {
 
   const notice = disputeNotice(before, outcome, details.amount / 100);
   try {
-    await notifyOrgAdmins(before.organizationId.toString(), 'payment_failed', notice.title, notice.message, {
+    await notifyOrgAdmins(dealershipOf(before), 'payment_failed', notice.title, notice.message, {
       paymentId: before._id.toString(),
       disputeStatus: outcome,
       route: '/billing/payments',
@@ -197,8 +205,9 @@ async function recordDispute(dispute: Stripe.Dispute) {
 async function broadcastPaymentSuccess(payment: any) {
   try {
     const io = getSocketIO();
-    if (io && payment.organizationId) {
-      io.to(`org:${payment.organizationId}`).emit('payment:updated', {
+    const dealership = dealershipOf(payment);
+    if (io && dealership) {
+      io.to(`org:${dealership}`).emit('payment:updated', {
         paymentId: payment._id.toString(),
         status: 'succeeded',
         amount: payment.amount,
@@ -674,7 +683,11 @@ async function stripeCustomerFor(payment: any): Promise<string> {
 // Charges exactly `payment.amount` as a single Checkout line so the total always
 // matches the invoice (the itemised breakdown lives in our own UI). Used by both
 // the customer "Pay Now" button and "Buy Now".
-async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Session> {
+async function buildCheckoutSession(
+  payment: any,
+  // Where Stripe sends the payer back (2026-11-25: a dealership pays its bills from Suprah on its SuprahPay page).
+  returnTo?: { success: string; cancel: string },
+): Promise<Stripe.Checkout.Session> {
   const stripeCustomerId = await stripeCustomerFor(payment);
 
   // SuprahPay branding with the dealership's name (2026-11-21): the payment
@@ -682,7 +695,8 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
   const org = mongoose.isValidObjectId(payment.organizationId)
     ? await Organization.findById(payment.organizationId).select('name').lean()
     : null;
-  const dealershipName = String(org?.name || '').trim();
+  // Suprah's own shipping invoices are signed Suprah AI (2026-11-25).
+  const dealershipName = isSuprahBilled(payment) ? SUPRAH_ISSUER_NAME : String(org?.name || '').trim();
   const description = String(payment.description || '').trim();
   const invoiceTitle = payment.invoiceNumber ? `Invoice ${payment.invoiceNumber}` : description || 'Invoice';
   const sessionParams: Stripe.Checkout.SessionCreateParams = {
@@ -713,9 +727,9 @@ async function buildCheckoutSession(payment: any): Promise<Stripe.Checkout.Sessi
       invoiceNumber: payment.invoiceNumber || '',
       source: payment.source || 'manual',
     },
-    success_url: `${CUSTOMER_APP_URL}/customer/payments?status=success&session_id={CHECKOUT_SESSION_ID}`,
+    success_url: returnTo?.success ?? `${CUSTOMER_APP_URL}/customer/payments?status=success&session_id={CHECKOUT_SESSION_ID}`,
     // Coming back without paying puts this invoice back under "To pay".
-    cancel_url: `${CUSTOMER_APP_URL}/customer/payments?status=cancelled&invoice=${payment._id.toString()}`,
+    cancel_url: returnTo?.cancel ?? `${CUSTOMER_APP_URL}/customer/payments?status=cancelled&invoice=${payment._id.toString()}`,
   };
   const suffix = statementSuffixFor(dealershipName);
   let session: Stripe.Checkout.Session;
@@ -800,6 +814,7 @@ const createCustomerCheckoutSession = asyncHandler(async (req: Request, res: Res
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
     throw new ApiError(403, 'You are not authorized to pay this invoice');
   }
+  refuseDealershipBill(payment);
   if (payment.status === 'succeeded') throw new ApiError(400, 'This invoice has already been paid');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This invoice has been cancelled');
   await refuseRefundedOrOverLimit(payment, 'customer');
@@ -1079,7 +1094,7 @@ async function recordRefund(filter: Record<string, unknown>, state: { refundedAm
     return Payment.findOneAndUpdate(filter, refundUpdate(state, at), { new: true });
   }
 
-  const orgId = String(before.organizationId);
+  const orgId = dealershipOf(before);
   const amount = Number(before.amount) || 0;
   const refunded = roundCents(state.refundedAmount - (Number(before.refundedAmount) || 0));
   notifyOrgAdmins(
@@ -1092,7 +1107,10 @@ async function recordRefund(filter: Record<string, unknown>, state: { refundedAm
     { paymentId: String(before._id) },
   );
   // How much, from which dealership, and that it can take 5-10 business days to show on their card.
-  void notifyCustomerOfRefund(before, refunded, orgId);
+  // A dealership's own bill from Suprah is told to its admins above, not to one person (2026-11-25).
+  if (before.billedTo !== 'dealership') {
+    void notifyCustomerOfRefund(before, refunded, orgId, isSuprahBilled(before) ? SUPRAH_ISSUER_NAME : undefined);
+  }
   return (await Payment.findById(before._id)) ?? before;
 }
 
@@ -1105,14 +1123,16 @@ async function notifyCustomerOfRefund(
   payment: { _id: unknown; customerEmail?: string; description?: string; invoiceNumber?: string },
   refunded: number,
   orgId: string,
+  issuer?: string,
 ) {
   try {
     const email = String(payment.customerEmail ?? '').toLowerCase();
     if (!email) return;
     const customer = await User.findOne({ email, emailVerified: true }).select('_id').lean();
     if (!customer) return;
-    const dealership = await Organization.findById(orgId).select('name').lean();
-    const from = dealership?.name ? ` by ${dealership.name}` : '';
+    // Suprah's own shipping invoices are refunded by Suprah AI (2026-11-25).
+    const name = issuer ?? (mongoose.isValidObjectId(orgId) ? (await Organization.findById(orgId).select('name').lean())?.name : undefined);
+    const from = name ? ` by ${name}` : '';
     const what = payment.description ? ` for "${payment.description}"` : '';
     await safeCreateNotification({
       userId: customer._id as any,
@@ -1378,7 +1398,8 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
 
   // Only what the customer's screens show, plus the dispute amounts that
   // "Total paid" needs (those two are left out of what is sent back).
-  const payments = await Payment.find({ customerEmail: user.email.toLowerCase() })
+  // A dealership's own bills from Suprah aren't a person's invoices (2026-11-25).
+  const payments = await Payment.find({ customerEmail: user.email.toLowerCase(), billedTo: { $ne: 'dealership' } })
     .select([...CUSTOMER_INVOICE_FIELDS, 'disputeStatus', 'disputedAmount', 'organizationId'].join(' '))
     .populate('aftermarketProductId', 'name media')
     .sort({ createdAt: -1 })
@@ -1391,7 +1412,7 @@ const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response)
     : [];
   const dealershipNames = new Map(orgs.map((org) => [String(org._id), String(org.name || '')]));
   for (const p of payments as Array<Record<string, unknown>>) {
-    p.dealershipName = dealershipNames.get(String(p.organizationId)) || undefined;
+    p.dealershipName = isSuprahBilled(p) ? SUPRAH_ISSUER_NAME : dealershipNames.get(String(p.organizationId)) || undefined;
   }
 
   // Owed = the "To pay" list, so the total and the list always agree (2026-11-23).
@@ -1422,6 +1443,7 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
   const payment = await Payment.findById(paymentId);
   if (!payment) throw new ApiError(404, 'Payment not found');
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) throw new ApiError(403, 'You are not authorized to pay this invoice');
+  refuseDealershipBill(payment);
   if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This payment has been cancelled');
   await refuseRefundedOrOverLimit(payment, 'customer');
@@ -1524,6 +1546,11 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
     throw new ApiError(403, 'You are not authorized to cancel this invoice');
   }
+  refuseDealershipBill(payment);
+  if (payment.billedTo === 'customer') {
+    // A booked load's shipping invoice is cancelled with the load (2026-11-25).
+    throw new ApiError(400, "This is the shipping invoice for a booked shipment, so it can't be cancelled here. If the shipment is off, contact the dealership.");
+  }
   if (payment.status === 'succeeded') {
     throw new ApiError(400, 'This invoice has already been paid and can’t be cancelled.');
   }
@@ -1614,7 +1641,89 @@ const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, customerInvoiceView(payment), 'Invoice cancelled'));
 });
 
+// ─── Shipping Suprah bills for loads (2026-11-25) ─────────────────────────────
+
+/** A dealership's bill from Suprah is paid on the dealership's SuprahPay page, not from a personal account. */
+function refuseDealershipBill(payment: { billedTo?: string }) {
+  if (payment.billedTo === 'dealership') {
+    throw new ApiError(403, "This is your dealership's bill from Suprah. Pay it on your dealership's SuprahPay page.");
+  }
+}
+
+/**
+ * Closes an invoice's open Stripe payment page and card form payment, for
+ * example before a load's shipping invoice is cancelled or replaced. 'paid'
+ * when one of them was paid a moment ago (it's then marked paid, once).
+ */
+export async function closeOpenPaymentPages(payment: any): Promise<'paid' | 'closed'> {
+  if ((await settleEarlierCheckout(payment)) === 'paid') return 'paid';
+  if ((await settleEarlierCardPayment(payment)) === 'paid') return 'paid';
+  return 'closed';
+}
+
+const SUPRAH_BILL_FIELDS = 'amount status invoiceNumber description loadId createdAt paidAt failureReason refundedAmount billedTo';
+
+/** The dealership's bill from Suprah, found only within the signed-in person's dealership. */
+async function dealershipBill(req: Request) {
+  const orgId = req.orgId as string;
+  if (!mongoose.isValidObjectId(req.params.id)) throw new ApiError(404, 'That bill could not be found.');
+  const bill = await Payment.findOne({ _id: req.params.id, organizationId: SUPRAH_BILLING_ORG, forOrganizationId: orgId, billedTo: 'dealership' });
+  if (!bill) throw new ApiError(404, 'That bill could not be found.');
+  return bill;
+}
+
+// GET /api/payments/suprah-bills — the dealership's shipping bills from Suprah (staff).
+const getSuprahBills = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const bills = await Payment.find({ organizationId: SUPRAH_BILLING_ORG, forOrganizationId: orgId, billedTo: 'dealership' })
+    .select(SUPRAH_BILL_FIELDS)
+    .populate('loadId', 'loadNumber status')
+    .sort({ createdAt: -1 })
+    .limit(100)
+    .lean();
+  res.json(new ApiResponse(200, bills, 'Bills from Suprah'));
+});
+
+// POST /api/payments/suprah-bills/:id/pay — opens Stripe's payment page (admins and staff with Finance access).
+const paySuprahBill = asyncHandler(async (req: Request, res: Response) => {
+  const bill = await dealershipBill(req);
+  if (bill.status === 'succeeded') throw new ApiError(400, 'This bill is already paid.');
+  if (!isAwaitingPayment(bill.status)) throw new ApiError(400, "This bill isn't waiting for payment any more.");
+  await refuseRefundedOrOverLimit(bill, 'staff');
+  if ((await closeOpenPaymentPages(bill)) === 'paid') {
+    throw new ApiError(409, 'This bill was just paid. Refresh to see it.');
+  }
+  const back = `${CUSTOMER_APP_URL}/billing?bill=${bill._id.toString()}`;
+  const session = await buildCheckoutSession(bill, { success: `${back}&billStatus=paid`, cancel: `${back}&billStatus=left` });
+  res.json(new ApiResponse(200, { url: session.url }, 'Payment page ready'));
+});
+
+// POST /api/payments/suprah-bills/:id/check — back from Stripe's page: paid, or put back to unpaid.
+const checkSuprahBill = asyncHandler(async (req: Request, res: Response) => {
+  const bill = await dealershipBill(req);
+  if (bill.status !== 'processing' || !bill.stripeCheckoutSessionId) {
+    return res.json(new ApiResponse(200, { status: bill.status }, 'Bill status'));
+  }
+  const session = await stripe.checkout.sessions.retrieve(bill.stripeCheckoutSessionId);
+  if (session.payment_status === 'paid') {
+    const piId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+    const claimed = await claimPaid({ _id: bill._id }, { stripeCheckoutSessionId: session.id, ...(piId ? { stripePaymentIntentId: piId } : {}) });
+    if (claimed) await afterPaid(claimed, 'STRIPE_CHECKOUT_RETURN');
+    return res.json(new ApiResponse(200, { status: 'succeeded' }, 'Bill paid'));
+  }
+  if (req.body?.left === true) {
+    // Left Stripe's page without paying: close it and put the bill back as unpaid.
+    if ((await settleEarlierCheckout(bill)) === 'paid') return res.json(new ApiResponse(200, { status: 'succeeded' }, 'Bill paid'));
+    const back = await Payment.findOneAndUpdate({ _id: bill._id, status: 'processing' }, { $set: { status: 'pending' } }, { new: true });
+    return res.json(new ApiResponse(200, { status: back?.status ?? 'pending' }, 'Bill is unpaid'));
+  }
+  res.json(new ApiResponse(200, { status: bill.status }, 'Bill status'));
+});
+
 export default {
+  getSuprahBills,
+  paySuprahBill,
+  checkSuprahBill,
   createPayment,
   getPayments,
   getPendingPayments,

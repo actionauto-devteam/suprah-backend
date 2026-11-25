@@ -217,6 +217,17 @@ export const createLoadSchema = z
     contract: contractSchema,
     pricing: pricingInputSchema,
     soldOnDelivery: z.boolean("Choose whether the car is sold to the person receiving it.").optional(),
+    // Who pays for shipping (SuprahPay, 2026-11-25). Each choice is checked
+    // in utils/loadBilling (billingFromInput), with plain messages.
+    billing: z
+      .object({
+        billTo: z.string().trim().max(20).optional(),
+        method: z.string().trim().max(20).optional(),
+        customerName: z.string().max(400).optional(),
+        customerEmail: z.string().max(400).optional(),
+        shippingPrice: z.union([z.number(), z.string().max(40)]).optional(),
+      })
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (value.postType !== "assign-carrier") return;
