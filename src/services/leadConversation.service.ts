@@ -553,14 +553,24 @@ async function unlinkedPhoneRecords(organizationId: string, phone: string | null
   return { messages, calls };
 }
 
+async function leadsCombinedInto(organizationId: string, leadId: unknown): Promise<string[]> {
+  const rows: any[] = await Lead.find({ organizationId, 'combinedInto.leadId': leadId, 'combinedInto.via': { $ne: 'link' } })
+    .select('_id')
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .lean();
+  return rows.map((row) => String(row._id));
+}
+
 export async function listEarlierConversations(organizationId: string, lead: any) {
-  const same = await sameCustomerLeadIds(organizationId, lead);
-  if (!same.available) return { available: false, reason: same.reason, leads: [], unlinkedCount: 0 };
-  const leads = same.leadIds.length
-    ? await Lead.find({ _id: { $in: same.leadIds }, organizationId, 'combinedInto.via': { $ne: 'link' } }).select('firstName lastName status source channel createdAt updatedAt combinedInto').sort({ createdAt: -1 }).limit(10).lean()
+  const [same, combinedIds] = await Promise.all([sameCustomerLeadIds(organizationId, lead), leadsCombinedInto(organizationId, lead._id)]);
+  if (!same.available && !combinedIds.length) return { available: false, reason: same.reason, leads: [], unlinkedCount: 0 };
+  const earlierIds = [...new Set([...combinedIds, ...(same.available ? same.leadIds : [])])];
+  const leads = earlierIds.length
+    ? await Lead.find({ _id: { $in: earlierIds }, organizationId, 'combinedInto.via': { $ne: 'link' } }).select('firstName lastName status source channel createdAt updatedAt combinedInto').sort({ createdAt: -1 }).limit(10).lean()
     : [];
   let unlinkedCount = 0;
-  if (same.phoneSafe && lead.phone) {
+  if (same.available && same.phoneSafe && lead.phone) {
     const unlinked = await unlinkedPhoneRecords(organizationId, lead.phone);
     unlinkedCount = unlinked.messages.length + unlinked.calls.length;
   }
@@ -662,10 +672,10 @@ export async function buildLeadConversation(organizationId: string, leadId: stri
 
 export async function getEarlierConversation(organizationId: string, leadId: string, earlierId: string) {
   const lead = await loadLead(organizationId, leadId);
-  const same = await sameCustomerLeadIds(organizationId, lead);
-  if (!same.available) throw new ApiError(404, 'Earlier conversations are not available for this lead');
+  const [same, combinedIds] = await Promise.all([sameCustomerLeadIds(organizationId, lead), leadsCombinedInto(organizationId, lead._id)]);
+  if (!same.available && !combinedIds.length) throw new ApiError(404, 'Earlier conversations are not available for this lead');
   if (earlierId === 'unlinked') {
-    if (!same.phoneSafe || !lead.phone) throw new ApiError(404, 'No earlier messages for this number');
+    if (!same.available || !same.phoneSafe || !lead.phone) throw new ApiError(404, 'No earlier messages for this number');
     const [{ messages, calls }, agent] = await Promise.all([unlinkedPhoneRecords(organizationId, lead.phone), resolveAiAgentIdentity(organizationId)]);
     const customerName = leadName(lead);
     const items: ConversationItem[] = [
@@ -692,7 +702,8 @@ export async function getEarlierConversation(organizationId: string, leadId: str
     ].sort((a, b) => (a.occurredAt < b.occurredAt ? -1 : 1));
     return { lead: null, items };
   }
-  if (!same.leadIds.includes(String(earlierId))) throw new ApiError(404, 'Earlier conversation not found');
+  const allowed = combinedIds.includes(String(earlierId)) || (same.available && same.leadIds.includes(String(earlierId)));
+  if (!allowed) throw new ApiError(404, 'Earlier conversation not found');
   const earlierLead = await loadLead(organizationId, earlierId);
   const page = await loadConversationItems(organizationId, earlierLead, { limit: 200 });
   return {
