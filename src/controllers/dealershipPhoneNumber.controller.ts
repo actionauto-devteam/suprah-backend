@@ -13,6 +13,7 @@ import {
 } from '../services/dealershipPhoneNumber.service';
 import { routingGroupMembers } from '../services/callRoutingConfig.service';
 import { describeAllLocationsRing, saveAllLocationsRingGroup } from '../services/allLocationsRing.service';
+import { listOtherSystemNumbers, saveOtherSystemNumbers } from '../services/dealershipOwnNumbers.service';
 
 function admin(req: Request) {
   if (!req.orgId) throw new ApiError(400, 'Organization context missing');
@@ -22,12 +23,19 @@ function admin(req: Request) {
 
 export const listPhoneNumbersHandler = asyncHandler(async (req: Request, res: Response) => {
   const { orgId } = admin(req);
-  const [numbers, suggestion, allLocations] = await Promise.all([
+  const [numbers, suggestion, allLocations, otherNumbers] = await Promise.all([
     listDealershipNumbers(orgId),
     currentNumberSuggestion(orgId),
     describeAllLocationsRing(orgId),
+    listOtherSystemNumbers(orgId),
   ]);
-  res.json(new ApiResponse(200, { numbers, suggestion, allLocations }, 'Phone numbers'));
+  res.json(new ApiResponse(200, { numbers, suggestion, allLocations, otherNumbers }, 'Phone numbers'));
+});
+
+export const saveOtherNumbersHandler = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = admin(req);
+  const otherNumbers = await saveOtherSystemNumbers(orgId, req.body);
+  res.json(new ApiResponse(200, { otherNumbers }, 'Other phone system numbers saved'));
 });
 
 export const saveAllLocationsRingHandler = asyncHandler(async (req: Request, res: Response) => {

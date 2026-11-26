@@ -3,6 +3,7 @@ import crmAuth from "../middleware/crmAuth.middleware";
 import * as ctrl from "../controllers/communication.controller";
 import * as recording from '../controllers/callRecording.controller';
 import { listRoutingConfigs, saveRoutingConfig } from '../controllers/callRoutingConfig.controller';
+import { uploadTextFiles } from '../middleware/text-file-upload.middleware';
 
 const router = express.Router();
 router.use((req, res, next) => {
@@ -34,7 +35,8 @@ router.put('/ivr-configs/:id', saveRoutingConfig);
 
 router.get("/conversations", ctrl.listConversations);
 router.get("/threads/by-phone", ctrl.getThreadByPhone);
-router.post("/messages", ctrl.sendMessage);
+router.post("/messages", uploadTextFiles, ctrl.sendMessage);
+router.get("/messages/:id/media/:index", ctrl.getMessageMedia);
 router.get("/lookup", ctrl.lookupCaller);
 router.get("/calls/ringing", ctrl.listRingingCalls);
 router.get("/calls/active", ctrl.listActiveCalls);

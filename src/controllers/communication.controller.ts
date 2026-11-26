@@ -40,6 +40,7 @@ import { recordingPrincipal } from '../services/callRecordingAccess.service';
 import { attentionOrgIds } from '../services/aiHumanAttention.service';
 import { loadPhoneLeads, classifyInquiryScope } from '../services/vehicleInquiryContext.service';
 import { leadHandlingTimeline, recordLeadHandling } from '../services/leadHandling.service';
+import { openMessageMedia, type OutgoingTextFile } from '../services/textMedia.service';
 
 /** crmAuth() attaches req.user or req.crmUser plus req.orgId (same pattern
  *  as lead.controller). */
@@ -275,6 +276,7 @@ export async function sendManualLeadSms(input: {
   leadId?: any;
   clientRequestId?: unknown;
   origin?: "chrome_extension";
+  files?: OutgoingTextFile[];
 }): Promise<ManualLeadSmsOutcome> {
   const { orgId, user, toPhone, body, customerId, customerName, leadId } = input;
   if (!toPhone) throw new ApiError(400, "toPhone is required");
@@ -282,7 +284,8 @@ export async function sendManualLeadSms(input: {
   if (phoneProblem) throw new ApiError(400, phoneProblem);
   await assertLeadOpenForManualSend(orgId, leadId);
   await assertManualSmsAllowed(orgId, toPhone, leadId);
-  const claim = await startComposerSms(input.clientRequestId, user.userId, orgId, leadId, toPhone, body);
+  const fileKey = (input.files || []).map((file) => `${file.originalname}:${file.size}`).join("|");
+  const claim = await startComposerSms(input.clientRequestId, user.userId, orgId, leadId, toPhone, fileKey ? `${body || ""}|${fileKey}` : body);
   if (claim?.kind === "duplicate") {
     return { duplicate: true, response: await duplicateComposerSms(orgId, claim.result) };
   }
@@ -297,6 +300,7 @@ export async function sendManualLeadSms(input: {
     leadId,
     destinationPolicy: "manual",
     uncertainOnTransportError: Boolean(claim),
+    ...(input.files?.length ? { files: input.files } : {}),
     ...(input.origin ? { origin: input.origin } : {}),
   }));
   return { duplicate: false, message: result.message, conversation: result.conversation };
@@ -314,6 +318,7 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     customerName,
     leadId,
     clientRequestId: req.body?.clientRequestId,
+    files: ((req as any).files || []) as OutgoingTextFile[],
   });
   if (outcome.duplicate) {
     res.status(200).json(outcome.response);
@@ -336,6 +341,16 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
         "Message sent"
       )
     );
+});
+
+export const getMessageMedia = asyncHandler(async (req: Request, res: Response) => {
+  const opened = await openMessageMedia(String(orgOf(req)), String(req.params.id), Number(req.params.index));
+  if (!opened) throw new ApiError(404, "This file is no longer available");
+  res.setHeader("Content-Type", opened.contentType);
+  res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(opened.name)}"`);
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  opened.stream.pipe(res);
 });
 
 /** Everything for one customer's profile widget: thread + calls, shared org-wide. */

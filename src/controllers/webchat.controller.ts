@@ -492,6 +492,7 @@ export const getPublicConfig = asyncHandler(async (req: Request, res: Response) 
         greeting: metadata.webchatGreeting || '',
         withinHours: isWithinSendingHours(),
         textMode: metadata.webchatTextMode === true,
+        color: /^#[0-9a-f]{6}$/i.test(String(metadata.webchatColor || "")) ? String(metadata.webchatColor) : "",
         dealershipName: String((organization as any)?.name || '').trim(),
         locations: locations.map((row) => row.name),
       },

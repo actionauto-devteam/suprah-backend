@@ -16,29 +16,11 @@ jest.mock('../../src/models/Organization.model', () => ({
 }));
 
 import {
-  validateOutboundMessage,
   normalizeToken,
   matchesVehicle,
-  classifyMessageSafety,
+  buildReengagementText,
   generateReengagementMessage,
 } from '../../src/services/vehicleReengagement.service';
-
-// Full validateOutboundMessage / classifier cases now live in aiOutboundSafety.test.ts
-// (the shared module both this service and aiAgent.service.ts delegate to).
-// These are smoke tests confirming this service's thin wrappers still delegate correctly.
-describe('validateOutboundMessage (delegates to the shared module)', () => {
-  it('blocks a message containing a price', () => {
-    expect(validateOutboundMessage('Great news, this is only $500 for you!').ok).toBe(false);
-  });
-
-  it('passes a benign re-engagement message', () => {
-    expect(
-      validateOutboundMessage(
-        'Hi Alex, a 2022 Toyota Camry just arrived that matches what you were looking for. Come take a look!',
-      ).ok,
-    ).toBe(true);
-  });
-});
 
 describe('normalizeToken', () => {
   it('lowercases, trims, and strips punctuation', () => {
@@ -81,28 +63,38 @@ describe('matchesVehicle', () => {
   });
 });
 
-describe('classifyMessageSafety (delegates to the shared classifier)', () => {
-  beforeEach(() => {
-    mockCreate.mockReset();
+describe('buildReengagementText (the approved re-engagement wording)', () => {
+  const lead = { _id: 'lead-1', firstName: 'Jordan' };
+  const vehicle = { _id: 'vehicle-1', organizationId: 'org-1', year: 2021, make: 'Toyota', modelName: 'Camry', trim: 'SE', vdpUrl: 'https://www.example.com/inventory/2021-toyota-camry-se' } as any;
+
+  it('uses the approved wording with the name, agent, vehicle and link', () => {
+    expect(buildReengagementText(lead, vehicle, 'Anna')).toBe(
+      'Hey Jordan, this is Anna from Action Auto Sales and Finance. The 2021 Toyota Camry SE has completed the reconditioning process and is now ready for sale. Please book a test drive or schedule an appointment today! Click here for vehicle information: https://www.example.com/inventory/2021-toyota-camry-se',
+    );
   });
 
-  it('returns SAFE only on an exact "SAFE" response', async () => {
-    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
-    await expect(classifyMessageSafety('hello')).resolves.toBe('SAFE');
-  });
+  it.each([undefined, '', '   ', 'Unknown', 'customer', 'jordan@example.com', 'Lead 4421', 'A very long name that clearly is not a first name'])(
+    'says "Hey there" when the first name is %p',
+    (firstName) => {
+      expect(buildReengagementText({ firstName }, vehicle, 'Anna').startsWith('Hey there, this is Anna from Action Auto Sales and Finance.')).toBe(true);
+    },
+  );
 
-  it('treats a literal "UNSAFE" response as unsafe, not a SAFE substring match', async () => {
-    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'UNSAFE' } }] });
-    await expect(classifyMessageSafety('hello')).resolves.toBe('UNSAFE');
-  });
+  it.each([undefined, '', 'not a link', 'javascript:alert(1)', 'https://example.com/a b', `https://example.com/${'x'.repeat(300)}`])(
+    'leaves the link sentence out when the vehicle link is %p',
+    (vdpUrl) => {
+      const text = buildReengagementText(lead, { ...vehicle, vdpUrl }, 'Anna');
+      expect(text).not.toContain('Click here');
+      expect(text.endsWith('Please book a test drive or schedule an appointment today!')).toBe(true);
+    },
+  );
 
-  it('resolves to ERROR on timeout rather than hanging', async () => {
-    mockCreate.mockImplementationOnce(() => new Promise(() => {}));
-    await expect(classifyMessageSafety('hello')).resolves.toBe('ERROR');
+  it('still reads well when the vehicle has no details', () => {
+    expect(buildReengagementText(lead, { organizationId: 'org-1' } as any, 'Anna')).toContain('The vehicle has completed the reconditioning process');
   });
 });
 
-describe('generateReengagementMessage (sender identity)', () => {
+describe('generateReengagementMessage', () => {
   beforeEach(() => {
     mockCreate.mockReset();
     mockOrganizationFindById.mockReset();
@@ -111,24 +103,10 @@ describe('generateReengagementMessage (sender identity)', () => {
     });
   });
 
-  const lead = { _id: 'lead-1', firstName: 'Jordan', vehicle: { year: '2022', make: 'Toyota', model: 'Camry' } };
-  const vehicle = { _id: 'vehicle-1', organizationId: 'org-1', year: 2022, make: 'Toyota', modelName: 'Camry SE' } as any;
+  it('uses the AI agent name from settings and does not ask the AI to write anything', async () => {
+    const result = await generateReengagementMessage({ firstName: 'Jordan' }, { organizationId: 'org-1', year: 2022, make: 'Toyota', modelName: 'Camry' } as any);
 
-  it('uses the configurable AI agent name, never the old hardcoded "Suprah Autrix" identity', async () => {
-    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'Hi Jordan, a matching Camry just arrived!' } }] });
-    await generateReengagementMessage(lead, vehicle);
-
-    const systemPrompt = mockCreate.mock.calls[0][0].messages[0].content as string;
-    expect(systemPrompt).toContain('You are Anna, writing on behalf of Action Auto Utah');
-    expect(systemPrompt).not.toContain('Alex');
-    expect(systemPrompt).not.toContain('Autrix');
-  });
-
-  it('includes an explicit instruction against self-labeling as a virtual assistant/bot', async () => {
-    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'Hi Jordan, a matching Camry just arrived!' } }] });
-    await generateReengagementMessage(lead, vehicle);
-
-    const systemPrompt = mockCreate.mock.calls[0][0].messages[0].content as string;
-    expect(systemPrompt).toMatch(/never describe yourself with a label/i);
+    expect(result.text).toBe('Hey Jordan, this is Anna from Action Auto Sales and Finance. The 2022 Toyota Camry has completed the reconditioning process and is now ready for sale. Please book a test drive or schedule an appointment today!');
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 });

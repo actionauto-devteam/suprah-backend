@@ -7,6 +7,7 @@ import {
   listTeamMembersHandler,
   recheckPhoneNumberHandler,
   saveAllLocationsRingHandler,
+  saveOtherNumbersHandler,
   updatePhoneNumberHandler,
 } from '../controllers/dealershipPhoneNumber.controller';
 
@@ -17,6 +18,7 @@ router.use(crmAuth());
 router.get('/', listPhoneNumbersHandler);
 router.get('/teams/:groupId/members', listTeamMembersHandler);
 router.put('/all-locations', saveAllLocationsRingHandler);
+router.put('/other-numbers', saveOtherNumbersHandler);
 router.post('/', createPhoneNumberHandler);
 router.patch('/:id', updatePhoneNumberHandler);
 router.post('/:id/check', recheckPhoneNumberHandler);

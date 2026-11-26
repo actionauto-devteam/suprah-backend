@@ -26,6 +26,7 @@ import { combineInfoForLead } from './leadDuplicateCombine.service';
 import { AI_AGENT_FALLBACK_LABEL, resolveAiAgentIdentity } from '../utils/aiAgentIdentity';
 import { isMissingGmailThread, leadEmailThreadIds } from '../utils/gmailThread';
 import { readPreviousMailboxThread } from './previousMailbox.service';
+import { readableEmailText } from '../utils/readableEmailText';
 
 export type ConversationChannel = 'sms' | 'email' | 'webchat' | 'call' | 'note' | 'inquiry';
 export type DeliveryCode = 'sending' | 'sent' | 'delivered' | 'failed' | 'unconfirmed' | 'received';
@@ -59,6 +60,7 @@ export interface ConversationItem {
   };
   inquiry?: { isOriginal: boolean; kind: string; source?: string | null; sourceProvider?: string | null; channel?: string | null; vehicle?: Record<string, unknown> | null };
   attachments?: string[];
+  media?: Array<{ index: number; name: string; contentType: string; size: number; kind: 'image' | 'file' }>;
   messageId?: string;
   note?: { authorType?: string; milestone?: boolean; kind?: string };
 }
@@ -317,6 +319,9 @@ export async function loadConversationItems(organizationId: string, lead: any, o
       author: authorFor(message.sentBy, customerName, inbound, agent.displayName),
       status: smsDeliveryStatus(message),
       messageId: String(message._id),
+      ...(Array.isArray(message.media) && message.media.length
+        ? { media: message.media.map((item: any, index: number) => ({ index, name: String(item.name || ''), contentType: String(item.contentType || ''), size: Number(item.size) || 0, kind: item.kind === 'image' ? 'image' as const : 'file' as const })) }
+        : {}),
     });
   }
   for (const call of calls as any[]) {
@@ -501,6 +506,9 @@ export async function loadConversationItems(organizationId: string, lead: any, o
 
   const ordered = items.filter((item) => isOlder(item, cursor)).sort(newestFirst);
   const page = ordered.slice(0, limit);
+  await Promise.all(page.map(async (item: any) => {
+    if (item.channel === 'email' || item.kind === 'inquiry') item.body = await readableEmailText(item.body);
+  }));
   const sourceFull = [sms, calls, chats].some((list) => (list as any[]).length > limit);
   const hasMore = ordered.length > limit || sourceFull;
   return {

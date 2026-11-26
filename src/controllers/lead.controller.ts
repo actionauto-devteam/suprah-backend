@@ -30,6 +30,7 @@ import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
+import Customer from '../models/Customer.model';
 import { buildLeadSearchCondition } from '../utils/leadSearch';
 import { customerAreaFilterCondition, leadCustomerArea, postalAddressLine } from '../utils/customerArea';
 import { LEAD_STATUS_CATEGORIES, LIFECYCLE_TERMINAL_STATUSES, NOT_A_LEAD_STATUS, UNANSWERED_LEAD_STATUSES, countedLeadFilter, isContactRestrictedStatus } from '../constants/leadStatus';
@@ -1150,15 +1151,22 @@ export const getAssignedNewCount = async (req: Request, res: Response) => {
     }
     const viewerId = await viewerUserId(req);
     if (!mongoose.isValidObjectId(viewerId)) {
-      return res.json(new ApiResponse(200, { count: 0 }));
+      return res.json(new ApiResponse(200, { count: 0, total: 0 }));
     }
-    const count = await Lead.countDocuments({
-      organizationId: orgId,
-      assignedTo: viewerId,
-      assignmentUnseenBy: viewerId,
-      ...countedLeadFilter(),
-    });
-    res.json(new ApiResponse(200, { count }));
+    const [count, total] = await Promise.all([
+      Lead.countDocuments({
+        organizationId: orgId,
+        assignedTo: viewerId,
+        assignmentUnseenBy: viewerId,
+        ...countedLeadFilter(),
+      }),
+      Lead.countDocuments({
+        organizationId: orgId,
+        assignedTo: viewerId,
+        ...countedLeadFilter(),
+      }),
+    ]);
+    res.json(new ApiResponse(200, { count, total }));
   } catch (error) {
     console.error('[ERROR] Error counting newly assigned leads:', error);
     res.status(500).json({ message: 'Error counting newly assigned leads' });
@@ -1488,6 +1496,8 @@ export const updateLeadContact = async (req: Request, res: Response) => {
   }
 };
 
+const UNKNOWN_NAME = /^\s*unknown\s*$/i;
+
 export const updateLeadDetails = async (req: Request, res: Response) => {
   try {
     const orgId = req.orgId;
@@ -1595,6 +1605,14 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'Lead not found' });
     }
     if (!lead.customerArea?.code) Object.assign(lead, { customerArea: leadCustomerArea(lead) || null });
+
+    const nameChanged = setValues.firstName !== undefined || setValues.lastName !== undefined;
+    if (nameChanged && lead.customerId && !UNKNOWN_NAME.test(String(lead.firstName || ''))) {
+      await Customer.updateOne(
+        { _id: lead.customerId, organizationId: String(orgId), firstName: { $regex: UNKNOWN_NAME } },
+        { $set: { firstName: String(lead.firstName).trim(), lastName: String(lead.lastName || '').trim() } },
+      ).catch((error) => logger.warn({ err: error, leadId: String(lead._id) }, 'Could not update the Unknown saved contact name'));
+    }
 
     if (restrictedContactChanged) {
       await recordContactRestrictionAudit({

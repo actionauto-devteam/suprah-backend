@@ -48,6 +48,7 @@ import {
 } from "../middleware/rate-limit.middleware";
 import { validateAdfSignature } from "../middleware/adfValidation.middleware";
 import { uploadLeadReplyAttachments } from "../middleware/lead-reply-upload.middleware";
+import { downloadLeadEmailAttachment } from "../controllers/leadEmailAttachment.controller";
 
 const router = Router();
 
@@ -87,6 +88,7 @@ router.post(
 
 router.get("/:id", getLeadById);
 router.get("/:id/thread", getThreadMessages);
+router.get("/:id/email-attachments/:gmailId/:index", downloadLeadEmailAttachment);
 router.get("/:id/conversation", getLeadConversation);
 router.get("/:id/conversation/earlier/:earlierId", getLeadEarlierConversation);
 router.get("/:id/reply-options", getLeadReplyOptionsHandler);

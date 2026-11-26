@@ -247,6 +247,15 @@ describe('Real-DB: Phase 73 plain emails to the main lead mailbox (local MongoDB
     expect(await Lead.countDocuments({ organizationId: orgId })).toBe(before);
   });
 
+  it('Cars.com notice emails are skipped, one after another, and make no card', async () => {
+    const before = await Lead.countDocuments({ organizationId: orgId });
+    for (const subject of ['Phone Lead Notice', 'Used Car Lead', 'Finance Intent']) {
+      const result: any = await run(gmailMessage({ from: `Cars.com <SalesLeads@cars.com>`, subject, body: `${subject}: a shopper is interested in your 2021 Ford F-150.` }));
+      expect(result).toEqual({ status: 'skipped', reason: 'platform_notice' });
+    }
+    expect(await Lead.countDocuments({ organizationId: orgId })).toBe(before);
+  });
+
   it('a lead source email with ADF content makes a normal lead', async () => {
     const email = `adf.${uid()}@example.com`;
     const result: any = await run(gmailMessage({ from: `DealersCloud <${LEAD_SOURCE}>`, subject: 'New lead', body: adfBody('Lena', 'Adams', email) }), { allowNewInquiry: true });

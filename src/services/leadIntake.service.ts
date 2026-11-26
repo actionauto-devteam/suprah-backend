@@ -24,8 +24,10 @@ import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
 import { notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
-import { markLeadAwaitingReply } from '../utils/leadActivity';
+import { markLeadAwaitingReply, touchLeadActivity } from '../utils/leadActivity';
+import { normalizeIdentityPhone } from '../utils/contactIdentity';
 import logger from '../utils/logger';
+import { DEALERSHIP_NUMBER_REASON, isDealershipNumber } from './dealershipOwnNumbers.service';
 import { CONFIRM_KEYWORDS, RESCHEDULE_KEYWORDS, isSmsKeyword, normalizeSmsCommand } from '../utils/smsKeywords';
 import { leadDisplayName } from './leadMessageNotice.service';
 import { notifyLeadPeople } from './leadNoticeRouting.service';
@@ -98,6 +100,8 @@ export async function submitLeadInquiry(request: LeadIntakeRequest): Promise<Lea
 export const CONVERSATION_ONLY_KINDS = ['email_reply', 'sms', 'call'];
 const REPLY_KINDS = ['email_reply', 'sms'];
 export const SAME_REQUEST_KINDS = ['provider_inquiry', 'website_inquiry'];
+const PHONE_KINDS = ['sms', 'call'];
+const ADOPT_WINDOW_MS = 30 * 60 * 1000;
 
 const objectIdsOf = (leadIds: unknown[]) => [...new Set(leadIds.map((id) => String(id || '')).filter((id) => mongoose.isValidObjectId(id)))]
   .map((id) => new mongoose.Types.ObjectId(id));
@@ -302,7 +306,7 @@ export async function createLeadForInquiry(organizationId: string, event: ILeadI
   };
   try {
     const created = await Lead.create(document);
-    if (REPLY_KINDS.includes(event.kind)) await markLeadAwaitingReply(created._id, event.receivedAt, organizationId);
+    if (REPLY_KINDS.includes(event.kind) && !notALead) await markLeadAwaitingReply(created._id, event.receivedAt, organizationId);
     return created;
   } catch (err: any) {
     if (err?.code !== 11000) throw err;
@@ -310,6 +314,20 @@ export async function createLeadForInquiry(organizationId: string, event: ILeadI
     if (existing) return existing;
     throw new RetryableIntakeError('Another intake created a lead for this customer at the same moment');
   }
+}
+
+async function dealershipNumberCard(organizationId: string, phone: unknown) {
+  const normalizedPhone = normalizeIdentityPhone(phone);
+  if (!normalizedPhone) return null;
+  return Lead.findOne({ organizationId, normalizedPhone, status: NOT_A_LEAD_STATUS, 'combinedInto.leadId': { $exists: false } })
+    .sort({ updatedAt: -1, _id: -1 })
+    .select('_id')
+    .lean();
+}
+
+function asOthersInquiry(event: any) {
+  const plain = typeof event?.toObject === 'function' ? event.toObject() : event;
+  return { ...plain, leadDraft: { ...(plain.leadDraft || {}), status: NOT_A_LEAD_STATUS, othersReason: DEALERSHIP_NUMBER_REASON } };
 }
 
 export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeResult> {
@@ -467,6 +485,23 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
         return { status: 'associated', inquiryId, leadId: String(lead._id), created: false, reason: decision.reason } as LeadIntakeResult;
       }
 
+      if (PHONE_KINDS.includes(event.kind) && await isDealershipNumber(organizationId, event.contact?.phone)) {
+        const card: any = await dealershipNumberCard(organizationId, event.contact?.phone);
+        await confirmHeld();
+        const lead = card || await createLeadForInquiry(organizationId, asOthersInquiry(event) as ILeadInquiry, decision);
+        const done = await completeInquiryAssociation(event._id, owner, {
+          state: 'associated',
+          outcome: card ? 'appended' : 'created_lead',
+          leadId: lead._id,
+          reason: 'dealership_number',
+          candidateLeadIds: decision.candidateLeadIds,
+          contextLeadId: event.association?.contextLeadId,
+        });
+        if (!done) throw new RetryableIntakeError('The intake lease expired before the association was saved');
+        if (card) await touchLeadActivity(card._id, organizationId, event.receivedAt);
+        return { status: 'associated', inquiryId, leadId: String(lead._id), created: !card, reason: 'dealership_number' } as LeadIntakeResult;
+      }
+
       await confirmHeld();
       const lead = await createLeadForInquiry(organizationId, event, decision);
       const done = await completeInquiryAssociation(event._id, owner, {
@@ -541,6 +576,32 @@ async function linkInquirySources(event: any): Promise<void> {
     updates.push(Appointment.updateOne({ _id: ids.appointmentId, organizationId, ...unowned }, { $set: { leadId } }));
   }
   await Promise.all(updates);
+  if (event.association?.outcome === 'created_lead' && PHONE_KINDS.includes(event.kind)) {
+    await adoptRecentPhoneRecords(organizationId, leadId, event.contact?.phone, event.receivedAt);
+  }
+}
+
+async function adoptRecentPhoneRecords(organizationId: string, leadId: unknown, phone: unknown, receivedAt: unknown): Promise<void> {
+  const normalizedPhone = normalizeIdentityPhone(phone);
+  const at = new Date(receivedAt as any).getTime();
+  if (!normalizedPhone || !Number.isFinite(at)) return;
+  const { CallLog, CommunicationMessage, Conversation } = await import('../models/communication.model');
+  const orgIds = { $in: [organizationId, new mongoose.Types.ObjectId(organizationId)] };
+  const unowned = { $or: [{ leadId: null }, { leadId: { $exists: false } }] };
+  const since = new Date(at - ADOPT_WINDOW_MS);
+  const conversations = await Conversation.find({ orgId: orgIds, customerPhone: normalizedPhone }).select('_id').lean();
+  await Promise.all([
+    CallLog.updateMany(
+      { orgId: orgIds, createdAt: { $gte: since }, $and: [unowned, { $or: [{ from: normalizedPhone }, { to: normalizedPhone }] }] },
+      { $set: { leadId } },
+    ),
+    conversations.length
+      ? CommunicationMessage.updateMany(
+          { orgId: orgIds, conversationId: { $in: conversations.map((conversation: any) => conversation._id) }, createdAt: { $gte: since }, ...unowned },
+          { $set: { leadId } },
+        )
+      : Promise.resolve(null),
+  ]);
 }
 
 function customerNameOf(event: any): string {
