@@ -26,20 +26,32 @@ export type LoadStatus =
 export interface ILoadBilling {
   /** A customer (every load made from a quote) or the dealership itself. Unset when settled outside Suprah. */
   billTo?: "customer" | "dealership";
-  /** SuprahPay invoice, or cash the customer hands the driver at pickup (COP) or delivery (COD). */
-  method?: "suprahpay" | "cop" | "cod";
+  /**
+   * SuprahPay invoice, or cash the customer hands the driver on delivery (COD).
+   * "cop" (cash at pickup) is only on loads saved while testing, before
+   * 2026-11-26, and is treated as cash on delivery.
+   */
+  method?: "suprahpay" | "cod" | "cop";
   customerName?: string;
   customerEmail?: string;
   /** What the customer pays for shipping (the quote price, or what staff entered). */
   shippingPrice?: number;
+  /**
+   * A car sold to the person receiving it (2026-11-26): its price and sales
+   * tax rate. The dealership sends that customer an automatic SuprahPay
+   * invoice for it (vehicleInvoiceId).
+   */
+  vehiclePrice?: number;
+  vehicleTaxRate?: number;
+  vehicleInvoiceId?: mongoose.Types.ObjectId;
   /** Pricing was skipped: settled outside Suprah, the staff pay the driver directly. */
   outside?: boolean;
   /** The current automatic SuprahPay invoice for this load. */
   invoiceId?: mongoose.Types.ObjectId;
-  /** COP/COD: the driver confirmed the cash (settles it), or said they weren't paid. */
+  /** Cash on delivery: the driver confirmed the cash (settles it), or said they weren't paid. */
   cashConfirmedAt?: Date;
   cashNotReceivedAt?: Date;
-  /** COP/COD: the customer confirmed paying the driver. */
+  /** Cash on delivery: the customer confirmed paying the driver. */
   cashCustomerConfirmedAt?: Date;
   decidedAt?: Date;
   decidedBy?: mongoose.Types.ObjectId;
@@ -585,10 +597,15 @@ const loadSchema = new Schema<ILoad>(
     // load screens never get them (the price would show Suprah's share).
     billing: {
       billTo: { type: String, enum: ["customer", "dealership"] },
-      method: { type: String, enum: ["suprahpay", "cop", "cod"] },
+      // "cop" stays readable for loads saved while testing; new loads are "suprahpay" or "cod".
+      method: { type: String, enum: ["suprahpay", "cod", "cop"] },
       customerName: { type: String, trim: true, maxlength: 200, select: false },
       customerEmail: { type: String, trim: true, lowercase: true, maxlength: 254, select: false },
       shippingPrice: { type: Number, min: 0, select: false },
+      // A car sold to the receiver (2026-11-26): what they pay the dealership for it.
+      vehiclePrice: { type: Number, min: 0, select: false },
+      vehicleTaxRate: { type: Number, min: 0, max: 100, select: false },
+      vehicleInvoiceId: { type: Schema.Types.ObjectId, ref: "Payment" },
       outside: { type: Boolean },
       invoiceId: { type: Schema.Types.ObjectId, ref: "Payment" },
       cashConfirmedAt: { type: Date },

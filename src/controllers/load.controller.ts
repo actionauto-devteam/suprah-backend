@@ -49,13 +49,15 @@
       afterLoadCancelled,
       afterPricingSaved,
       issueLoadInvoice,
+      issueVehicleInvoice,
+      sendVehicleInvoice,
       loadBillingOn,
       loadBillingSummary,
       pricingEditProblem,
       setLoadBilling,
     } from "../services/loadBilling.service";
-    import { billingFromInput, carrierPayOf, invoiceTermsFor } from "../utils/loadBilling";
-    import { getPlatformSettings, paymentLimitProblem } from "../services/suprahPaySettings.service";
+    import { billingFromInput, carrierPayOf, invoiceTermsFor, vehicleInvoiceTerms } from "../utils/loadBilling";
+    import { dealershipForPayments, paymentLimitProblem } from "../services/suprahPaySettings.service";
     import {
       buildLoadMaterialChanges,
       getLoadAcceptanceMaterialVersion,
@@ -445,20 +447,31 @@
 
       // Who pays for shipping (SuprahPay, 2026-11-25), for dealerships with
       // SuprahPay on. Pricing skipped: settled outside Suprah, the staff pay
-      // the driver directly. Checked before anything is saved.
+      // the driver directly. A car sold to the person receiving it (2026-11-26):
+      // the dealership also invoices them the car's price and sales tax.
+      // Checked before anything is saved.
       let billing: Record<string, unknown> | undefined;
       if (await loadBillingOn(organizationId)) {
-        const decided = billingFromInput((parsed.data as any).billing, pricing as any);
+        const dealership = await dealershipForPayments(organizationId);
+        const decided = billingFromInput((parsed.data as any).billing, pricing as any, {
+          soldToReceiver: soldOnDelivery === true,
+          defaultTaxRate: dealership.defaultTaxRate,
+        });
         if (!decided.ok) throw new ApiError(400, decided.message);
         billing = decided.billing.outside
           ? { outside: true }
           : { ...decided.billing, decidedAt: new Date(), decidedBy: user._id };
         const terms = invoiceTermsFor(decided.billing, pricing as any);
         if (terms) {
-          const limit = paymentLimitProblem(terms.amount, (await getPlatformSettings()).maxPaymentAmount);
+          const limit = paymentLimitProblem(terms.amount, dealership.maxPaymentAmount);
           if (limit) throw new ApiError(400, `The shipping invoice couldn't be sent: ${limit.charAt(0).toLowerCase()}${limit.slice(1)}`);
         }
-        // COP/COD: the driver collects their whole pay in cash. SuprahPay: no cash.
+        const car = vehicleInvoiceTerms(decided.billing);
+        if (car) {
+          const limit = paymentLimitProblem(car.amount, dealership.maxPaymentAmount);
+          if (limit) throw new ApiError(400, `The car's invoice couldn't be sent: ${limit.charAt(0).toLowerCase()}${limit.slice(1)}`);
+        }
+        // Cash on delivery: the driver collects their whole pay in cash. SuprahPay: no cash.
         const pay = carrierPayOf(pricing as any);
         if (pay !== null && decided.billing.method && postType === "load-board") {
           (pricing as any).copCodAmount = decided.billing.method === "suprahpay" ? 0 : pay;
@@ -592,6 +605,16 @@
         } catch (error) {
           logger.warn({ loadId: String(load._id), err: (error as Error)?.message }, "Load shipping invoice not sent");
           billingWarning = "The load was saved, but its SuprahPay shipping invoice wasn't sent. Open the load and send it from Billing.";
+        }
+      }
+      // The car's invoice from the dealership, when the car is sold to the receiver.
+      if (billing && !billing.outside && billing.vehiclePrice) {
+        try {
+          await issueVehicleInvoice(load._id);
+        } catch (error) {
+          logger.warn({ loadId: String(load._id), err: (error as Error)?.message }, "Load car invoice not sent");
+          const carWarning = "The load was saved, but the car's SuprahPay invoice wasn't sent. Open the load and send it from Billing.";
+          billingWarning = billingWarning ? `${billingWarning} ${carWarning}` : carWarning;
         }
       }
 
@@ -992,7 +1015,7 @@
      * Who pays for a load's shipping, and how (SuprahPay, 2026-11-25)
      * PUT /api/loads/:id/billing  { billTo, method, customerName, customerEmail, shippingPrice }
      * For an older load the first time its driver is paid, switching a
-     * customer load between SuprahPay and COP/COD, or sending the invoice again.
+     * customer load between SuprahPay and cash on delivery, or sending the invoice again.
      */
     const updateLoadBilling = asyncHandler(async (req: Request, res: Response) => {
       const user = getUser(req);
@@ -1003,6 +1026,21 @@
       const _io = getSocketIO();
       if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId: req.params.id });
       return res.json(new ApiResponse(200, summary, "Load billing saved"));
+    });
+
+    /**
+     * Send a load's car invoice again (a car sold to the person receiving it, 2026-11-26)
+     * POST /api/loads/:id/billing/car-invoice  (staff with Finance access)
+     */
+    const sendLoadCarInvoice = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) throw new ApiError(404, LOAD_NOT_FOUND);
+      const saved = await sendVehicleInvoice(req.params.id, organizationId, user._id.toString());
+      const summary = await loadBillingSummary({ _id: req.params.id, ...(saved as any) });
+      const _io = getSocketIO();
+      if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId: req.params.id });
+      return res.json(new ApiResponse(200, summary, "Car invoice sent"));
     });
 
     /**
@@ -2226,4 +2264,4 @@
       res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
     });
 
-    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, addToGarage, updateLoad, updateLoadBilling, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
+    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, addToGarage, updateLoad, updateLoadBilling, sendLoadCarInvoice, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };

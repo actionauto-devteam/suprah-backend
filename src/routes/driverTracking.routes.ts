@@ -357,7 +357,7 @@ router.post(
   driverTrackingController.reconfirmAssignment,
 );
 router.post("/loads/:id/accept", driverOnly, driverTrackingController.acceptLoad);
-// COP/COD: the driver confirms the cash, or says they weren't paid (2026-11-25).
+// Cash on delivery: the driver confirms the cash, or says they weren't paid (2026-11-25).
 router.post("/loads/:id/cash", driverOnly, confirmCashAsDriver);
 router.post(
   "/loads/:id/amendments/:amendmentId/acknowledge",

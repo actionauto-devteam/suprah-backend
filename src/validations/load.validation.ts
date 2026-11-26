@@ -226,6 +226,13 @@ export const createLoadSchema = z
         customerName: z.string().max(400).optional(),
         customerEmail: z.string().max(400).optional(),
         shippingPrice: z.union([z.number(), z.string().max(40)]).optional(),
+        // A car sold to the person receiving it (2026-11-26): its price and sales tax.
+        vehicle: z
+          .object({
+            price: z.union([z.number(), z.string().max(40)]).optional(),
+            taxRate: z.union([z.number(), z.string().max(20)]).optional(),
+          })
+          .optional(),
       })
       .optional(),
   })

@@ -1,6 +1,6 @@
 /**
- * COP/COD loads (SuprahPay, 2026-11-25): the customer hands the driver their
- * pay in cash, outside Suprah. The driver confirms it (that settles it) or
+ * Cash on delivery loads (SuprahPay, 2026-11-25; COD only since 2026-11-26):
+ * the customer hands the driver their pay in cash, outside Suprah. The driver confirms it (that settles it) or
  * says they weren't paid (dispatch and the dealership's admins are told).
  * The customer confirms paying from My Shipments; it's recorded too.
  */
@@ -12,18 +12,18 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { notifyOrgAdmins, safeCreateNotification } from '../utils/safeNotification';
-import { carrierPayOf, cashDueNow } from '../utils/loadBilling';
+import { carrierPayOf, cashDueNow, isCashMethod } from '../utils/loadBilling';
 import logger from '../utils/logger';
 
 const CASH_LOAD_FIELDS = 'organizationId loadNumber status assignedDriverId dispatchOwnerId createdBy pricing billing pickupLocation.city deliveryLocation.city';
 
-const cashLabel = (method: unknown) => (method === 'cop' ? 'cash at pickup (COP)' : 'cash on delivery (COD)');
+const CASH_LABEL = 'cash on delivery (COD)';
 const amountText = (pricing: any) => {
   const pay = carrierPayOf(pricing);
   return pay === null ? 'the driver\'s pay' : `$${pay.toFixed(2)}`;
 };
 
-/** What the driver's and the customer's screens show about a COP/COD load. */
+/** What the driver's and the customer's screens show about a cash on delivery load. */
 function cashView(load: any) {
   return {
     loadId: String(load._id),
@@ -42,7 +42,7 @@ function cashView(load: any) {
 
 /**
  * POST /api/driver-tracking/loads/:id/cash  { received: boolean }
- * The driver of a COP/COD load confirms the cash, or says they weren't paid.
+ * The driver of a cash on delivery load confirms the cash, or says they weren't paid.
  */
 export const confirmCashAsDriver = asyncHandler(async (req: Request, res: Response) => {
   const driver = req.user as IUser;
@@ -52,11 +52,11 @@ export const confirmCashAsDriver = asyncHandler(async (req: Request, res: Respon
 
   const load = await Load.findOne({ _id: req.params.id, assignedDriverId: driver._id }).select(CASH_LOAD_FIELDS).lean<any>();
   if (!load) throw new ApiError(404, 'That load could not be found among your loads.');
-  if (load.billing?.method !== 'cop' && load.billing?.method !== 'cod') {
+  if (!isCashMethod(load.billing?.method)) {
     throw new ApiError(400, 'This load is paid through SuprahPay, not in cash.');
   }
   if (!cashDueNow(load.billing.method, load.status)) {
-    throw new ApiError(400, load.billing.method === 'cop' ? 'Confirm the cash once the car is picked up.' : 'Confirm the cash once the car is delivered.');
+    throw new ApiError(400, 'Confirm the cash once the car is delivered.');
   }
   if (load.billing.cashConfirmedAt) {
     return res.json(new ApiResponse(200, cashView(load), 'The cash was already confirmed.'));
@@ -81,7 +81,7 @@ export const confirmCashAsDriver = asyncHandler(async (req: Request, res: Respon
 
   if (!received) {
     // Told once per report; the driver can still confirm the cash later.
-    const message = `${driver.name || 'The driver'} says they weren't paid the ${cashLabel(load.billing.method)} of ${amountText(load.pricing)} for load ${load.loadNumber}. Contact the customer to sort it out.`;
+    const message = `${driver.name || 'The driver'} says they weren't paid the ${CASH_LABEL} of ${amountText(load.pricing)} for load ${load.loadNumber}. Contact the customer to sort it out.`;
     const route = '/transportation?tab=shipments';
     if (load.dispatchOwnerId) {
       void safeCreateNotification({
@@ -94,7 +94,7 @@ export const confirmCashAsDriver = asyncHandler(async (req: Request, res: Respon
       });
     }
     void notifyOrgAdmins(String(load.organizationId), 'general', 'Driver not paid in cash', message, { loadId: String(load._id), route });
-    logger.info({ loadId: String(load._id) }, 'Driver reported the COP/COD cash as not received');
+    logger.info({ loadId: String(load._id) }, 'Driver reported the cash on delivery as not received');
   }
   res.json(new ApiResponse(200, cashView(updated), received ? 'Thanks, the cash is confirmed.' : 'Your dispatcher and the dealership were told.'));
 });
@@ -108,7 +108,7 @@ async function customerEmail(req: Request): Promise<string | null> {
 
 /**
  * GET /api/quote-requests/cash-payments
- * The customer's COP/COD loads (from a quote or not), for My Shipments.
+ * The customer's cash on delivery loads (from a quote or not), for My Shipments.
  */
 export const listCustomerCashLoads = asyncHandler(async (req: Request, res: Response) => {
   const email = await customerEmail(req);
@@ -139,7 +139,7 @@ export const confirmCashAsCustomer = asyncHandler(async (req: Request, res: Resp
     .lean<any>();
   if (!load) throw new ApiError(404, 'That shipment could not be found.');
   if (!cashDueNow(load.billing.method, load.status)) {
-    throw new ApiError(400, load.billing.method === 'cop' ? 'Confirm this once the driver picks up the car.' : 'Confirm this once the car is delivered.');
+    throw new ApiError(400, 'Confirm this once the car is delivered.');
   }
   const updated = await Load.findOneAndUpdate(
     { _id: load._id, 'billing.cashCustomerConfirmedAt': null },

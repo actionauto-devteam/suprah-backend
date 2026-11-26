@@ -47,7 +47,7 @@ export interface IPayment extends Document {
   notes?: string;
   /** Shown to the customer on their invoice; `notes` stay with the dealership (2026-11-20). */
   customerNote?: string;
-  /** What the payment is for (2026-11-21): shipping, car_deposit, aftermarket, service, down_payment or other. */
+  /** What the payment is for (2026-11-21): shipping, car_deposit, aftermarket, service, down_payment, vehicle (2026-11-26) or other. */
   purpose?: string;
   /** Suprah's fee rate (percent) when the invoice was created, for the dealership's payout. */
   suprahFeePercent?: number;
@@ -148,7 +148,7 @@ const PaymentSchema: Schema<IPayment> = new Schema(
     failureReason: { type: String, trim: true },
     notes: { type: String, trim: true },
     customerNote: { type: String, trim: true, maxlength: 1000 },
-    purpose: { type: String, enum: ['shipping', 'car_deposit', 'aftermarket', 'service', 'down_payment', 'other'] },
+    purpose: { type: String, enum: ['shipping', 'car_deposit', 'aftermarket', 'service', 'down_payment', 'vehicle', 'other'] },
     suprahFeePercent: { type: Number, min: 0, max: 100 },
     paidAt: { type: Date },
     dueDate: { type: Date },

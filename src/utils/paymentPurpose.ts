@@ -2,7 +2,7 @@
  * What a customer payment is for (2026-11-21, decision B1). Used for reports
  * and shown to the customer on their invoice.
  */
-export const PAYMENT_PURPOSES = ['shipping', 'car_deposit', 'aftermarket', 'service', 'down_payment', 'other'] as const;
+export const PAYMENT_PURPOSES = ['shipping', 'car_deposit', 'aftermarket', 'service', 'down_payment', 'vehicle', 'other'] as const;
 export type PaymentPurpose = (typeof PAYMENT_PURPOSES)[number];
 
 export const PAYMENT_PURPOSE_LABELS: Record<PaymentPurpose, string> = {
@@ -11,6 +11,8 @@ export const PAYMENT_PURPOSE_LABELS: Record<PaymentPurpose, string> = {
   aftermarket: 'Aftermarket product',
   service: 'Service and repairs',
   down_payment: 'Down payment',
+  // A car sold to the person receiving it on a load (2026-11-26).
+  vehicle: 'Vehicle purchase',
   other: 'Other',
 };
 

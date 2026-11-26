@@ -71,7 +71,7 @@ router.get(
   quoteController.getMyShipments,
 );
 
-// COP/COD shipments: the customer confirms paying the driver in cash (2026-11-25).
+// Cash on delivery shipments: the customer confirms paying the driver in cash (2026-11-25).
 const cashCustomerOnly = authorize("customer", "Confirming a cash payment is for the customer of the shipment.");
 router.get("/cash-payments", cashCustomerOnly, listCustomerCashLoads);
 router.post("/cash-payments/:loadId", cashCustomerOnly, confirmCashAsCustomer);

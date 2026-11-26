@@ -73,6 +73,8 @@ router
 // cancels invoices, so like every invoice action it's for dealership admins
 // and staff with Finance access (decision B4).
 router.put("/:id/billing", staffOnly, requireFinanceAccess, loadController.updateLoadBilling);
+// The car's SuprahPay invoice, sent again (a car sold to the receiver, 2026-11-26).
+router.post("/:id/billing/car-invoice", staffOnly, requireFinanceAccess, loadController.sendLoadCarInvoice);
 
 router.post("/:id/notes", staffOnly, loadController.addNote);
 
