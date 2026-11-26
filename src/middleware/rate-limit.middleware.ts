@@ -416,7 +416,7 @@ export const uploadLimiter = rateLimit({
  * fleet's budget instead (TRACCAR_FORWARD_MAX_PER_MINUTE for 15 minutes).
  */
 export const GLOBAL_REQUEST_LIMIT = 1000;
-export const SIGNED_IN_REQUEST_LIMIT = 3000;
+export const SIGNED_IN_REQUEST_LIMIT = 10000;
 
 export function hasSignedInToken(req: any): boolean {
     const header = req?.headers?.authorization;

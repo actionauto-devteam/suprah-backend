@@ -89,13 +89,6 @@ function seedMatchingLeads(leads: any[]) {
   mockLeadFind.mockReturnValue({ select: jest.fn(() => ({ limit: jest.fn(() => ({ lean: jest.fn().mockResolvedValue(leads) })) })) });
 }
 
-function seedSafeGeneration() {
-  mockCreate.mockResolvedValueOnce({
-    choices: [{ message: { content: "Hi Test, this is Anna with Action Auto — a 2022 Honda Civic just arrived like the one you asked about. Want to come take a look?" } }],
-  });
-  mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
-}
-
 beforeEach(() => {
   jest.clearAllMocks();
   mockOrganizationFindById.mockReturnValue({ select: jest.fn(() => ({ lean: jest.fn().mockResolvedValue({ name: 'Action Auto' }) })) });
@@ -112,7 +105,6 @@ describe('vehicle re-engagement — customers with multiple vehicle inquiries', 
     seedSiblings([civicLead, civicDuplicate]);
     seedSharedConversationActivity(null);
     seedMatchingLeads([civicLead, civicDuplicate]);
-    seedSafeGeneration();
 
     await processVehicleForReengagement(civicArrival);
 
@@ -143,7 +135,6 @@ describe('vehicle re-engagement — customers with multiple vehicle inquiries', 
   it('still sends when the customer has another inquiry but the shared thread has been quiet', async () => {
     seedSiblings([civicLead, jeepLead]);
     seedSharedConversationActivity(new Date(Date.now() - 5 * 24 * HOUR));
-    seedSafeGeneration();
 
     await processLeadForVehicle(civicLead, civicArrival);
 
@@ -154,7 +145,6 @@ describe('vehicle re-engagement — customers with multiple vehicle inquiries', 
   it('keeps single-inquiry customers unchanged, even if their thread was active recently', async () => {
     seedSiblings([civicLead]);
     seedSharedConversationActivity(new Date(Date.now() - 2 * HOUR));
-    seedSafeGeneration();
 
     await processLeadForVehicle(civicLead, civicArrival);
 

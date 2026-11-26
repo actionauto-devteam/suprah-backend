@@ -5,6 +5,7 @@ const mockPriceDropAggregate = jest.fn();
 const mockReengagementAggregate = jest.fn();
 const mockSmsOptOutCount = jest.fn();
 const mockEmailOptOutCount = jest.fn();
+const mockRepOutreach = jest.fn();
 
 jest.mock('../../src/models/lead.model', () => ({ __esModule: true, default: { find: mockLeadFind } }));
 jest.mock('../../src/models/SmsCampaignRecipient.model', () => ({ __esModule: true, default: { aggregate: mockSmsRecipientAggregate } }));
@@ -13,6 +14,7 @@ jest.mock('../../src/models/PriceDropEmailLog.model', () => ({ __esModule: true,
 jest.mock('../../src/models/VehicleReengagementLog.model', () => ({ __esModule: true, default: { aggregate: mockReengagementAggregate } }));
 jest.mock('../../src/models/SmsOptOut.model', () => ({ __esModule: true, default: { countDocuments: mockSmsOptOutCount } }));
 jest.mock('../../src/models/EmailOptOut.model', () => ({ __esModule: true, default: { countDocuments: mockEmailOptOutCount } }));
+jest.mock('../../src/services/crmRepOutreach.service', () => ({ buildRepOutreach: mockRepOutreach }));
 
 import { getCrmReportsOverview } from '../../src/controllers/crmReports.controller';
 
@@ -30,6 +32,7 @@ describe('crmReports.controller — getCrmReportsOverview', () => {
     mockReengagementAggregate.mockResolvedValue([]);
     mockSmsOptOutCount.mockResolvedValue(0);
     mockEmailOptOutCount.mockResolvedValue(0);
+    mockRepOutreach.mockResolvedValue({ texts: { leads: 0, sent: 0 }, emails: { leads: 0, sent: 0 }, calls: { leads: 0, sent: 0 } });
   });
 
   it('rejects a request missing from/to with a 400 ApiError', async () => {
@@ -190,5 +193,24 @@ describe('crmReports.controller — getCrmReportsOverview', () => {
       { date: '2026-10-04', count: 1 },
       { date: '2026-10-05', count: 0 },
     ]);
+  });
+
+  it('adds the rep texts, emails and calls for the same org and range', async () => {
+    const outreach = { texts: { leads: 4, sent: 9 }, emails: { leads: 2, sent: 3 }, calls: { leads: 5, sent: 6 } };
+    mockRepOutreach.mockResolvedValue(outreach);
+
+    const req = { query: { from: '2026-10-01T00:00:00.000Z', to: '2026-10-07T23:59:59.999Z' }, orgId: '507f1f77bcf86cd799439011' } as any;
+    const json = jest.fn();
+    const res = { json } as any;
+    const next = jest.fn();
+
+    getCrmReportsOverview(req, res, next);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const [orgArg, fromArg, toArg] = mockRepOutreach.mock.calls[0];
+    expect(orgArg).toBe('507f1f77bcf86cd799439011');
+    expect(fromArg.toISOString()).toBe('2026-10-01T00:00:00.000Z');
+    expect(toArg.toISOString()).toBe('2026-10-07T23:59:59.999Z');
+    expect(json.mock.calls[0][0].data.repOutreach).toEqual(outreach);
   });
 });

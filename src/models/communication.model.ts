@@ -79,6 +79,15 @@ export type MessageStatus =
   | "received"   // inbound message
   | "pending_reconciliation";
 
+export interface IMessageMedia {
+  key: string;
+  name: string;
+  contentType: string;
+  size: number;
+  kind: "image" | "file";
+  linkToken?: string;
+}
+
 export interface ICommunicationMessage extends Document {
   orgId: Types.ObjectId | string;
   conversationId: Types.ObjectId;
@@ -95,9 +104,22 @@ export interface ICommunicationMessage extends Document {
   errorDetail?: string;
   sentAt?: Date;
   deliveredAt?: Date;
+  media?: IMessageMedia[];
   createdAt: Date;
   updatedAt: Date;
 }
+
+const MessageMediaSchema = new Schema<IMessageMedia>(
+  {
+    key: { type: String, required: true },
+    name: { type: String, default: "" },
+    contentType: { type: String, default: "" },
+    size: { type: Number, default: 0 },
+    kind: { type: String, enum: ["image", "file"], required: true },
+    linkToken: { type: String },
+  },
+  { _id: false }
+);
 
 const CommunicationMessageSchema = new Schema<ICommunicationMessage>(
   {
@@ -121,6 +143,7 @@ const CommunicationMessageSchema = new Schema<ICommunicationMessage>(
     errorDetail: { type: String },
     sentAt: { type: Date },
     deliveredAt: { type: Date },
+    media: { type: [MessageMediaSchema], default: undefined },
   },
   { timestamps: true }
 );

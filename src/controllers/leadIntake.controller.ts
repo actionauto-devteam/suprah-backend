@@ -4,7 +4,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { isOrganizationAdmin } from '../services/contactRestriction.service';
 import { getLeadIntakeControl, setLeadIntakeMode } from '../services/leadIntakeControl.service';
-import { getDuplicateCombineStatus, undoLeadCombine } from '../services/leadDuplicateCombine.service';
+import { combineLeadsManually, getDuplicateCombineStatus, undoLeadCombine } from '../services/leadDuplicateCombine.service';
 import {
   canResolveLeadReviews,
   countPendingLeadReviews,
@@ -101,6 +101,18 @@ export const linkLead = asyncHandler(async (req: Request, res: Response) => {
     actor,
   });
   res.json(new ApiResponse(200, result, 'Chat linked to the lead'));
+});
+
+export const mergeLeads = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId, actor } = await requireReviewer(req);
+  const result = await combineLeadsManually({
+    organizationId: orgId,
+    keepLeadId: String(req.params.leadId),
+    mergeLeadId: String(req.body?.mergeLeadId || ''),
+    note: req.body?.note ? String(req.body.note) : null,
+    actor,
+  });
+  res.json(new ApiResponse(200, result, 'Leads merged'));
 });
 
 export const getActiveLead = asyncHandler(async (req: Request, res: Response) => {

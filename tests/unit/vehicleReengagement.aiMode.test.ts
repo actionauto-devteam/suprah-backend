@@ -94,13 +94,6 @@ function seedMatchingLeads(leads: any[]) {
   mockLeadFind.mockReturnValue({ select: jest.fn(() => ({ limit: jest.fn(() => ({ lean: jest.fn().mockResolvedValue(leads) })) })) });
 }
 
-function seedSafeGeneration() {
-  mockCreate.mockResolvedValueOnce({
-    choices: [{ message: { content: "Hi Test, this is Anna with Action Auto — a 2022 Honda Civic just arrived like the one you asked about. Want to come take a look?" } }],
-  });
-  mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
-}
-
 beforeEach(() => {
   jest.clearAllMocks();
   mockOrganizationFindById.mockReturnValue({ select: jest.fn(() => ({ lean: jest.fn().mockResolvedValue({ name: 'Action Auto' }) })) });
@@ -139,9 +132,13 @@ describe('vehicle re-engagement — operating mode', () => {
     mockDecideAiDelivery.mockResolvedValue({ action: 'send', mode: 'live', source: 'configured' });
     seedSiblings([civicLead]);
     seedSharedConversationActivity(null);
-    seedSafeGeneration();
     await processLeadForVehicle(civicLead, civicArrival);
-    expect(mockSendAutomatedSms).toHaveBeenCalledWith(expect.objectContaining({ aiWorkflow: 'vehicle_reengagement', leadId: 'lead-civic' }));
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockSendAutomatedSms).toHaveBeenCalledWith(expect.objectContaining({
+      aiWorkflow: 'vehicle_reengagement',
+      leadId: 'lead-civic',
+      body: 'Hey Test, this is Anna from Action Auto Sales and Finance. The 2022 Honda Civic Sport has completed the reconditioning process and is now ready for sale. Please book a test drive or schedule an appointment today! Reply STOP to opt out.',
+    }));
     expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
   });
 
@@ -150,7 +147,6 @@ describe('vehicle re-engagement — operating mode', () => {
     mockSendAutomatedSms.mockRejectedValue(new AiReplySuppressedError());
     seedSiblings([civicLead]);
     seedSharedConversationActivity(null);
-    seedSafeGeneration();
     await processLeadForVehicle(civicLead, civicArrival);
     expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({
       status: 'skipped_ai_not_live',

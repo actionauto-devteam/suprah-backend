@@ -82,6 +82,7 @@ import noteRoute from "./note.route";
 import spotifyRoute from "./spotify.route";
 import yapLineRoute from "./yapline.route";
 import communicationRoute from "./communication.routes";
+import publicFilesRoute from "./publicFiles.route";
 import cannedReplyRoute from "./cannedReply.routes";
 import webchatRoute from "./webchat.route";
 import crmWebchatRoute from "./crmWebchat.routes";
@@ -315,6 +316,10 @@ const defaultRoutes = [
   {
     path: "/public/deal-desk",
     route: dealDeskPublicRoute,
+  },
+  {
+    path: "/public/files",
+    route: publicFilesRoute,
   },
   {
     path: "/crm/lead-intake",

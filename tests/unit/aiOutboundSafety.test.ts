@@ -355,13 +355,12 @@ describe('Gemini QA exception — scope guard (static source check)', () => {
   const fs = require('fs');
   const path = require('path');
 
-  it('vehicleReengagement.service.ts still calls hasGeminiApiKey()/classifySafety() with no phone argument, so it stays blocked under the QA exception exactly as before', () => {
+  it('vehicleReengagement.service.ts no longer calls Gemini at all, so the QA exception can never reach it', () => {
     const source = fs.readFileSync(
       path.join(__dirname, '../../src/services/vehicleReengagement.service.ts'),
       'utf8',
     );
-    expect(source).toMatch(/hasGeminiApiKey\(\)/);
-    expect(source).not.toMatch(/hasGeminiApiKey\([^)]+\)/);
+    expect(source).not.toMatch(/hasGeminiApiKey|createGeminiClient|classifySafety|createCompletionWithFallback/);
   });
 
   it('leadAiSummary.service.ts still calls hasGeminiApiKey() with no phone argument, so it stays blocked under the QA exception exactly as before', () => {

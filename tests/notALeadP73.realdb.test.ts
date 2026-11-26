@@ -236,6 +236,7 @@ describe('Real-DB: Not a Lead (Others tab) is never counted as a lead (local Mon
       await makeLead(org, { ...mine, ...combined(kept._id) });
       const result = await callController(getAssignedNewCount, { orgId: String(org), crmUser: { _id: viewer, role: 'employee', fullName: 'Vic Viewer' } });
       expect(result.json.data.count).toBe(1);
+      expect(result.json.data.total).toBe(1);
     });
   });
 

@@ -79,6 +79,8 @@ import { leadDisplayName, notifyLeadMessage, notifyLeadMessageUnlessHandoff } fr
 import type { LeadNoticeInput } from "./leadNoticeRouting.service";
 import { loadReplyKnowledge } from "./aiKnowledgeRuntime.service";
 import { DealershipLine, findDealershipLine, leadFieldsForLine, resolveOutboundNumber } from './dealershipPhoneNumber.service';
+import { isDealershipNumber } from './dealershipOwnNumbers.service';
+import { inboundTextOf, isPictureOnly, mediaLabel, prepareOutgoingTextFiles, storeIncomingTextMedia, type OutgoingTextFile } from './textMedia.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
   canSendAiReply, assertAiReplyAllowed, AiReplySuppressedError, claimAiGeneration, claimAiReplyDispatch,
@@ -309,10 +311,34 @@ async function automationTextsMissedCall(call: any): Promise<string | null> {
   }
 }
 
+const TEXT_BACK_WINDOW_MS = 60 * 60 * 1000;
+
+async function textBackClaimedEarlier(call: any): Promise<boolean> {
+  if (!call?._id || !call.from) return false;
+  const claimedAt = call.textBackSentAt ? new Date(call.textBackSentAt) : new Date();
+  return Boolean(await CallLog.exists({
+    orgId: call.orgId,
+    from: call.from,
+    _id: { $ne: call._id },
+    $or: [
+      { textBackSentAt: { $gte: new Date(claimedAt.getTime() - TEXT_BACK_WINDOW_MS), $lt: claimedAt } },
+      { textBackSentAt: claimedAt, _id: { $lt: call._id } },
+    ],
+  }));
+}
+
 async function sendMissedCallTextBack(call: any): Promise<void> {
   const automation = await automationTextsMissedCall(call);
   if (automation) {
     console.info("[comm] missed-call text-back skipped: an automation sends its own text", { automation, callId: String(call?._id || "") });
+    return;
+  }
+  if (await isDealershipNumber(call.orgId, call.from).catch(() => false)) {
+    console.info("[comm] missed-call text-back skipped: the caller is a dealership number", { callId: String(call?._id || "") });
+    return;
+  }
+  if (await textBackClaimedEarlier(call).catch(() => false)) {
+    console.info("[comm] missed-call text-back skipped: this number already got one in the last hour", { callId: String(call?._id || "") });
     return;
   }
   try {
@@ -1191,10 +1217,12 @@ export async function sendSmsFromUser(opts: {
   uncertainOnTransportError?: boolean;
   origin?: "chrome_extension";
   answersCustomer?: boolean;
+  files?: OutgoingTextFile[];
 }) {
   const to = assertSmsDestination(opts.toPhone, opts.destinationPolicy ?? "automated");
-  const body = (opts.body || "").trim();
-  if (!body) throw Object.assign(new Error("Message body is required"), { statusCode: 400 });
+  const typed = (opts.body || "").trim();
+  const files = opts.files || [];
+  if (!typed && !files.length) throw Object.assign(new Error("Message body is required"), { statusCode: 400 });
   if (!telnyx.COMPANY_NUMBER)
     throw Object.assign(new Error("TELNYX_PHONE_NUMBER is not configured"), { statusCode: 500 });
 
@@ -1241,6 +1269,12 @@ export async function sendSmsFromUser(opts: {
   }).catch(() => null);
   const fromNumber = sender?.number || telnyx.COMPANY_NUMBER;
 
+  const prepared = files.length
+    ? await prepareOutgoingTextFiles({ organizationId: String(opts.orgId), leadId, userId: opts.user?.userId ? String(opts.user.userId) : undefined, files })
+    : null;
+  const body = [typed, ...(prepared?.linkLines || [])].filter(Boolean).join("\n\n");
+  const mediaUrls = prepared?.mediaUrls || [];
+
   await opts.beforeSend?.();
   const message = await CommunicationMessage.create({
     orgId: opts.orgId,
@@ -1248,11 +1282,12 @@ export async function sendSmsFromUser(opts: {
     customerId,
     leadId,
     direction: "outbound",
-    body,
+    body: body || mediaLabel(prepared?.media || []),
     from: fromNumber,
     to,
     status: "queued",
     sentBy: opts.user,
+    ...(prepared?.media.length ? { media: prepared.media } : {}),
     ...(opts.origin ? { origin: opts.origin } : {}),
   });
 
@@ -1262,7 +1297,7 @@ export async function sendSmsFromUser(opts: {
     await assertContactAllowed(restrictionTarget, restrictionContext);
     dispatched = true;
     await opts.beforeDispatch?.();
-    const sent = await telnyx.sendSms(to, body, fromNumber);
+    const sent = mediaUrls.length ? await telnyx.sendSms(to, body, fromNumber, mediaUrls) : await telnyx.sendSms(to, body, fromNumber);
     try {
       message.providerMessageId = sent.id;
       message.status = "sent";
@@ -1641,7 +1676,7 @@ export async function retainInboundSms(payload: any, orgOverride?: any): Promise
   const toEntry = Array.isArray(payload?.to) ? payload.to[0] : payload?.to;
   const toRaw = toEntry?.phone_number || (typeof toEntry === "string" ? toEntry : "");
   const to = toRaw ? normalizePhone(String(toRaw)) : "";
-  const body = payload?.text || "";
+  const body = inboundTextOf(payload);
   if (!from || !body) return null;
   const dialedLine = await findDealershipLine(to);
   const orgId = orgOverride ?? dialedLine?.organizationId ?? (await getConfiguredInboundOrganization(to)) ?? resolveCompanyNumberOrg(to);
@@ -1778,7 +1813,8 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
   const from = normalizePhone(payload?.from?.phone_number || payload?.from || "");
   const toEntry = Array.isArray(payload?.to) ? payload.to[0] : payload?.to;
   const to = normalizePhone(toEntry?.phone_number || toEntry || telnyx.COMPANY_NUMBER);
-  const body = payload?.text || "";
+  const body = inboundTextOf(payload);
+  const pictureOnly = isPictureOnly(payload);
   const providerMessageId = payload?.id;
 
   if (!from || !body) return null;
@@ -1793,6 +1829,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
   }
   const lifecycleMode = retention.mode;
   const lifecycle = lifecycleMode !== "off";
+  const ownNumber = await isDealershipNumber(orgId, from).catch(() => false);
   if (retention.replay) {
     for (let attempt = 0; attempt < 20; attempt++) {
       if (await CommunicationMessage.exists({ _id: retention.messageId })) break;
@@ -1838,6 +1875,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
   }
 
   const messageId = retention.messageId;
+  const media = await storeIncomingTextMedia(String(orgId), payload).catch(() => []);
   const check = await beginAiAttentionCheck({ organizationId: String(orgId), channel: 'sms',
     targetId: String(conversation._id), messageId: String(messageId) });
   const message = await CommunicationMessage.create({
@@ -1852,6 +1890,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
     to,
     status: "received",
     providerMessageId,
+    ...(media.length ? { media } : {}),
   }).catch((err: any) => {
     if (err?.code === 11000 && (retention.replay || err?.keyPattern?._id)) return null;
     throw err;
@@ -1904,7 +1943,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
     return false;
   });
   let screened = false;
-  if (!optHandled && !appointmentHandled && lead?._id) {
+  if (!optHandled && !appointmentHandled && lead?._id && !ownNumber && !pictureOnly) {
     const { agentName } = await resolveAiAgentSettings(String(orgId));
     const { mode: screeningMode } = await resolveAiChannelMode(orgId, "sms");
     if (isAttentionScreeningMode(screeningMode)) {
@@ -1982,11 +2021,19 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
       }
     }
 
-    if (lead?._id) await markLeadAwaitingReply(lead._id, receivedAt, orgId);
-    if (lead) void notifyLeadMessage(orgId, lead, "sms", body);
-    triggerSmsAiReply(orgId, conversation, lead, check, body, screened).catch((err) => {
-      console.error("[comm] triggerSmsAiReply failed:", err);
-    });
+    if (ownNumber) {
+      await finishAiAttentionCheck(check);
+    } else {
+      if (lead?._id) await markLeadAwaitingReply(lead._id, receivedAt, orgId);
+      if (lead) void notifyLeadMessage(orgId, lead, "sms", body);
+      if (pictureOnly) {
+        await finishAiAttentionCheck(check);
+      } else {
+        triggerSmsAiReply(orgId, conversation, lead, check, body, screened).catch((err) => {
+          console.error("[comm] triggerSmsAiReply failed:", err);
+        });
+      }
+    }
   } else {
     if (lifecycle && retention.inquiryId) {
       await (await lifecycleIntake()).dismissLeadInquiry(retention.inquiryId, "sms_keyword").catch(() => undefined);
@@ -2980,7 +3027,10 @@ export async function logClientCall(opts: {
       }
     }
     if (!leadId) {
-      const lead = await findLeadByPhone(opts.orgId, to);
+      const lifecycle = (await getLeadIntakeMode(String(opts.orgId)).catch(() => "paused")) !== "off";
+      const lead = lifecycle
+        ? await (await lifecycleIntake()).findOpenLeadForContact(String(opts.orgId), { phone: to }).catch(() => null)
+        : await findLeadByPhone(opts.orgId, to);
       if (lead) leadId = lead._id;
     }
     const callLogId = new mongoose.Types.ObjectId();

@@ -387,6 +387,28 @@ const updateMySupraSpacePreferences = asyncHandler(
   },
 );
 
+const QUICK_ACTION_KEY = /^[a-z0-9-]{1,40}$/;
+const MAX_QUICK_ACTIONS = 40;
+
+const getMyQuickActions = asyncHandler(async (req: Request, res: Response) => {
+  const user = await CrmUser.findById(req.crmUser!._id).select("quickActionOrder").lean();
+  res.json(new ApiResponse(200, { order: user?.quickActionOrder || [] }, "Quick actions fetched"));
+});
+
+const updateMyQuickActions = asyncHandler(async (req: Request, res: Response) => {
+  const raw = req.body?.order;
+  if (!Array.isArray(raw)) throw new ApiError(400, "Send the quick actions in the order you want.");
+  if (raw.length > MAX_QUICK_ACTIONS) throw new ApiError(400, "Too many quick actions.");
+  if (!raw.every((key) => typeof key === "string" && QUICK_ACTION_KEY.test(key))) {
+    throw new ApiError(400, "One of the quick actions is not valid.");
+  }
+  const order = Array.from(new Set(raw as string[]));
+  const update = order.length ? { $set: { quickActionOrder: order } } : { $unset: { quickActionOrder: 1 } };
+  const user = await CrmUser.findByIdAndUpdate(req.crmUser!._id, update, { new: true }).select("quickActionOrder");
+  if (!user) throw new ApiError(404, "CRM account not found");
+  res.json(new ApiResponse(200, { order: user.quickActionOrder || [] }, "Quick actions saved"));
+});
+
 const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(400, "Organization context missing");
@@ -401,6 +423,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const webchatEnabled = metadata.webchatEnabled !== false;
   const webchatGreeting = metadata.webchatGreeting || "";
   const webchatTextMode = metadata.webchatTextMode === true;
+  const webchatColor = WEBCHAT_COLOR.test(String(metadata.webchatColor || "")) ? String(metadata.webchatColor) : "";
   const aiAgentEnabled = metadata.aiAgentEnabled === true;
   const aiAgentIdentity = identityFromMetadata(metadata);
   const aiAgentName = aiAgentIdentity.name || "";
@@ -426,6 +449,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
         webchatEnabled,
         webchatGreeting,
         webchatTextMode,
+        webchatColor,
         webchatOrgKey,
         aiAgentEnabled,
         aiAgentName,
@@ -447,6 +471,8 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+const WEBCHAT_COLOR = /^#[0-9a-f]{6}$/i;
+
 const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   const user = req.crmUser;
@@ -460,6 +486,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     webchatEnabled,
     webchatGreeting,
     webchatTextMode,
+    webchatColor,
     aiAgentEnabled,
     aiAgentName,
     aiHandoffFallbackGroupId,
@@ -500,6 +527,12 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   }
   if (webchatTextMode !== undefined) {
     metadata.webchatTextMode = webchatTextMode === true;
+  }
+  if (webchatColor !== undefined) {
+    const color = String(webchatColor || "").trim().toLowerCase();
+    if (color && !WEBCHAT_COLOR.test(color)) throw new ApiError(400, "Pick a chat color like #1e6fd9.");
+    if (color) metadata.webchatColor = color;
+    else delete metadata.webchatColor;
   }
   if (aiAgentEnabled === true) {
     throw new ApiError(
@@ -2006,6 +2039,8 @@ export default {
   getMe,
   getMySupraSpacePreferences,
   updateMySupraSpacePreferences,
+  getMyQuickActions,
+  updateMyQuickActions,
   getOrgSettings,
   updateOrgSettings,
   timeClock,

@@ -44,6 +44,7 @@ export interface ICrmUser extends Document {
   supraSpacePreferences: {
     messageTextSize: 'small' | 'default' | 'medium' | 'large' | 'extra-large';
   };
+  quickActionOrder?: string[];
   department?: string;
   screenshotExempt?: boolean;
   hourlyTrackingExempt?: boolean;
@@ -209,6 +210,10 @@ const CrmUserSchema = new Schema<ICrmUser>(
     notificationPreferences: {
       type: notificationPreferencesSchema,
       default: () => ({}),
+    },
+    quickActionOrder: {
+      type: [String],
+      default: undefined,
     },
     supraSpacePreferences: {
       messageTextSize: {

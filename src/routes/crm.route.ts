@@ -28,6 +28,8 @@ router.use(crmAuth());
 router.get('/me',             crmController.getMe);
 router.get('/me/supraspace-preferences', crmController.getMySupraSpacePreferences);
 router.patch('/me/supraspace-preferences', crmController.updateMySupraSpacePreferences);
+router.get('/me/quick-actions', crmController.getMyQuickActions);
+router.put('/me/quick-actions', crmController.updateMyQuickActions);
 router.get('/org-settings',   crmController.getOrgSettings);
 router.patch('/org-settings', crmController.updateOrgSettings);
 router.patch('/me/avatar',    uploadLimiter, avatarUpload.single('avatar'), validateUploadedImageContent, crmController.updateMeAvatar);

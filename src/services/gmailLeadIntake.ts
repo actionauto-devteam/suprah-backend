@@ -18,6 +18,8 @@ import {
 import { FREE_MAIL_DOMAINS } from '../utils/freeMailDomains';
 import { NOT_A_LEAD_STATUS } from '../constants/leadStatus';
 
+const PLATFORM_NOTICE_SENDERS = new Set(['salesleads@cars.com', 'dealerleads@autotrader.com']);
+
 export type GmailIntakeResult =
   | LeadIntakeResult
   | { status: 'skipped'; reason: string }
@@ -85,6 +87,9 @@ export async function processGmailMessageThroughIntake(input: {
   const fromLeadSourceDomain = fromLeadSource
     || (Boolean(leadSourceDomain) && !FREE_MAIL_DOMAINS.has(leadSourceDomain) && senderDomain === leadSourceDomain);
   if (fromLeadSourceDomain && !isADFContent(rawBody.toLowerCase())) return { status: 'skipped', reason: 'lead_source_notice' };
+  if (senderAddress && PLATFORM_NOTICE_SENDERS.has(senderAddress) && !isADFContent(rawBody.toLowerCase())) {
+    return { status: 'skipped', reason: 'platform_notice' };
+  }
 
   const ownAddresses = new Set((input.ownAddresses || []).map((address) => normalizeIdentityEmail(address)).filter(Boolean) as string[]);
   if (senderAddress && ownAddresses.has(senderAddress)) return { status: 'skipped', reason: 'own_mailbox' };

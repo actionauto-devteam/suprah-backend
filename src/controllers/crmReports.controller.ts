@@ -12,6 +12,7 @@ import SmsOptOut from '../models/SmsOptOut.model';
 import EmailOptOut from '../models/EmailOptOut.model';
 import { normalizeLeadSourceForDisplay, isGenuineDemoLead, UNMAPPED_LEAD_SOURCE_LABEL } from '../constants/leadSource';
 import { buildSalespeopleReport } from '../services/crmSalespeopleReport.service';
+import { buildRepOutreach } from '../services/crmRepOutreach.service';
 import { countedLeadFilter } from '../constants/leadStatus';
 
 const MAX_SALESPEOPLE_RANGE_MS = 367 * 24 * 60 * 60 * 1000;
@@ -112,6 +113,7 @@ export const getCrmReportsOverview = asyncHandler(async (req: Request, res: Resp
     reengagementRows,
     smsUnsubscribeCount,
     emailUnsubscribeCount,
+    repOutreach,
   ] = await Promise.all([
     Lead.find({ organizationId: orgObjectId, ...leadDateMatch, ...countedLeadFilter() })
       .select('status source channel phone createdAt')
@@ -138,6 +140,7 @@ export const getCrmReportsOverview = asyncHandler(async (req: Request, res: Resp
     ]),
     SmsOptOut.countDocuments({ organizationId: orgId, optedOut: true, changedAt: { $gte: from, $lte: to } }),
     EmailOptOut.countDocuments({ organizationId: orgId, optedOut: true, changedAt: { $gte: from, $lte: to } }),
+    buildRepOutreach(orgId, from, to),
   ]);
 
   const genuineLeads = (leadRows as any[]).filter((lead) => !isGenuineDemoLead(lead.source, lead.phone));
@@ -172,6 +175,7 @@ export const getCrmReportsOverview = asyncHandler(async (req: Request, res: Resp
       sms: smsUnsubscribeCount,
       email: emailUnsubscribeCount,
     },
+    repOutreach,
   }, 'CRM reports overview'));
 });
 

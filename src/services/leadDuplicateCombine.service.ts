@@ -130,15 +130,22 @@ async function moveRecords(model: any, filter: Record<string, unknown>, mainLead
   return found.map((entry) => ({ id: entry._id, fromLeadId: entry.leadId }));
 }
 
+type StaffActor = { userId?: string | null; name?: string | null };
+
 async function combineWithinLock(
   organizationId: string,
   docs: any[],
-  options: { runId?: string | null; confirmHeld: () => Promise<void> },
+  options: { runId?: string | null; confirmHeld: () => Promise<void>; mainLeadId?: string; actor?: StaffActor; note?: string | null },
 ): Promise<CombineResult | null> {
   const ordered = [...docs].sort((a, b) => newestFirst(toGroupable(a), toGroupable(b)));
-  const main = ordered[0];
-  const duplicates = ordered.slice(1);
+  const main = options.mainLeadId ? docs.find((doc) => String(doc._id) === options.mainLeadId) : ordered[0];
+  const duplicates = options.mainLeadId ? docs.filter((doc) => String(doc._id) !== options.mainLeadId) : ordered.slice(1);
   if (!main || !duplicates.length) return null;
+  const staff = options.actor || null;
+  const changedBy = staff?.userId && mongoose.isValidObjectId(staff.userId) ? new mongoose.Types.ObjectId(staff.userId) : undefined;
+  const historyReason = staff
+    ? `Merged into lead ${main._id}${staff.name ? ` by ${staff.name}` : ''}${options.note ? `: ${options.note}` : ''}`
+    : `Combined into lead ${main._id}`;
   await options.confirmHeld();
   const record = await LeadCombineRecord.create({
     organizationId,
@@ -158,7 +165,7 @@ async function combineWithinLock(
       { _id: doc._id, organizationId, status: doc.status, 'combinedInto.leadId': { $exists: false } },
       {
         $set: { status: 'Closed', combinedInto: { leadId: main._id, at: now, previousStatus: doc.status } },
-        $push: { statusHistory: { from: doc.status, to: 'Closed', changedAt: now, reason: `Combined into lead ${main._id}` } },
+        $push: { statusHistory: { from: doc.status, to: 'Closed', changedAt: now, ...(changedBy ? { changedBy } : {}), reason: historyReason } },
       },
     );
     if (result.modifiedCount === 1) combined.push(doc);
@@ -224,9 +231,13 @@ async function combineWithinLock(
   await LeadIntakeAudit.create({
     organizationId,
     event: 'duplicates_combined',
-    actor: { kind: 'system', userId: null, name: 'Automatic lead matching' },
+    actor: staff
+      ? { kind: 'staff', userId: staff.userId || null, name: staff.name || null }
+      : { kind: 'system', userId: null, name: 'Automatic lead matching' },
     leadId: main._id,
-    reason: `Combined ${combined.length} duplicate ${combined.length === 1 ? 'lead' : 'leads'} into this lead: ${combinedIds.map(String).join(', ')}`,
+    reason: staff
+      ? `Merged ${combinedIds.map(String).join(', ')} into this lead by hand${options.note ? `: ${options.note}` : ''}`
+      : `Combined ${combined.length} duplicate ${combined.length === 1 ? 'lead' : 'leads'} into this lead: ${combinedIds.map(String).join(', ')}`,
   });
   for (const id of [main._id, ...combinedIds]) {
     emitToOrg(organizationId, 'lead:update', { _id: String(id), leadId: String(id) });
@@ -261,6 +272,46 @@ export async function combineLeadGroup(
     }
     return results;
   });
+}
+
+export async function combineLeadsManually(input: {
+  organizationId: string;
+  keepLeadId: string;
+  mergeLeadId: string;
+  actor: StaffActor;
+  note?: string | null;
+}): Promise<CombineResult> {
+  const { organizationId } = input;
+  const keepLeadId = String(input.keepLeadId || '');
+  const mergeLeadId = String(input.mergeLeadId || '');
+  if (!mongoose.isValidObjectId(keepLeadId) || !mongoose.isValidObjectId(mergeLeadId)) throw new ApiError(400, 'Pick the lead to merge.');
+  if (keepLeadId === mergeLeadId) throw new ApiError(400, 'Pick a different lead.');
+  const note = input.note ? String(input.note).replace(/\s+/g, ' ').trim().slice(0, 500) || null : null;
+  const load = async () => Lead.find({ _id: { $in: [keepLeadId, mergeLeadId] }, organizationId })
+    .select(`${COMBINE_FIELDS} intakeIdentity combinedInto`)
+    .lean();
+  const ensureMergeable = (docs: any[]) => {
+    if (docs.length !== 2) throw new ApiError(404, 'That lead was not found.');
+    if (docs.some((doc) => doc.combinedInto?.leadId)) {
+      throw new ApiError(409, 'One of these leads was already merged into another lead. Open that lead instead.');
+    }
+    if (docs.some((doc) => doc.intakeIdentity === 'unverified')) {
+      throw new ApiError(409, 'This is an unverified chat. Use Link to a lead instead.');
+    }
+  };
+  const first = await load();
+  ensureMergeable(first);
+  const run = async (confirmHeld: () => Promise<void>) => {
+    const fresh = await load();
+    ensureMergeable(fresh);
+    const result = await combineWithinLock(organizationId, fresh, { mainLeadId: keepLeadId, actor: input.actor, note, confirmHeld });
+    if (!result) throw new ApiError(409, 'These leads changed while you were merging. Refresh and try again.');
+    return result;
+  };
+  const keys = lockKeysFor(first);
+  return keys.length
+    ? withLeadIntakeLock(organizationId, keys, ({ confirmHeld }) => run(confirmHeld))
+    : run(async () => undefined);
 }
 
 async function claimRun(organizationId: string, owner: string) {
