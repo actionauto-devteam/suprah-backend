@@ -30,6 +30,7 @@ import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
+import { inventoryVehicleForLead, leadVehicleFieldsFrom, leadVehicleLabel } from '../services/leadVehiclePick.service';
 import Customer from '../models/Customer.model';
 import { buildLeadSearchCondition } from '../utils/leadSearch';
 import { customerAreaFilterCondition, leadCustomerArea, postalAddressLine } from '../utils/customerArea';
@@ -1575,6 +1576,15 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
       }
     }
 
+    let pickedVehicle: any = null;
+    if (Object.prototype.hasOwnProperty.call(body, 'vehicleId')) {
+      pickedVehicle = await inventoryVehicleForLead(String(orgId), body.vehicleId);
+      if (!pickedVehicle) {
+        return res.status(400).json({ message: 'That vehicle is not in your inventory. Search again and pick it from the list.' });
+      }
+      Object.assign(setValues, leadVehicleFieldsFrom(pickedVehicle));
+    }
+
     if (Object.keys(setValues).length === 0) {
       return res.status(400).json({ message: 'No editable lead details were provided' });
     }
@@ -1636,6 +1646,9 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
         leadId: lead._id.toString(),
         activityKind: 'lead_details_update',
         updatedFields: Object.keys(setValues),
+        ...(pickedVehicle
+          ? { vehicleChange: { from: leadVehicleLabel(currentLead.vehicle), to: leadVehicleLabel(lead.vehicle), vehicleId: String(pickedVehicle._id) } }
+          : {}),
         ...(restrictedContactChanged
           ? { doNotContactContactChange: { previousEmail: currentLead.email || '', previousPhone: currentLead.phone || '' } }
           : {}),
