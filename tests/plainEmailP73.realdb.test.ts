@@ -256,6 +256,30 @@ describe('Real-DB: Phase 73 plain emails to the main lead mailbox (local MongoDB
     expect(await Lead.countDocuments({ organizationId: orgId })).toBe(before);
   });
 
+  it('AutoTrader HTML copies of an ADF lead are skipped, even when a card for that address is open', async () => {
+    const open: any = await Lead.create({ organizationId: orgId, createdBy: ownerId, firstName: 'Unknown', lastName: '', email: 'dealerleads@autotrader.com', source: 'Email Inquiry', channel: 'email', status: 'Contacted', comments: '' } as any);
+    const before = await Lead.countDocuments({ organizationId: orgId });
+    const inquiriesBefore = await LeadInquiry.countDocuments({ organizationId: orgId });
+    for (const subject of ['New Autotrader Lead for 2021 Toyota Camry', 'New Autotrader Lead for 2019 Ford Escape']) {
+      const body = '<div>Lead Type: Email</div><div>Name: Test Shopper</div><div>Phone: (801) 555-0123</div><div>Comments: Is it still available?</div>';
+      const result: any = await run(gmailMessage({ from: 'Autotrader Dealer Leads <DealerLeads@autotrader.com>', subject, body }), { allowNewInquiry: true });
+      expect(result).toEqual({ status: 'skipped', reason: 'platform_notice' });
+    }
+    expect(await Lead.countDocuments({ organizationId: orgId })).toBe(before);
+    expect(await LeadInquiry.countDocuments({ organizationId: orgId })).toBe(inquiriesBefore);
+    expect(await LeadInquiry.countDocuments({ organizationId: orgId, 'association.leadId': open._id })).toBe(0);
+  });
+
+  it('an AutoTrader ADF email from the same address still makes the customer card', async () => {
+    const email = `atadf.${uid()}@example.com`;
+    const result: any = await run(gmailMessage({ from: 'Autotrader Dealer Leads <dealerleads@autotrader.com>', subject: 'New Autotrader Lead', body: adfBody('Tara', 'Trader', email) }), { allowNewInquiry: true });
+    expect(result.status).toBe('associated');
+    expect(result.created).toBe(true);
+    const lead: any = await Lead.findById(result.leadId).lean();
+    expect(lead.firstName).toBe('Tara');
+    expect(lead.email).toBe(email);
+  });
+
   it('a lead source email with ADF content makes a normal lead', async () => {
     const email = `adf.${uid()}@example.com`;
     const result: any = await run(gmailMessage({ from: `DealersCloud <${LEAD_SOURCE}>`, subject: 'New lead', body: adfBody('Lena', 'Adams', email) }), { allowNewInquiry: true });

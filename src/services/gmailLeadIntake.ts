@@ -18,7 +18,7 @@ import {
 import { FREE_MAIL_DOMAINS } from '../utils/freeMailDomains';
 import { NOT_A_LEAD_STATUS } from '../constants/leadStatus';
 
-const PLATFORM_NOTICE_SENDERS = new Set(['salesleads@cars.com']);
+const PLATFORM_NOTICE_SENDERS = new Set(['salesleads@cars.com', 'dealerleads@autotrader.com']);
 
 export type GmailIntakeResult =
   | LeadIntakeResult
