@@ -35,6 +35,21 @@ describe('readableEmailText (what the email bubble shows)', () => {
     ].join('\n'));
   });
 
+  it('turns HTML codes in a plain email into the right characters', async () => {
+    const text = 'I&#8217;m interested &amp; it&rsquo;s great &#x2014; thanks &quot;Joe&quot;';
+    await expect(readableEmailText(text)).resolves.toBe('I’m interested & it’s great — thanks "Joe"');
+  });
+
+  it('turns HTML codes into characters after cleaning an HTML email too', async () => {
+    const html = '<div>We&rsquo;re open</div><p>Call us &ndash; anytime</p>';
+    await expect(readableEmailText(html)).resolves.toBe('We’re open\nCall us – anytime');
+  });
+
+  it('leaves unknown or broken codes as they are', async () => {
+    const text = 'Price &foo; stays, & alone stays, &#0; stays';
+    await expect(readableEmailText(text)).resolves.toBe(text);
+  });
+
   it('keeps empty text empty', async () => {
     await expect(readableEmailText('')).resolves.toBe('');
   });

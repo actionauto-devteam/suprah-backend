@@ -11,6 +11,7 @@ import { identityFromMetadata } from '../utils/aiAgentIdentity';
 import { aiHandoffTopicLabel, cleanAiHandoffTopicTeams, guessAiHandoffTopic } from '../constants/aiHandoffTopics';
 import { aiHandoffNoteText } from './aiHandoffRouting.service';
 import { samePersonIds } from '../utils/samePersonIds';
+import { NOT_A_LEAD_STATUS } from '../constants/leadStatus';
 import logger from '../utils/logger';
 
 export type LeadNoticeAudience = 'owner' | 'ring_team' | 'team' | 'admins' | 'nobody';
@@ -71,10 +72,14 @@ export function lastAiTaggedTeamIds(lead: any): string[] {
   return [];
 }
 
-async function tagLeadTeam(organizationId: string, lead: any, input: LeadNoticeInput): Promise<LeadTeam | null> {
+async function findLeadTeam(
+  organizationId: string,
+  lead: any,
+  input: LeadNoticeInput,
+): Promise<{ team: LeadTeam; tagged: boolean; topic: ReturnType<typeof guessAiHandoffTopic>; metadata: any } | null> {
   for (const groupId of lastAiTaggedTeamIds(lead)) {
     const team = await teamWithMembers(organizationId, groupId);
-    if (team) return team;
+    if (team) return { team, tagged: true, topic: 'other', metadata: {} };
   }
 
   const org: any = await Organization.findById(organizationId).select('metadata').lean();
@@ -83,12 +88,18 @@ async function tagLeadTeam(organizationId: string, lead: any, input: LeadNoticeI
   if (topic === 'other' && lead?.comments) topic = guessAiHandoffTopic(lead.comments);
   const topicTeams = cleanAiHandoffTopicTeams(metadata.aiHandoffTopicTeams);
 
-  let team: LeadTeam | null = null;
   for (const groupId of [topicTeams[topic], metadata.aiHandoffFallbackGroupId]) {
-    team = await teamWithMembers(organizationId, groupId);
-    if (team) break;
+    const team = await teamWithMembers(organizationId, groupId);
+    if (team) return { team, tagged: false, topic, metadata };
   }
-  if (!team) return null;
+  return null;
+}
+
+async function tagLeadTeam(organizationId: string, lead: any, input: LeadNoticeInput): Promise<LeadTeam | null> {
+  const found = await findLeadTeam(organizationId, lead, input);
+  if (!found) return null;
+  if (found.tagged) return found.team;
+  const { team, topic, metadata } = found;
 
   try {
     await addLeadNoteAndNotify({
@@ -113,13 +124,17 @@ async function pickLeadNoticePeople(
 ): Promise<{ audience: Exclude<LeadNoticeAudience, 'admins' | 'nobody'>; ids: string[] } | null> {
   const leadId = validId(input.leadId);
   const lead: any = leadId
-    ? await Lead.findOne({ _id: leadId, organizationId }).select('assignedTo comments notes.authorType notes.mentionedGroupIds').lean()
+    ? await Lead.findOne({ _id: leadId, organizationId }).select('assignedTo status comments notes.authorType notes.mentionedGroupIds').lean()
     : null;
 
-  const assignedOwnerOnly = input.assignedOwnerOnly || input.type === 'lead_message';
-  const owner = await firstActiveOwner(organizationId, assignedOwnerOnly ? [lead?.assignedTo] : [...(input.ownerIds || []), lead?.assignedTo]);
+  const customerReply = input.assignedOwnerOnly || input.type === 'lead_message';
+  const owner = await firstActiveOwner(organizationId, customerReply ? [lead?.assignedTo] : [...(input.ownerIds || []), lead?.assignedTo]);
   if (owner) return { audience: 'owner', ids: [owner] };
-  if (assignedOwnerOnly) return { audience: 'owner', ids: [] };
+  if (customerReply) {
+    if (!lead || lead.status === NOT_A_LEAD_STATUS) return { audience: 'owner', ids: [] };
+    const found = await findLeadTeam(organizationId, lead, input);
+    return found ? { audience: 'team', ids: found.team.memberIds } : null;
+  }
   if (input.ringTeamIds?.length) return { audience: 'ring_team', ids: input.ringTeamIds };
   if (!lead) return null;
   const team = await tagLeadTeam(organizationId, lead, input);
