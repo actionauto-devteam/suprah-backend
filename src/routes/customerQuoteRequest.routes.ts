@@ -9,6 +9,7 @@ import auth from "../middleware/auth.middleware";
 import authorize from "../middleware/role.middleware";
 import { ApiError } from "../utils/ApiError";
 import { SUPPORT_EMAIL } from "../utils/userMessages";
+import { confirmCashAsCustomer, listCustomerCashLoads } from "../controllers/loadCash.controller";
 
 // Customers asking for shipping on a marketplace vehicle from the customer
 // portal. No organization is needed: the request goes to the dealership that
@@ -69,6 +70,11 @@ router.get(
   authorize("customer", "My Shipments is for customer accounts. Staff see quotes and loads on the Transportation page."),
   quoteController.getMyShipments,
 );
+
+// Cash on delivery shipments: the customer confirms paying the driver in cash (2026-11-25).
+const cashCustomerOnly = authorize("customer", "Confirming a cash payment is for the customer of the shipment.");
+router.get("/cash-payments", cashCustomerOnly, listCustomerCashLoads);
+router.post("/cash-payments/:loadId", cashCustomerOnly, confirmCashAsCustomer);
 
 // Where the driver carrying the customer's car is, from pickup until delivery.
 router.get(

@@ -47,7 +47,7 @@ export interface IPayment extends Document {
   notes?: string;
   /** Shown to the customer on their invoice; `notes` stay with the dealership (2026-11-20). */
   customerNote?: string;
-  /** What the payment is for (2026-11-21): shipping, car_deposit, aftermarket, service, down_payment or other. */
+  /** What the payment is for (2026-11-21): shipping, car_deposit, aftermarket, service, down_payment, vehicle (2026-11-26) or other. */
   purpose?: string;
   /** Suprah's fee rate (percent) when the invoice was created, for the dealership's payout. */
   suprahFeePercent?: number;
@@ -61,6 +61,14 @@ export interface IPayment extends Document {
   /** Stripe card payments that came in after this invoice was already paid
    *  (2026-11-25): Suprah's admins are told once so they can be refunded. */
   secondChargeIds?: string[];
+  /**
+   * Shipping Suprah bills for a load (2026-11-25): to the load's customer or
+   * to the dealership. These are Suprah's money: organizationId is
+   * SUPRAH_BILLING_ORG (so no dealership total or payout counts them) and
+   * forOrganizationId is the dealership whose load it is.
+   */
+  billedTo?: 'customer' | 'dealership';
+  forOrganizationId?: string;
 
   /** A card dispute (chargeback). Revenue counts the payment until the bank
    *  decides; a lost dispute is left out like a refund. */
@@ -140,13 +148,15 @@ const PaymentSchema: Schema<IPayment> = new Schema(
     failureReason: { type: String, trim: true },
     notes: { type: String, trim: true },
     customerNote: { type: String, trim: true, maxlength: 1000 },
-    purpose: { type: String, enum: ['shipping', 'car_deposit', 'aftermarket', 'service', 'down_payment', 'other'] },
+    purpose: { type: String, enum: ['shipping', 'car_deposit', 'aftermarket', 'service', 'down_payment', 'vehicle', 'other'] },
     suprahFeePercent: { type: Number, min: 0, max: 100 },
     paidAt: { type: Date },
     dueDate: { type: Date },
     refundedAmount: { type: Number, min: 0 },
     refundedAt: { type: Date },
     secondChargeIds: { type: [String], default: undefined },
+    billedTo: { type: String, enum: ['customer', 'dealership'] },
+    forOrganizationId: { type: String, index: true, sparse: true },
     stripeDisputeId: { type: String, trim: true },
     disputeStatus: { type: String, enum: ['open', 'won', 'lost'] },
     disputedAmount: { type: Number, min: 0 },

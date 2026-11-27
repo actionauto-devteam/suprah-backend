@@ -3,6 +3,7 @@ import driverPayoutController from '../controllers/driverPayout.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
 import authorize from '../middleware/role.middleware';
+import { requireFinanceAccess } from '../utils/financeAccess';
 
 const router = express.Router();
 
@@ -28,6 +29,7 @@ router.get('/stats', staffOnly, driverPayoutController.getPayoutStats);
 router
   .route('/')
   .get(staffOnly, driverPayoutController.getPayouts)
-  .post(authorize(['admin', 'super_admin']), driverPayoutController.createPayout);
+  // Dealership admins and staff with Finance access (2026-11-25).
+  .post(staffOnly, requireFinanceAccess, driverPayoutController.createPayout);
 
 export default router;

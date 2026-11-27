@@ -26,6 +26,8 @@ router.get('/checkout-session/:sessionId', paymentController.getCheckoutSessionS
 
 router.post('/:id/cancel-mine', paymentController.cancelMyPayment);
 router.post('/:id/left-checkout', paymentController.leaveCheckout);
+// Back on SuprahPay after Stripe's page (2026-11-25).
+router.post('/checkout-return', paymentController.returnFromCheckout);
 
 // Everything below works on the dealership's own payment records (the list,
 // totals, sending requests, refunds), so only its staff may use it. Customers
@@ -59,6 +61,10 @@ router.post(
   connectDealershipPayoutAccount,
 );
 
+// Shipping bills from Suprah for the dealership's own loads (2026-11-25).
+router.get('/suprah-bills', paymentController.getSuprahBills);
+router.post('/suprah-bills/:id/pay', requireFinanceAccess, paymentController.paySuprahBill);
+router.post('/suprah-bills/:id/check', paymentController.checkSuprahBill);
 router.get('/', paymentController.getPayments);
 // Sending, editing, cancelling and refunding need Finance access (2026-11-21);
 // every staff member can still view payments.

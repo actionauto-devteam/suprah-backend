@@ -43,6 +43,7 @@ import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contact
 import { findPortalCustomerByEmail, findPortalCustomersByEmail, isStaffQuote, type PortalCustomer } from '../services/shipmentFollower';
 import { customerShipmentTracking } from '../services/customerShipmentTracking';
 import { announceShipmentSharing, forgetShipmentFollowers } from '../services/customerShipmentLive';
+import { billConvertedQuoteLoad } from '../services/loadBilling.service';
 
 /**
  * The CRM lead for a quote's customer, preferring the lead about the quote's
@@ -1905,6 +1906,10 @@ async function convertClaimedQuote(req: Request, res: Response, quote: IQuote, o
             copCodAmount: 0,
         },
     });
+
+    // The customer's automatic SuprahPay shipping invoice at the quote price
+    // (2026-11-25). Never blocks the conversion.
+    await billConvertedQuoteLoad(load._id, quote, orgId, userId);
 
     // Preserve the quote for history and mark it as converted.
     quote.status = 'booked';

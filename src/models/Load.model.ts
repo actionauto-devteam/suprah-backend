@@ -22,6 +22,41 @@ export type LoadStatus =
   | "Delivered"
   | "Cancelled";
 
+/** Who pays for a load's shipping and how (2026-11-25 decisions). */
+export interface ILoadBilling {
+  /** A customer (every load made from a quote) or the dealership itself. Unset when settled outside Suprah. */
+  billTo?: "customer" | "dealership";
+  /**
+   * SuprahPay invoice, or cash the customer hands the driver on delivery (COD).
+   * "cop" (cash at pickup) is only on loads saved while testing, before
+   * 2026-11-26, and is treated as cash on delivery.
+   */
+  method?: "suprahpay" | "cod" | "cop";
+  customerName?: string;
+  customerEmail?: string;
+  /** What the customer pays for shipping (the quote price, or what staff entered). */
+  shippingPrice?: number;
+  /**
+   * A car sold to the person receiving it (2026-11-26): its price and sales
+   * tax rate. The dealership sends that customer an automatic SuprahPay
+   * invoice for it (vehicleInvoiceId).
+   */
+  vehiclePrice?: number;
+  vehicleTaxRate?: number;
+  vehicleInvoiceId?: mongoose.Types.ObjectId;
+  /** Pricing was skipped: settled outside Suprah, the staff pay the driver directly. */
+  outside?: boolean;
+  /** The current automatic SuprahPay invoice for this load. */
+  invoiceId?: mongoose.Types.ObjectId;
+  /** Cash on delivery: the driver confirmed the cash (settles it), or said they weren't paid. */
+  cashConfirmedAt?: Date;
+  cashNotReceivedAt?: Date;
+  /** Cash on delivery: the customer confirmed paying the driver. */
+  cashCustomerConfirmedAt?: Date;
+  decidedAt?: Date;
+  decidedBy?: mongoose.Types.ObjectId;
+}
+
 export interface ILoad extends Document {
   _id: mongoose.Types.ObjectId;
   organizationId: string;
@@ -90,6 +125,12 @@ export interface ILoad extends Document {
   calendarSyncLockedUntil?: Date | null;
   /** Set while a driver payout for this load is being sent. */
   payoutClaimedAt?: Date | null;
+  /**
+   * Who pays for this load's shipping, and how (SuprahPay, 2026-11-25). Set
+   * when the load is made, or for older loads the first time the driver is
+   * paid. See services/loadBilling.service.
+   */
+  billing?: ILoadBilling;
   assignmentHistory?: Array<Record<string, any>>;
   gpsGapEvents?: Array<{ step: string; recordedAt: Date; lastGpsAt?: Date | null }>;
   driverAmendments: Array<{
@@ -551,6 +592,28 @@ const loadSchema = new Schema<ILoad>(
     calendarSyncLockedUntil: { type: Date, select: false },
     // Set while a driver payout for this load is being sent (driverPayout.controller).
     payoutClaimedAt: { type: Date, select: false },
+    // Who pays for shipping (2026-11-25). The customer's name and email and
+    // the shipping price are left out unless a query names them, so drivers'
+    // load screens never get them (the price would show Suprah's share).
+    billing: {
+      billTo: { type: String, enum: ["customer", "dealership"] },
+      // "cop" stays readable for loads saved while testing; new loads are "suprahpay" or "cod".
+      method: { type: String, enum: ["suprahpay", "cod", "cop"] },
+      customerName: { type: String, trim: true, maxlength: 200, select: false },
+      customerEmail: { type: String, trim: true, lowercase: true, maxlength: 254, select: false },
+      shippingPrice: { type: Number, min: 0, select: false },
+      // A car sold to the receiver (2026-11-26): what they pay the dealership for it.
+      vehiclePrice: { type: Number, min: 0, select: false },
+      vehicleTaxRate: { type: Number, min: 0, max: 100, select: false },
+      vehicleInvoiceId: { type: Schema.Types.ObjectId, ref: "Payment" },
+      outside: { type: Boolean },
+      invoiceId: { type: Schema.Types.ObjectId, ref: "Payment" },
+      cashConfirmedAt: { type: Date },
+      cashNotReceivedAt: { type: Date },
+      cashCustomerConfirmedAt: { type: Date },
+      decidedAt: { type: Date },
+      decidedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    },
     // Material edits made after the driver has accepted are recorded in the
     // same Load document as the edit itself. This keeps the edit + amendment
     // requirement atomic without requiring Mongo multi-document transactions.
@@ -676,6 +739,8 @@ const loadSchema = new Schema<ILoad>(
 
 // ── Indexes ──
 loadSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
+// A customer's COP/COD loads to confirm on My Shipments (2026-11-25).
+loadSchema.index({ "billing.customerEmail": 1, "billing.method": 1 }, { sparse: true });
 loadSchema.index({ organizationId: 1, assignedDriverId: 1, status: 1 });
 // A driver's loads across every organization (shared driver pool), for
 // example the trip they're on or their latest delivery.

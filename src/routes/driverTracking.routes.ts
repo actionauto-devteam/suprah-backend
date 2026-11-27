@@ -38,6 +38,7 @@ import {
 import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
 import { areBackgroundJobsDisabled } from "../config/backgroundJobs";
 import { requireSuperAdmin } from "../middleware/rbac.middleware";
+import { confirmCashAsDriver } from "../controllers/loadCash.controller";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const staffOnly = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
@@ -356,6 +357,8 @@ router.post(
   driverTrackingController.reconfirmAssignment,
 );
 router.post("/loads/:id/accept", driverOnly, driverTrackingController.acceptLoad);
+// Cash on delivery: the driver confirms the cash, or says they weren't paid (2026-11-25).
+router.post("/loads/:id/cash", driverOnly, confirmCashAsDriver);
 router.post(
   "/loads/:id/amendments/:amendmentId/acknowledge",
   driverOnly,

@@ -13,6 +13,9 @@ import logger from '../utils/logger';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
 import { payoutAccountStatus, payoutFailedNotice } from '../utils/driverPayoutAccount';
 import { driverPayoutFailureReason, isStripeError, payoutSetupProblemMessage, stripeErrorForLog } from '../utils/stripeErrors';
+import Payment from '../models/Payment.model';
+import { driverPayGate } from '../utils/loadBilling';
+import { loadBillingOn } from '../services/loadBilling.service';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: "2026-02-25.clover",
@@ -58,6 +61,11 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
 
   const allIds = allItems.map((i) => i._id);
   const existingPayouts = await DriverPayout.find({ organizationId: orgId, loadId: { $in: allIds } }).lean();
+  // Whether SuprahPay can pay each driver now, and why not (2026-11-25): one read for all the invoices.
+  const invoiceIds = allItems.map((i: any) => i.billing?.invoiceId).filter(Boolean);
+  const invoices = invoiceIds.length ? await Payment.find({ _id: { $in: invoiceIds } }).select('status').lean() : [];
+  const invoiceStatus = new Map(invoices.map((p: any) => [String(p._id), String(p.status)]));
+  const billingOn = await loadBillingOn(orgId);
   const payoutByEntity: Record<string, any> = {};
   existingPayouts.forEach((p) => { payoutByEntity[p.loadId.toString()] = p; });
 
@@ -67,6 +75,9 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
         ...s,
         existingPayout: payoutByEntity[s._id.toString()] || null,
         pendingConfirmation: !!(s.proofOfDelivery?.imageUrl && !s.proofOfDelivery?.confirmedAt),
+        driverPay: billingOn
+          ? driverPayGate(s as any, invoiceStatus.get(String((s as any).billing?.invoiceId ?? '')))
+          : { ok: false, code: 'suprahpay_off', message: "SuprahPay isn't turned on for your dealership yet." },
       };
       if (item.proofOfDelivery?.imageUrl) {
         const signed = await getSignedProofUrl(item.proofOfDelivery.imageUrl);
@@ -168,13 +179,11 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { loadId, driverId, amount, description, notes } = req.body;
 
-  if (!loadId || !driverId || amount === undefined || amount === null) {
-    throw new ApiError(400, 'Choose the load and driver, and enter the payout amount.');
+  if (!loadId || !driverId) {
+    throw new ApiError(400, 'Choose the load and driver.');
   }
-
-  const numericAmount = Number(amount);
-  if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-    throw new ApiError(400, 'Enter a payout amount greater than $0.');
+  if (!(await loadBillingOn(orgId))) {
+    throw new ApiError(403, "SuprahPay isn't turned on for your dealership yet, so drivers can't be paid through it.");
   }
 
   const load = await Load.findOne({ _id: loadId, organizationId: orgId, status: 'Delivered' });
@@ -185,6 +194,16 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
 
   if (!load.assignedDriverId || load.assignedDriverId.toString() !== driverId) {
     throw new ApiError(400, 'Payouts can only go to the driver who delivered this load.');
+  }
+
+  // The driver is paid the load's carrier pay, once its shipping is paid
+  // (by the customer, or by the dealership's bill from Suprah), 2026-11-25.
+  const invoice = load.billing?.invoiceId ? await Payment.findById(load.billing.invoiceId).select('status').lean() : null;
+  const gate = driverPayGate(load as any, invoice?.status);
+  if (!gate.ok) throw new ApiError(409, gate.message);
+  const numericAmount = gate.amount;
+  if (amount !== undefined && amount !== null && Math.round(Number(amount) * 100) !== Math.round(numericAmount * 100)) {
+    throw new ApiError(409, `The driver's pay for load ${load.loadNumber} is $${numericAmount.toFixed(2)} now. Refresh and check it again.`);
   }
 
   // Drivers are a shared platform-wide pool — payable by any org that had them on a load.

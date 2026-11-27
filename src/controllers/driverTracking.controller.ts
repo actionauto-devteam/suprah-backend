@@ -120,6 +120,7 @@ import {
 import { LOAD_CANCELLATION_REASON_LABELS } from "../constants/loadCancellation";
 import { inventoryStatusAtDelivery, inventoryVehicleIdsFollowingLoad, type LoadInventoryStatus } from "../services/loadInventoryStatus";
 import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
+import { afterLoadCancelled } from "../services/loadBilling.service";
 import {
   customerHearsEvent,
   customerShipmentNotification,
@@ -7432,6 +7433,8 @@ const cancelLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   });
 
   await flushLifecycleOutbox(loadId);
+  // Its unpaid SuprahPay shipping invoice is cancelled; a paid one is refunded by Suprah (2026-11-25).
+  await afterLoadCancelled({ _id: load._id, organizationId, loadNumber: load.loadNumber, billing: load.billing });
   // Drivers' new-load alerts stop offering it.
   void markNewLoadAlertsUnavailable(loadId);
   for (const requesterId of requesterIds) {

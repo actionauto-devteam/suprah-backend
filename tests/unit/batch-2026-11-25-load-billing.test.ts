@@ -1,0 +1,666 @@
+/**
+ * Batch 8 (2026-11-25): who pays for a load's shipping, Suprah's automatic
+ * SuprahPay invoices, driver payouts and cash on delivery (COD only since
+ * 2026-11-26), and the dealership's invoice for a car sold to the receiver.
+ * Stripe, the database and notifications are stand-ins.
+ */
+jest.mock('stripe', () => {
+  const instance = {
+    webhooks: { constructEvent: jest.fn() },
+    paymentIntents: { retrieve: jest.fn(), create: jest.fn(), cancel: jest.fn() },
+    charges: { retrieve: jest.fn() },
+    customers: { list: jest.fn(), create: jest.fn(), retrieve: jest.fn((id: string) => Promise.resolve({ id })) },
+    checkout: { sessions: { retrieve: jest.fn(), create: jest.fn(), expire: jest.fn() } },
+    accounts: { retrieve: jest.fn(), create: jest.fn() },
+    accountLinks: { create: jest.fn() },
+    transfers: { create: jest.fn() },
+    refunds: { create: jest.fn() },
+  };
+  return { __esModule: true, default: jest.fn(() => instance), instance };
+});
+jest.mock('../../src/models/Payment.model', () => ({
+  __esModule: true,
+  default: { create: jest.fn(), findOne: jest.fn(), findById: jest.fn(), find: jest.fn(), findOneAndUpdate: jest.fn(), updateOne: jest.fn(), aggregate: jest.fn() },
+}));
+jest.mock('../../src/models/Load.model', () => ({
+  __esModule: true,
+  default: { findById: jest.fn(), findOne: jest.fn(), find: jest.fn(), findOneAndUpdate: jest.fn(), updateOne: jest.fn() },
+}));
+jest.mock('../../src/models/Organization.model', () => ({ __esModule: true, default: { findById: jest.fn(), find: jest.fn() } }));
+jest.mock('../../src/models/User.model', () => ({ __esModule: true, default: { findOne: jest.fn(), findById: jest.fn(), find: jest.fn() } }));
+jest.mock('../../src/models/SystemConfig.model', () => ({ __esModule: true, default: { findOne: jest.fn(), findOneAndUpdate: jest.fn() } }));
+jest.mock('../../src/models/DriverPayout.model', () => ({ __esModule: true, default: { find: jest.fn(), findOne: jest.fn(), create: jest.fn() } }));
+jest.mock('../../src/models/DealershipPayout.model', () => ({ __esModule: true, default: { aggregate: jest.fn(), find: jest.fn() } }));
+jest.mock('../../src/services/referral.service', () => ({ __esModule: true, default: { processPaymentReward: jest.fn() } }));
+jest.mock('../../src/services/membership.service', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/services/activity.service', () => ({
+  __esModule: true,
+  default: { createActivity: jest.fn(() => Promise.resolve()), logFinancialActivity: jest.fn(() => Promise.resolve()) },
+}));
+jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null, emitToUser: jest.fn(), streamLogToAdmins: jest.fn() }));
+jest.mock('../../src/socket/supraspace.socket', () => ({ getIO: () => null }));
+jest.mock('../../src/utils/safeNotification', () => ({ safeCreateNotification: jest.fn(() => Promise.resolve()), notifyOrgAdmins: jest.fn(() => Promise.resolve()) }));
+jest.mock('../../src/utils/signedUrlCache', () => ({ getSignedProofUrl: jest.fn(() => Promise.resolve(null)) }));
+
+import Payment from '../../src/models/Payment.model';
+import Load from '../../src/models/Load.model';
+import Organization from '../../src/models/Organization.model';
+import User from '../../src/models/User.model';
+import SystemConfig from '../../src/models/SystemConfig.model';
+import DriverPayout from '../../src/models/DriverPayout.model';
+import { notifyOrgAdmins, safeCreateNotification } from '../../src/utils/safeNotification';
+import { clearPlatformSettingsCache } from '../../src/services/suprahPaySettings.service';
+import {
+  SUPRAH_BILLING_ORG,
+  billingFromInput,
+  carrierPayCapProblem,
+  cashDueNow,
+  driverPayGate,
+  invoiceTermsFor,
+  vehicleInvoiceTerms,
+} from '../../src/utils/loadBilling';
+import {
+  afterLoadCancelled,
+  issueLoadInvoice,
+  issueVehicleInvoice,
+  pricingEditProblem,
+  sendVehicleInvoice,
+  setLoadBilling,
+} from '../../src/services/loadBilling.service';
+import paymentController from '../../src/controllers/payment.controller';
+import driverPayoutController from '../../src/controllers/driverPayout.controller';
+import { confirmCashAsCustomer, confirmCashAsDriver } from '../../src/controllers/loadCash.controller';
+
+const stripe = (jest.requireMock('stripe') as { instance: any }).instance;
+const payments = Payment as unknown as Record<string, jest.Mock>;
+const loads = Load as unknown as Record<string, jest.Mock>;
+const orgs = Organization as unknown as Record<string, jest.Mock>;
+const users = User as unknown as Record<string, jest.Mock>;
+const configs = SystemConfig as unknown as Record<string, jest.Mock>;
+const driverPayouts = DriverPayout as unknown as Record<string, jest.Mock>;
+
+const ORG_ID = '64b7f0c2a1b2c3d4e5f60718';
+const LOAD_ID = '64b7f0c2a1b2c3d4e5f60a01';
+
+/** A database read that can be chained (.select/.lean/...) and awaited. */
+function q(value: unknown) {
+  const query: any = { then: (ok: any, fail: any) => Promise.resolve(value).then(ok, fail) };
+  for (const step of ['select', 'populate', 'sort', 'limit', 'lean']) query[step] = jest.fn(() => query);
+  return query;
+}
+function call(handler: any, req: Record<string, unknown>): Promise<{ res: any; error: any }> {
+  return new Promise((resolve) => {
+    const res: any = { statusCode: 200 };
+    res.status = jest.fn((code: number) => { res.statusCode = code; return res; });
+    res.json = jest.fn((body: unknown) => { res.body = body; resolve({ res, error: undefined }); return res; });
+    handler({ headers: {}, params: {}, body: {}, query: {}, ...req }, res, (error: unknown) => resolve({ res, error }));
+  });
+}
+/** SuprahPay on for the dealership, and Suprah's settings. */
+function suprahPay(on = true, platform: Record<string, unknown> | null = null) {
+  orgs.findById.mockReturnValue(q({ _id: ORG_ID, name: 'Action Auto Utah', subscription: { tier: on ? 'suprah_origin' : 'suprah_go' } }));
+  configs.findOne.mockReturnValue(q(platform ? { value: platform } : null));
+}
+
+beforeEach(() => {
+  jest.resetAllMocks();
+  clearPlatformSettingsCache();
+  stripe.customers.retrieve.mockImplementation((id: string) => Promise.resolve({ id }));
+  (safeCreateNotification as jest.Mock).mockResolvedValue(undefined);
+  (notifyOrgAdmins as jest.Mock).mockResolvedValue(undefined);
+});
+
+describe('batch 8 rules: who pays for a load', () => {
+  const priced = { isPricingEnabled: true, carrierPayAmount: 500 };
+
+  it('pricing skipped means settled outside Suprah, whatever was chosen', () => {
+    expect(billingFromInput({ billTo: 'customer', method: 'suprahpay' }, { isPricingEnabled: false })).toEqual({ ok: true, billing: { outside: true } });
+  });
+
+  it('a customer or the dealership must be chosen', () => {
+    expect(billingFromInput(undefined, priced)).toMatchObject({ ok: false, message: expect.stringMatching(/a customer or your dealership/) });
+    expect(billingFromInput({ billTo: 'someone' }, priced).ok).toBe(false);
+  });
+
+  it('a dealership load is billed its driver pay through SuprahPay; cash on delivery is only for customers', () => {
+    expect(billingFromInput({ billTo: 'dealership' }, priced)).toEqual({ ok: true, billing: { billTo: 'dealership', method: 'suprahpay' } });
+    expect(billingFromInput({ billTo: 'dealership', method: 'cod' }, priced)).toMatchObject({ ok: false, message: expect.stringMatching(/only for customer loads/) });
+    expect(billingFromInput({ billTo: 'dealership' }, { isPricingEnabled: true })).toMatchObject({ ok: false });
+  });
+
+  it("a customer load needs the customer's name, email and (for SuprahPay) a shipping price no lower than the driver's pay", () => {
+    const customer = { billTo: 'customer', customerName: ' Pat Lee ', customerEmail: 'Pat@Example.com' };
+    expect(billingFromInput({ ...customer, customerName: '' }, priced).ok).toBe(false);
+    expect(billingFromInput({ ...customer, customerEmail: 'nope' }, priced).ok).toBe(false);
+    expect(billingFromInput({ ...customer, shippingPrice: '' }, priced)).toMatchObject({ ok: false, message: expect.stringMatching(/shipping price/) });
+    expect(billingFromInput({ ...customer, shippingPrice: 499.99 }, priced)).toMatchObject({ ok: false, message: expect.stringMatching(/can't be more than the customer's shipping price/) });
+    expect(billingFromInput({ ...customer, shippingPrice: '650' }, priced)).toEqual({
+      ok: true,
+      billing: { billTo: 'customer', method: 'suprahpay', customerName: 'Pat Lee', customerEmail: 'pat@example.com', shippingPrice: 650 },
+    });
+    expect(billingFromInput({ ...customer, method: 'cod' }, priced)).toEqual({
+      ok: true,
+      billing: { billTo: 'customer', method: 'cod', customerName: 'Pat Lee', customerEmail: 'pat@example.com' },
+    });
+    expect(billingFromInput({ ...customer, method: 'cheque' }, priced).ok).toBe(false);
+    expect(carrierPayCapProblem(500, 500)).toBeNull();
+  });
+
+  it('what the automatic invoice is for: the customer pays the shipping price, the dealership the driver pay, cash loads nothing', () => {
+    expect(invoiceTermsFor({ billTo: 'customer', method: 'suprahpay', shippingPrice: 650 }, priced)).toEqual({ billedTo: 'customer', amount: 650 });
+    expect(invoiceTermsFor({ billTo: 'dealership', method: 'suprahpay' }, priced)).toEqual({ billedTo: 'dealership', amount: 500 });
+    expect(invoiceTermsFor({ billTo: 'customer', method: 'cod' }, priced)).toBeNull();
+    expect(invoiceTermsFor({ outside: true }, priced)).toBeNull();
+  });
+
+  it('the driver is paid the carrier pay only once the shipping is paid', () => {
+    const customerLoad = { billing: { billTo: 'customer' as const, method: 'suprahpay' as const }, pricing: priced };
+    expect(driverPayGate({ pricing: { isPricingEnabled: false } }, null)).toMatchObject({ ok: false, code: 'outside' });
+    expect(driverPayGate({ pricing: priced }, null)).toMatchObject({ ok: false, code: 'needs_billing' });
+    expect(driverPayGate({ billing: { billTo: 'customer', method: 'cod' }, pricing: priced }, null)).toMatchObject({ ok: false, code: 'cash' });
+    expect(driverPayGate({ ...customerLoad, pricing: { isPricingEnabled: true } }, 'succeeded')).toMatchObject({ ok: false, code: 'no_amount' });
+    expect(driverPayGate(customerLoad, 'pending')).toMatchObject({ ok: false, code: 'awaiting_payment', message: expect.stringMatching(/customer hasn't paid/) });
+    expect(driverPayGate({ ...customerLoad, billing: { billTo: 'dealership', method: 'suprahpay' } }, 'processing'))
+      .toMatchObject({ ok: false, message: expect.stringMatching(/Bills from Suprah/) });
+    expect(driverPayGate(customerLoad, 'refunded')).toMatchObject({ ok: false, code: 'refunded' });
+    expect(driverPayGate(customerLoad, 'succeeded')).toEqual({ ok: true, amount: 500 });
+  });
+
+  it('no cash at pickup (the customer collecting the car means no shipment); cash is due on delivery', () => {
+    const customer = { billTo: 'customer', customerName: 'Pat Lee', customerEmail: 'pat@example.com' };
+    expect(billingFromInput({ ...customer, method: 'cop' }, priced))
+      .toMatchObject({ ok: false, message: expect.stringMatching(/collects the car at your dealership/) });
+    expect(cashDueNow('cod', 'In-Transit')).toBe(false);
+    expect(cashDueNow('cod', 'Delivered')).toBe(true);
+    // Loads saved with cash at pickup while testing are now due on delivery too.
+    expect(cashDueNow('cop', 'Picked Up')).toBe(false);
+    expect(cashDueNow('cop', 'Delivered')).toBe(true);
+    expect(cashDueNow('suprahpay', 'Delivered')).toBe(false);
+  });
+});
+
+describe('batch 8: the automatic SuprahPay shipping invoice', () => {
+  const load = (billing: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-100', status: 'Posted', createdBy: 'staff-1',
+    pricing: { isPricingEnabled: true, carrierPayAmount: 500 }, billing, ...extra,
+  });
+
+  it("a customer's invoice is Suprah's money: no tax, no fee, linked to the load and the dealership", async () => {
+    suprahPay();
+    loads.findById.mockReturnValueOnce(q(load({ billTo: 'customer', method: 'suprahpay', customerName: 'Pat Lee', customerEmail: 'pat@example.com', shippingPrice: 650 })));
+    users.findById.mockReturnValue(q({ email: 'staff@dealer.com' }));
+    payments.create.mockImplementation((doc: any) => Promise.resolve({ _id: 'inv-1', ...doc }));
+    loads.findOneAndUpdate.mockReturnValueOnce(q({ _id: LOAD_ID }));
+    users.findOne.mockReturnValueOnce(q({ _id: 'cust-1' }));
+
+    const invoice: any = await issueLoadInvoice(LOAD_ID);
+    expect(payments.create).toHaveBeenCalledWith(expect.objectContaining({
+      organizationId: SUPRAH_BILLING_ORG, forOrganizationId: ORG_ID, billedTo: 'customer', loadId: LOAD_ID,
+      customerEmail: 'pat@example.com', amount: 650, taxRate: 0, suprahFeePercent: 0, purpose: 'shipping', status: 'pending',
+    }));
+    expect(loads.findOneAndUpdate.mock.calls[0][0]).toEqual({ _id: LOAD_ID, 'billing.invoiceId': null });
+    expect(invoice._id).toBe('inv-1');
+    expect(safeCreateNotification).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'cust-1', type: 'payment_request', title: 'SuprahPay invoice from Action Auto Utah',
+      message: 'Action Auto Utah sent you an invoice of $650.00 for shipping your vehicle (load L-100). Open SuprahPay to pay it.',
+    }));
+  });
+
+  it("the dealership is billed its driver's pay and its admins are told where to pay it", async () => {
+    suprahPay();
+    loads.findById.mockReturnValueOnce(q(load({ billTo: 'dealership', method: 'suprahpay' })));
+    users.findById.mockReturnValue(q({ email: 'staff@dealer.com' }));
+    payments.create.mockImplementation((doc: any) => Promise.resolve({ _id: 'inv-2', ...doc }));
+    loads.findOneAndUpdate.mockReturnValueOnce(q({ _id: LOAD_ID }));
+
+    await issueLoadInvoice(LOAD_ID);
+    expect(payments.create).toHaveBeenCalledWith(expect.objectContaining({ billedTo: 'dealership', amount: 500, customerName: 'Action Auto Utah', customerEmail: 'staff@dealer.com' }));
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(ORG_ID, 'payment_pending', 'Shipping bill from Suprah', expect.stringContaining('$500.00'), expect.objectContaining({ route: '/billing' }));
+  });
+
+  it('nothing is sent over SuprahPay’s payment limit', async () => {
+    suprahPay(true, { feePercent: 0, maxPaymentAmount: 400 });
+    loads.findById.mockReturnValueOnce(q(load({ billTo: 'dealership', method: 'suprahpay' })));
+    await expect(issueLoadInvoice(LOAD_ID)).rejects.toMatchObject({ statusCode: 400 });
+    expect(payments.create).not.toHaveBeenCalled();
+  });
+
+  it('a paid invoice is never billed again, and cash loads get no invoice', async () => {
+    loads.findById.mockReturnValueOnce(q(load({ billTo: 'customer', method: 'suprahpay', shippingPrice: 650, invoiceId: 'inv-1' })));
+    payments.findById.mockReturnValueOnce(q({ _id: 'inv-1', status: 'succeeded', amount: 600, billedTo: 'customer' }));
+    expect(await issueLoadInvoice(LOAD_ID)).toMatchObject({ _id: 'inv-1' });
+    loads.findById.mockReturnValueOnce(q(load({ billTo: 'customer', method: 'cod' })));
+    expect(await issueLoadInvoice(LOAD_ID)).toBeNull();
+    expect(payments.create).not.toHaveBeenCalled();
+  });
+
+  it("billing can't change once the shipping is paid, or on a load settled outside Suprah", async () => {
+    suprahPay();
+    loads.findById.mockReturnValueOnce(q(load({ billTo: 'customer', method: 'suprahpay', shippingPrice: 650, invoiceId: 'inv-1' })));
+    payments.findById.mockReturnValueOnce(q({ _id: 'inv-1', status: 'succeeded' }));
+    await expect(setLoadBilling(LOAD_ID, ORG_ID, { billTo: 'customer', method: 'cod' }, 'staff-1')).rejects.toMatchObject({ statusCode: 409 });
+    loads.findById.mockReturnValueOnce(q(load({ outside: true }, { pricing: { isPricingEnabled: false } })));
+    await expect(setLoadBilling(LOAD_ID, ORG_ID, { billTo: 'dealership' }, 'staff-1')).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("Edit Load: the driver's pay can't pass the customer's price, and can't change after the dealership paid", async () => {
+    loads.findById.mockReturnValueOnce(q(load({ billTo: 'customer', method: 'suprahpay', shippingPrice: 650 })));
+    expect(await pricingEditProblem(LOAD_ID, { carrierPayAmount: 700 })).toMatch(/can't be more than/);
+    loads.findById.mockReturnValueOnce(q(load({ billTo: 'dealership', method: 'suprahpay', invoiceId: 'inv-2' })));
+    payments.findById.mockReturnValueOnce(q({ _id: 'inv-2', status: 'succeeded', amount: 500 }));
+    expect(await pricingEditProblem(LOAD_ID, { carrierPayAmount: 450 })).toMatch(/already paid this load's bill of \$500\.00/);
+  });
+});
+
+describe("batch 8: converting a quote", () => {
+  it("never cancels a hand-sent Shipping invoice it can't match to the quote: the admins are told instead", async () => {
+    suprahPay();
+    payments.find
+      .mockReturnValueOnce(q([])) // nothing linked to this quote
+      .mockReturnValueOnce(q([{ invoiceNumber: "INV-7", amount: 640, status: "pending" }]));
+    loads.findById
+      .mockReturnValueOnce(q({ _id: LOAD_ID, organizationId: ORG_ID, loadNumber: "L-200", status: "Draft", quoteId: "quote-1", createdBy: "staff-1", pricing: { isPricingEnabled: true, carrierPayAmount: 600 }, billing: {} }))
+      .mockReturnValueOnce(q({ _id: LOAD_ID, organizationId: ORG_ID, loadNumber: "L-200", status: "Draft", quoteId: "quote-1", createdBy: "staff-1", pricing: { isPricingEnabled: true, carrierPayAmount: 600 }, billing: { billTo: "customer", method: "suprahpay", customerName: "Pat Lee", customerEmail: "pat@example.com", shippingPrice: 640 } }))
+      .mockReturnValueOnce(q({ billing: { billTo: "customer" } }))
+      .mockReturnValueOnce(q({ loadNumber: "L-200" }));
+    loads.updateOne.mockResolvedValue({});
+    users.findById.mockReturnValue(q({ email: "staff@dealer.com" }));
+    payments.create.mockImplementation((doc: any) => Promise.resolve({ _id: "inv-9", ...doc }));
+    loads.findOneAndUpdate.mockReturnValueOnce(q({ _id: LOAD_ID }));
+    users.findOne.mockReturnValueOnce(q(null));
+    const { billConvertedQuoteLoad } = await import("../../src/services/loadBilling.service");
+    await billConvertedQuoteLoad(LOAD_ID, { _id: "quote-1", firstName: "Pat", lastName: "Lee", email: "Pat@Example.com", rate: 640 }, ORG_ID, "staff-1");
+    expect(payments.find.mock.calls[1][0]).toMatchObject({ organizationId: ORG_ID, purpose: "shipping", customerEmail: "pat@example.com", quoteId: { $exists: false }, loadId: { $exists: false } });
+    expect(payments.updateOne).not.toHaveBeenCalled();
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(ORG_ID, "general", "Check for a second shipping invoice", expect.stringContaining("INV-7 for $640.00"), expect.anything());
+  });
+});
+
+describe("batch 8: paying a load's driver", () => {
+  const delivered = (billing: Record<string, unknown> | undefined) => ({
+    _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-100', status: 'Delivered', assignedDriverId: 'driver-1',
+    proofOfDelivery: { confirmedAt: new Date() }, pricing: { isPricingEnabled: true, carrierPayAmount: 500 }, billing,
+  });
+  const pay = (body: Record<string, unknown>) =>
+    call(driverPayoutController.createPayout, { user: { _id: 'staff-1', role: 'admin' }, orgId: ORG_ID, body: { loadId: LOAD_ID, driverId: 'driver-1', ...body } });
+
+  it("SuprahPay off for the dealership: drivers aren't paid through it", async () => {
+    suprahPay(false);
+    expect((await pay({})).error).toMatchObject({ statusCode: 403 });
+    expect(stripe.transfers.create).not.toHaveBeenCalled();
+  });
+
+  it("waits for the customer's payment, and never for a cash load", async () => {
+    suprahPay();
+    loads.findOne.mockResolvedValueOnce(delivered({ billTo: 'customer', method: 'suprahpay', invoiceId: 'inv-1' }));
+    payments.findById.mockReturnValueOnce(q({ status: 'pending' }));
+    expect((await pay({})).error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/hasn't paid/) });
+    loads.findOne.mockResolvedValueOnce(delivered({ billTo: 'customer', method: 'cod' }));
+    expect((await pay({})).error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/in cash/) });
+    loads.findOne.mockResolvedValueOnce(delivered(undefined));
+    expect((await pay({})).error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/Choose who pays/) });
+    expect(stripe.transfers.create).not.toHaveBeenCalled();
+  });
+
+  it('pays exactly the carrier pay once the shipping is paid, and refuses a different typed amount', async () => {
+    suprahPay();
+    loads.findOne.mockResolvedValueOnce(delivered({ billTo: 'dealership', method: 'suprahpay', invoiceId: 'inv-2' }));
+    payments.findById.mockReturnValueOnce(q({ status: 'succeeded' }));
+    expect((await pay({ amount: 450 })).error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/is \$500\.00 now/) });
+
+    loads.findOne.mockResolvedValueOnce(delivered({ billTo: 'dealership', method: 'suprahpay', invoiceId: 'inv-2' }));
+    payments.findById.mockReturnValueOnce(q({ status: 'succeeded' }));
+    users.findOne.mockResolvedValueOnce({ _id: 'driver-1', name: 'Dee', email: 'dee@example.com', stripeConnectAccountId: 'acct_driver' });
+    loads.findOneAndUpdate.mockResolvedValueOnce({ _id: LOAD_ID });
+    loads.updateOne.mockReturnValue(Promise.resolve());
+    driverPayouts.findOne.mockResolvedValueOnce(null);
+    const payout: any = { _id: 'po-1', description: 'Payout for load L-100', save: jest.fn() };
+    driverPayouts.create.mockResolvedValueOnce(payout);
+    stripe.transfers.create.mockResolvedValueOnce({ id: 'tr_1' });
+    const { error } = await pay({});
+    expect(error).toBeUndefined();
+    expect(driverPayouts.create).toHaveBeenCalledWith(expect.objectContaining({ amount: 500 }));
+    expect(stripe.transfers.create.mock.calls[0][0]).toMatchObject({ amount: 50000, destination: 'acct_driver' });
+  });
+});
+
+describe('batch 8: cash on delivery (COD)', () => {
+  const cashLoad = (fields: Record<string, unknown> = {}) => ({
+    _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-100', status: 'Delivered', assignedDriverId: 'driver-1', dispatchOwnerId: 'disp-1',
+    pricing: { isPricingEnabled: true, carrierPayAmount: 500 }, billing: { billTo: 'customer', method: 'cod' }, ...fields,
+  });
+  const driverSays = (received: unknown) =>
+    call(confirmCashAsDriver, { user: { _id: 'driver-1', name: 'Dee' }, params: { id: LOAD_ID }, body: { received } });
+
+  it('the driver confirms the cash, which settles it', async () => {
+    loads.findOne.mockReturnValueOnce(q(cashLoad()));
+    loads.findOneAndUpdate.mockReturnValueOnce(q(cashLoad({ billing: { billTo: 'customer', method: 'cod', cashConfirmedAt: new Date() } })));
+    const { res, error } = await driverSays(true);
+    expect(error).toBeUndefined();
+    expect(loads.findOneAndUpdate.mock.calls[0][0]).toEqual({ _id: LOAD_ID, assignedDriverId: 'driver-1', 'billing.cashConfirmedAt': null });
+    expect(res.body.data.driverConfirmedAt).toBeTruthy();
+    expect(notifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it("'not paid' tells the dispatcher and the dealership's admins", async () => {
+    loads.findOne.mockReturnValueOnce(q(cashLoad()));
+    loads.findOneAndUpdate.mockReturnValueOnce(q(cashLoad({ billing: { billTo: 'customer', method: 'cod', cashNotReceivedAt: new Date() } })));
+    await driverSays(false);
+    const message = "Dee says they weren't paid the cash on delivery (COD) of $500.00 for load L-100. Contact the customer to sort it out.";
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(ORG_ID, 'general', 'Driver not paid in cash', message, expect.anything());
+    expect(safeCreateNotification).toHaveBeenCalledWith(expect.objectContaining({ userId: 'disp-1', message }));
+  });
+
+  it('COD waits for delivery, and a SuprahPay load has no cash to confirm', async () => {
+    loads.findOne.mockReturnValueOnce(q(cashLoad({ status: 'In-Transit' })));
+    expect((await driverSays(true)).error).toMatchObject({ statusCode: 400, message: expect.stringMatching(/once the car is delivered/) });
+    loads.findOne.mockReturnValueOnce(q(cashLoad({ billing: { billTo: 'customer', method: 'suprahpay' } })));
+    expect((await driverSays(true)).error).toMatchObject({ statusCode: 400 });
+    expect((await driverSays('yes')).error).toMatchObject({ statusCode: 400 });
+  });
+
+  it('the customer confirms paying from My Shipments, only with a verified email that matches the load', async () => {
+    users.findById.mockReturnValueOnce(q({ email: 'Pat@Example.com', emailVerified: true }));
+    loads.findOne.mockReturnValueOnce(q(cashLoad()));
+    loads.findOneAndUpdate.mockReturnValueOnce(q(cashLoad({ billing: { billTo: 'customer', method: 'cod', cashCustomerConfirmedAt: new Date() } })));
+    const { res } = await call(confirmCashAsCustomer, { user: { _id: 'cust-1' }, params: { loadId: LOAD_ID } });
+    expect(loads.findOne.mock.calls[0][0]).toMatchObject({ 'billing.customerEmail': 'pat@example.com' });
+    expect(res.body.data).toMatchObject({ amount: 500, customerConfirmedAt: expect.anything() });
+
+    users.findById.mockReturnValueOnce(q({ email: 'pat@example.com', emailVerified: false }));
+    expect((await call(confirmCashAsCustomer, { user: { _id: 'cust-1' }, params: { loadId: LOAD_ID } })).error).toMatchObject({ statusCode: 403 });
+  });
+});
+
+describe("batch 8: customers and Suprah's invoices", () => {
+  it("a dealership's bill is never a person's invoice, and a shipping invoice shows the load's dealership (B8)", async () => {
+    payments.find.mockReturnValueOnce(q([
+      { _id: 'inv-1', organizationId: SUPRAH_BILLING_ORG, forOrganizationId: ORG_ID, status: 'pending', amount: 650, billedTo: 'customer' },
+      { _id: 'pay-2', organizationId: ORG_ID, status: 'succeeded', amount: 50 },
+    ]));
+    orgs.find.mockReturnValueOnce(q([{ _id: ORG_ID, name: 'Action Auto Utah' }]));
+    const { res } = await call(paymentController.getMyPaymentsAsCustomer, { user: { email: 'Pat@Example.com' } });
+    expect(payments.find.mock.calls[0][0]).toEqual({ customerEmail: 'pat@example.com', billedTo: { $ne: 'dealership' } });
+    const names = res.body.data.payments.map((p: any) => p.dealershipName);
+    expect(names).toEqual(['Action Auto Utah', 'Action Auto Utah']);
+  });
+
+  it("a dealership's bill can't be paid from a personal account, and a booked shipment's invoice can't be cancelled by the customer", async () => {
+    payments.findById.mockResolvedValueOnce({ _id: 'inv-2', customerEmail: 'staff@dealer.com', status: 'pending', billedTo: 'dealership', amount: 500 });
+    expect((await call(paymentController.createCustomerCheckoutSession, { user: { email: 'staff@dealer.com' }, body: { paymentId: 'inv-2' } })).error)
+      .toMatchObject({ statusCode: 403, message: expect.stringMatching(/dealership's SuprahPay page/) });
+    payments.findById.mockResolvedValueOnce({ _id: 'inv-1', customerEmail: 'pat@example.com', status: 'pending', billedTo: 'customer', amount: 650 });
+    expect((await call(paymentController.cancelMyPayment, { user: { email: 'pat@example.com' }, params: { id: 'inv-1' } })).error)
+      .toMatchObject({ statusCode: 400, message: expect.stringMatching(/booked shipment/) });
+  });
+
+  it("the dealership lists and pays only its own bills from Suprah", async () => {
+    payments.find.mockReturnValueOnce(q([]));
+    await call(paymentController.getSuprahBills, { user: { _id: 'staff-1' }, orgId: ORG_ID });
+    expect(payments.find.mock.calls[0][0]).toEqual({ organizationId: SUPRAH_BILLING_ORG, forOrganizationId: ORG_ID, billedTo: 'dealership' });
+
+    payments.findOne.mockResolvedValueOnce(null);
+    const { error } = await call(paymentController.paySuprahBill, { user: { _id: 'staff-1' }, orgId: ORG_ID, params: { id: '64b7f0c2a1b2c3d4e5f60b02' } });
+    expect(error).toMatchObject({ statusCode: 404 });
+    expect(payments.findOne.mock.calls[0][0]).toEqual({ _id: '64b7f0c2a1b2c3d4e5f60b02', organizationId: SUPRAH_BILLING_ORG, forOrganizationId: ORG_ID, billedTo: 'dealership' });
+  });
+});
+
+describe("Stripe's payment page: the dealership's name, cards only, and back to due when the customer returns", () => {
+  it("opens with the dealership's name and SuprahPay's look, cards only (no Link, bank or Klarna), in US dollars, as Payment started", async () => {
+    suprahPay();
+    payments.findById.mockResolvedValueOnce({ _id: 'pay-1', amount: 10, status: 'pending', organizationId: ORG_ID, customerEmail: 'pat@example.com', customerName: 'Pat', stripeCustomerId: 'cus_1' });
+    stripe.checkout.sessions.create.mockResolvedValueOnce({ id: 'cs_1', url: 'https://checkout.example/cs_1' });
+    payments.findOneAndUpdate.mockResolvedValueOnce({ _id: 'pay-1', status: 'pending' });
+    const { error } = await call(paymentController.createCustomerCheckoutSession, { user: { email: 'pat@example.com' }, body: { paymentId: 'pay-1' } });
+    expect(error).toBeUndefined();
+    const params = stripe.checkout.sessions.create.mock.calls[0][0];
+    expect(params.payment_method_types).toEqual(['card']);
+    expect(params.wallet_options).toEqual({ link: { display: 'never' } });
+    expect(params.adaptive_pricing).toEqual({ enabled: false });
+    expect(params.branding_settings).toEqual({ display_name: 'Action Auto Utah', button_color: '#16A34A', border_style: 'rounded', font_family: 'be_vietnam_pro' });
+    expect(params.custom_text.submit.message).toMatch(/^Secured by SuprahPay/);
+    expect(payments.findOneAndUpdate.mock.calls[0][1]).toEqual({ $set: { stripeCheckoutSessionId: 'cs_1', stripeCustomerId: 'cus_1', status: 'processing' } });
+  });
+
+  it("if Stripe refuses the page's look, the page still opens without it", async () => {
+    suprahPay();
+    payments.findById.mockResolvedValueOnce({ _id: 'pay-1', amount: 10, status: 'pending', organizationId: ORG_ID, customerEmail: 'pat@example.com', customerName: 'Pat', stripeCustomerId: 'cus_1' });
+    stripe.checkout.sessions.create
+      .mockRejectedValueOnce(Object.assign(new Error('Invalid branding'), { param: 'branding_settings[font_family]' }))
+      .mockResolvedValueOnce({ id: 'cs_2', url: 'https://checkout.example/cs_2' });
+    payments.findOneAndUpdate.mockResolvedValueOnce({ _id: 'pay-1', status: 'processing' });
+    const { error } = await call(paymentController.createCustomerCheckoutSession, { user: { email: 'pat@example.com' }, body: { paymentId: 'pay-1' } });
+    expect(error).toBeUndefined();
+    const retry = stripe.checkout.sessions.create.mock.calls[1][0];
+    expect(retry.branding_settings).toBeUndefined();
+    expect(retry.custom_text).toBeUndefined();
+    expect(retry.payment_method_types).toEqual(['card']);
+  });
+
+  it('back on SuprahPay: a Stripe page left unpaid goes back to due, a paid one is marked paid, a bank still processing stays', async () => {
+    payments.find.mockReturnValueOnce(q([
+      { _id: 'p-closed', stripeCheckoutSessionId: 'cs_closed' },
+      { _id: 'p-paid', stripeCheckoutSessionId: 'cs_paid' },
+      { _id: 'p-bank', stripeCheckoutSessionId: 'cs_old', stripePaymentIntentId: 'pi_bank' },
+    ]));
+    stripe.checkout.sessions.retrieve.mockImplementation((id: string) => Promise.resolve(
+      id === 'cs_paid' ? { id, payment_status: 'paid', payment_intent: 'pi_paid' } : { id, status: 'open', payment_status: 'unpaid' },
+    ));
+    stripe.paymentIntents.retrieve.mockResolvedValueOnce({ id: 'pi_bank', status: 'processing' });
+    payments.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    payments.findOneAndUpdate.mockResolvedValueOnce({ _id: 'p-paid', status: 'succeeded', organizationId: ORG_ID, amount: 20, customerName: 'Pat' });
+
+    // Back on SuprahPay: only their own "Payment started" invoices, never a dealership's bill.
+    const { res } = await call(paymentController.returnFromCheckout, { user: { email: 'Pat@Example.com' } });
+    expect(payments.find.mock.calls[0][0]).toEqual({
+      customerEmail: 'pat@example.com', status: 'processing', stripeCheckoutSessionId: { $exists: true, $ne: null }, billedTo: { $ne: 'dealership' },
+    });
+    expect(res.body.data).toEqual({ changed: 2 });
+    expect(payments.updateOne).toHaveBeenCalledTimes(1);
+    expect(payments.updateOne).toHaveBeenCalledWith({ _id: 'p-closed', status: 'processing' }, { $set: { status: 'pending' } });
+    expect(payments.findOneAndUpdate.mock.calls[0][0]).toMatchObject({ _id: 'p-paid' });
+  });
+});
+
+describe("batch 8: reading a load's billing from the database", () => {
+  it('never asks for "billing" and a field inside it together (the database refuses that: path collision)', () => {
+    const { BILLING_ALL_FIELDS } = jest.requireActual('../../src/services/loadBilling.service');
+    const RealLoad = jest.requireActual('../../src/models/Load.model').default;
+    for (const select of [
+      `organizationId loadNumber status quoteId createdBy pricing ${BILLING_ALL_FIELDS}`,
+      `organizationId loadNumber status createdBy vehicles.year vehicles.make vehicles.model ${BILLING_ALL_FIELDS}`,
+      `organizationId status ${BILLING_ALL_FIELDS}`,
+      BILLING_ALL_FIELDS,
+    ]) {
+      const query = RealLoad.findById('64b7f0c2a1b2c3d4e5f60a01').select(select);
+      query._applyPaths();
+      const paths = Object.keys(query._fields);
+      for (const path of paths) {
+        expect(paths.filter((other: string) => other.startsWith(`${path}.`))).toEqual([]);
+      }
+      // The hidden customer details and the invoice are both read.
+      expect(paths).toEqual(expect.arrayContaining([
+        'billing.customerEmail', 'billing.shippingPrice', 'billing.invoiceId', 'billing.method',
+        'billing.vehiclePrice', 'billing.vehicleTaxRate', 'billing.vehicleInvoiceId',
+      ]));
+    }
+  });
+});
+
+describe('batch 8 hardening (2026-11-26)', () => {
+  it("'I wasn't paid' tells the dispatcher and admins once, however often it's pressed", async () => {
+    loads.findOne.mockReturnValueOnce(q({
+      _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-100', status: 'Delivered', assignedDriverId: 'driver-1', dispatchOwnerId: 'disp-1',
+      pricing: { isPricingEnabled: true, carrierPayAmount: 500 }, billing: { billTo: 'customer', method: 'cod', cashNotReceivedAt: new Date() },
+    }));
+    const { res, error } = await call(confirmCashAsDriver, { user: { _id: 'driver-1', name: 'Dee' }, params: { id: LOAD_ID }, body: { received: false } });
+    expect(error).toBeUndefined();
+    expect(res.body.message).toMatch(/already told/);
+    expect(loads.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(notifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('an older load without its maker is recorded as made by whoever chose who pays', async () => {
+    suprahPay();
+    loads.findById.mockReturnValueOnce(q({
+      _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-300', status: 'Delivered',
+      pricing: { isPricingEnabled: true, carrierPayAmount: 500 }, billing: { billTo: 'dealership', method: 'suprahpay', decidedBy: 'admin-9' },
+    }));
+    users.findById.mockReturnValue(q({ email: 'admin@dealer.com' }));
+    payments.create.mockImplementation((doc: any) => Promise.resolve({ _id: 'inv-3', ...doc }));
+    loads.findOneAndUpdate.mockReturnValueOnce(q({ _id: LOAD_ID }));
+    await issueLoadInvoice(LOAD_ID);
+    expect(users.findById).toHaveBeenCalledWith('admin-9');
+    expect(payments.create).toHaveBeenCalledWith(expect.objectContaining({ createdBy: 'admin-9', customerEmail: 'admin@dealer.com', amount: 500 }));
+  });
+
+  it("if Stripe refuses the cards-only or US-dollar setting, the page still opens (cards still work) and it's logged", async () => {
+    suprahPay();
+    payments.findById.mockResolvedValueOnce({ _id: 'pay-1', amount: 10, status: 'pending', organizationId: ORG_ID, customerEmail: 'pat@example.com', customerName: 'Pat', stripeCustomerId: 'cus_1' });
+    stripe.checkout.sessions.create
+      .mockRejectedValueOnce(Object.assign(new Error('Unknown parameter'), { param: 'wallet_options' }))
+      .mockResolvedValueOnce({ id: 'cs_3', url: 'https://checkout.example/cs_3' });
+    payments.findOneAndUpdate.mockResolvedValueOnce({ _id: 'pay-1', status: 'processing' });
+    const { error } = await call(paymentController.createCustomerCheckoutSession, { user: { email: 'pat@example.com' }, body: { paymentId: 'pay-1' } });
+    expect(error).toBeUndefined();
+    const retry = stripe.checkout.sessions.create.mock.calls[1][0];
+    expect(retry.wallet_options).toBeUndefined();
+    expect(retry.payment_method_types).toEqual(['card']);
+    expect(retry.adaptive_pricing).toEqual({ enabled: false });
+  });
+
+  it('a payment page error that is not about a setting still stops (nothing is hidden)', async () => {
+    suprahPay();
+    payments.findById.mockResolvedValueOnce({ _id: 'pay-1', amount: 10, status: 'pending', organizationId: ORG_ID, customerEmail: 'pat@example.com', customerName: 'Pat', stripeCustomerId: 'cus_1' });
+    stripe.checkout.sessions.create.mockRejectedValueOnce(Object.assign(new Error('Stripe is down'), { type: 'StripeAPIError' }));
+    const { error } = await call(paymentController.createCustomerCheckoutSession, { user: { email: 'pat@example.com' }, body: { paymentId: 'pay-1' } });
+    expect(error).toBeTruthy();
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a car sold to the person receiving it (2026-11-26)', () => {
+  const priced = { isPricingEnabled: true, carrierPayAmount: 500 };
+  const buyer = { customerName: 'Pat Lee', customerEmail: 'Pat@Example.com' };
+  const sold = { soldToReceiver: true, defaultTaxRate: 7.25 };
+
+  it("needs the car's price, and the buyer's name and email even when the dealership pays the shipping", () => {
+    expect(billingFromInput({ billTo: 'dealership' }, priced, sold)).toMatchObject({ ok: false, message: expect.stringMatching(/car's price/) });
+    expect(billingFromInput({ billTo: 'dealership', vehicle: { price: 18500 } }, priced, sold))
+      .toMatchObject({ ok: false, message: expect.stringMatching(/customer's name/) });
+    expect(billingFromInput({ billTo: 'dealership', ...buyer, vehicle: { price: '18500.00' } }, priced, sold)).toEqual({
+      ok: true,
+      billing: { billTo: 'dealership', method: 'suprahpay', customerName: 'Pat Lee', customerEmail: 'pat@example.com', vehiclePrice: 18500, vehicleTaxRate: 7.25 },
+    });
+    expect(billingFromInput({ billTo: 'dealership', ...buyer, vehicle: { price: 18500, taxRate: 101 } }, priced, sold))
+      .toMatchObject({ ok: false, message: expect.stringMatching(/sales tax/) });
+    expect(billingFromInput({ billTo: 'dealership', ...buyer, vehicle: { price: 18500.555 } }, priced, sold).ok).toBe(false);
+  });
+
+  it('cash on delivery for the shipping, and the car still invoiced (tax can be 0)', () => {
+    expect(billingFromInput({ billTo: 'customer', method: 'cod', ...buyer, vehicle: { price: 18500, taxRate: '0' } }, priced, sold)).toEqual({
+      ok: true,
+      billing: { billTo: 'customer', method: 'cod', customerName: 'Pat Lee', customerEmail: 'pat@example.com', vehiclePrice: 18500, vehicleTaxRate: 0 },
+    });
+  });
+
+  it("isn't asked when the car isn't sold to the receiver, or when pricing is skipped", () => {
+    expect(billingFromInput({ billTo: 'dealership', vehicle: { price: 18500 } }, priced)).toEqual({ ok: true, billing: { billTo: 'dealership', method: 'suprahpay' } });
+    expect(billingFromInput({ billTo: 'dealership', vehicle: { price: 18500 } }, { isPricingEnabled: false }, sold)).toEqual({ ok: true, billing: { outside: true } });
+  });
+
+  it("the car invoice's amounts: price plus sales tax, rounded to the cent", () => {
+    expect(vehicleInvoiceTerms({ vehiclePrice: 18500, vehicleTaxRate: 7.25 })).toEqual({ subtotal: 18500, taxRate: 7.25, taxAmount: 1341.25, amount: 19841.25 });
+    expect(vehicleInvoiceTerms({ vehiclePrice: 9999.99, vehicleTaxRate: 0 })).toEqual({ subtotal: 9999.99, taxRate: 0, taxAmount: 0, amount: 9999.99 });
+    expect(vehicleInvoiceTerms({})).toBeNull();
+  });
+
+  const soldLoad = (billing: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => ({
+    _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-100', status: 'Posted', createdBy: 'staff-1',
+    vehicles: [{ year: 2021, make: 'Toyota', model: 'Camry' }],
+    pricing: priced,
+    billing: { billTo: 'customer', method: 'cod', customerName: 'Pat Lee', customerEmail: 'pat@example.com', vehiclePrice: 18500, vehicleTaxRate: 7.25, ...billing },
+    ...extra,
+  });
+
+  it("the dealership's own invoice: the car plus tax, Suprah's usual fee, linked to the load, and the customer is told", async () => {
+    suprahPay(true, { feePercent: 3, maxPaymentAmount: 50000 });
+    loads.findById.mockReturnValueOnce(q(soldLoad()));
+    payments.create.mockImplementation((doc: any) => Promise.resolve({ _id: 'car-1', ...doc }));
+    loads.findOneAndUpdate.mockReturnValueOnce(q({ _id: LOAD_ID }));
+    users.findOne.mockReturnValueOnce(q({ _id: 'cust-1' }));
+
+    const invoice: any = await issueVehicleInvoice(LOAD_ID);
+    expect(invoice._id).toBe('car-1');
+    const doc = payments.create.mock.calls[0][0];
+    expect(doc).toMatchObject({
+      organizationId: ORG_ID, loadId: LOAD_ID, purpose: 'vehicle', suprahFeePercent: 3, status: 'pending', createdBy: 'staff-1',
+      customerName: 'Pat Lee', customerEmail: 'pat@example.com',
+      subtotal: 18500, taxRate: 7.25, taxAmount: 1341.25, amount: 19841.25,
+      description: '2021 Toyota Camry (load L-100)',
+      lineItems: [{ label: '2021 Toyota Camry', kind: 'product', quantity: 1, unitPrice: 18500, lineTotal: 18500 }],
+    });
+    // The dealership's money, not one of Suprah's shipping bills.
+    expect(doc.billedTo).toBeUndefined();
+    expect(doc.forOrganizationId).toBeUndefined();
+    expect(loads.findOneAndUpdate.mock.calls[0][0]).toEqual({ _id: LOAD_ID, 'billing.vehicleInvoiceId': null });
+    expect(safeCreateNotification).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'cust-1', type: 'payment_request', title: 'SuprahPay invoice from Action Auto Utah',
+      message: 'Action Auto Utah sent you an invoice of $19,841.25 for your vehicle (2021 Toyota Camry). Open SuprahPay to pay it.',
+    }));
+  });
+
+  it("is sent once; one staff cancelled can be sent again; nothing goes out over SuprahPay's limit", async () => {
+    suprahPay(true, { feePercent: 3, maxPaymentAmount: 50000 });
+    loads.findById.mockReturnValueOnce(q(soldLoad({ vehicleInvoiceId: 'car-1' })));
+    payments.findById.mockReturnValueOnce(q({ _id: 'car-1', status: 'pending' }));
+    expect(await issueVehicleInvoice(LOAD_ID)).toMatchObject({ _id: 'car-1' });
+    expect(payments.create).not.toHaveBeenCalled();
+
+    loads.findById.mockReturnValueOnce(q(soldLoad({ vehicleInvoiceId: 'car-1' })));
+    payments.findById.mockReturnValueOnce(q({ _id: 'car-1', status: 'cancelled' }));
+    payments.create.mockImplementation((doc: any) => Promise.resolve({ _id: 'car-2', ...doc }));
+    loads.findOneAndUpdate.mockReturnValueOnce(q({ _id: LOAD_ID }));
+    users.findOne.mockReturnValueOnce(q(null));
+    expect(await issueVehicleInvoice(LOAD_ID)).toMatchObject({ _id: 'car-2' });
+    expect(loads.findOneAndUpdate.mock.calls[0][0]).toEqual({ _id: LOAD_ID, 'billing.vehicleInvoiceId': 'car-1' });
+
+    payments.create.mockClear();
+    suprahPay(true, { feePercent: 3, maxPaymentAmount: 10000 });
+    clearPlatformSettingsCache();
+    loads.findById.mockReturnValueOnce(q(soldLoad()));
+    await expect(issueVehicleInvoice(LOAD_ID)).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/car's invoice can't be sent/) });
+    expect(payments.create).not.toHaveBeenCalled();
+  });
+
+  it("staff can send it again only for their own load that sells its car", async () => {
+    suprahPay();
+    loads.findById.mockReturnValueOnce(q(soldLoad({}, { organizationId: 'another-dealer' })));
+    await expect(sendVehicleInvoice(LOAD_ID, ORG_ID, 'staff-1')).rejects.toMatchObject({ statusCode: 404 });
+    loads.findById.mockReturnValueOnce(q(soldLoad({ vehiclePrice: undefined })));
+    await expect(sendVehicleInvoice(LOAD_ID, ORG_ID, 'staff-1')).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/no car invoice/) });
+  });
+
+  it("changing who pays for shipping keeps the car sale and its buyer", async () => {
+    suprahPay();
+    loads.findById.mockReturnValue(q(soldLoad({ billTo: 'dealership', method: 'suprahpay', vehicleTaxRate: 0, invoiceId: 'inv-2', vehicleInvoiceId: 'car-1' })));
+    payments.findById.mockReturnValue(q({ _id: 'inv-2', status: 'pending', billedTo: 'dealership', amount: 500 }));
+    loads.updateOne.mockResolvedValue({});
+    await setLoadBilling(LOAD_ID, ORG_ID, { billTo: 'dealership' }, 'staff-1');
+    const [, update] = loads.updateOne.mock.calls[0];
+    expect(update.$set).toMatchObject({ 'billing.billTo': 'dealership', 'billing.customerName': 'Pat Lee', 'billing.customerEmail': 'pat@example.com' });
+    expect(update.$unset).toEqual({ 'billing.shippingPrice': '' });
+    expect(payments.create).not.toHaveBeenCalled();
+  });
+
+  it("a cancelled load leaves its open car invoice for the dealership to decide, and says so", async () => {
+    payments.findById.mockReturnValueOnce(q({ _id: 'car-1', status: 'pending', invoiceNumber: 'INV-12', amount: 19841.25 }));
+    await afterLoadCancelled({ _id: LOAD_ID, organizationId: ORG_ID, loadNumber: 'L-100', billing: { vehicleInvoiceId: 'car-1' } });
+    expect(payments.updateOne).not.toHaveBeenCalled();
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(
+      ORG_ID, 'general', "Cancelled load's car invoice is still open",
+      expect.stringContaining('(INV-12, $19,841.25) is still open'), expect.anything(),
+    );
+  });
+});
