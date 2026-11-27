@@ -178,7 +178,7 @@ describe('Real-DB: lead intake lifecycle (local MongoDB only)', () => {
   it.each([
     { kind: 'sms' as const, channel: 'sms' as const },
     { kind: 'email_reply' as const, channel: 'email' as const },
-  ])('$kind customer replies persist notices only for the assigned owner', async ({ kind, channel }) => {
+  ])('$kind customer replies go to the assigned owner, or to the admins when nobody is assigned and no team is set up', async ({ kind, channel }) => {
     for (const assignedTo of [ids.rep, null]) {
       const phone = nextPhone();
       const email = nextEmail();
@@ -189,8 +189,14 @@ describe('Real-DB: lead intake lifecycle (local MongoDB only)', () => {
       if (result.status !== 'associated') throw new Error('Expected the customer reply to use the existing lead');
       expect(result).toMatchObject({ status: 'associated', created: false, leadId: String(lead._id) });
       const notices = await Notification.find({ organizationId: ORG, 'metadata.inquiryId': result.inquiryId }).lean();
-      expect(notices.map(notice => String(notice.userId))).toEqual(assignedTo ? [String(assignedTo)] : []);
-      if (assignedTo) expect(notices[0].type).toBe('lead_new_inquiry');
+      const people = notices.map(notice => String(notice.userId));
+      if (assignedTo) {
+        expect(people).toEqual([String(assignedTo)]);
+      } else {
+        expect(people).toEqual(expect.arrayContaining([String(ids.owner), String(ids.crmAdmin)]));
+        expect(people).not.toContain(String(ids.rep));
+      }
+      expect(notices.every(notice => notice.type === 'lead_new_inquiry')).toBe(true);
     }
   });
 

@@ -184,14 +184,40 @@ describe('Real-DB: who gets a lead notice (local test DB only)', () => {
     expect(mockNotifyUsers).not.toHaveBeenCalled();
   });
 
-  it('customer replies never fall back to tagged teams, admins, stale owners or the ringing team', async () => {
-    for (const leadId of [openLead, quietLead, goneRepLead]) {
-      const before = await notesOf(leadId);
-      expect(await notifyLeadPeople(notice('lead_message', {
-        leadId, ownerIds: [sam], ringTeamIds: [String(fran)], topicText: 'Can I get financing?',
-      }))).toBe('nobody');
-      expect(await notesOf(leadId)).toEqual(before);
-    }
+  it('a customer reply on an unassigned lead goes to the team already tagged on it, never to a stale owner or the ringing team, with no new note', async () => {
+    const before = await notesOf(openLead);
+    expect(await notifyLeadPeople(notice('lead_message', {
+      leadId: openLead, ownerIds: [sam], ringTeamIds: [String(fran)], topicText: 'Can I get financing?',
+    }))).toBe('team');
+    expect(mockNotifyUsers).toHaveBeenCalledTimes(1);
+    expect(mockNotifyUsers).toHaveBeenCalledWith([String(oliveCrm)], ORG, 'lead_message', 'Title', 'Message', expect.any(Object));
+    expect(await notesOf(openLead)).toEqual(before);
+    expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('a customer reply on a lead nobody was tagged for goes to the topic or fallback team, without adding a note', async () => {
+    expect(await notifyLeadPeople(notice('lead_message', {
+      leadId: quietLead, ownerIds: [sam], ringTeamIds: [String(sam)], topicText: 'Can I get financing?',
+    }))).toBe('team');
+    expect(mockNotifyUsers).toHaveBeenCalledWith([String(fran)], ORG, 'lead_message', 'Title', 'Message', expect.any(Object));
+    expect(await notesOf(quietLead)).toHaveLength(0);
+    jest.clearAllMocks();
+    expect(await notifyLeadPeople(notice('lead_message', { leadId: goneRepLead, topicText: 'Hello?' }))).toBe('team');
+    expect(mockNotifyUsers).toHaveBeenCalledWith([String(fran)], ORG, 'lead_message', 'Title', 'Message', expect.any(Object));
+    expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('a customer reply on an unassigned lead goes to admins and managers when no team is set up', async () => {
+    expect(await notifyLeadPeople(notice('lead_message', { organizationId: BARE, leadId: bareLead, topicText: 'Still there?' }))).toBe('admins');
+    expect(mockNotifyOrgAdmins).toHaveBeenCalledWith(BARE, 'lead_message', 'Title', 'Message', { tag: 'lead_message' });
+    expect(mockNotifyUsers).not.toHaveBeenCalled();
+    expect(await notesOf(bareLead)).toHaveLength(0);
+  });
+
+  it('a customer reply on an unassigned card in Others reaches nobody', async () => {
+    const othersLead = new mongoose.Types.ObjectId();
+    await Lead.collection.insertOne({ _id: othersLead, organizationId: orgId, createdBy: mary, status: 'Not a Lead', source: 'Email Inquiry', channel: 'email', firstName: 'Vendor', createdAt: new Date(), updatedAt: new Date() } as any);
+    expect(await notifyLeadPeople(notice('lead_message', { leadId: othersLead, topicText: 'Our new pricing sheet' }))).toBe('nobody');
     expect(mockNotifyUsers).not.toHaveBeenCalled();
     expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
   });
@@ -212,8 +238,9 @@ describe('Real-DB: who gets a lead notice (local test DB only)', () => {
       leadId: assignedLead, assignedOwnerOnly: true, ownerIds: [sam],
     }))).toBe('owner');
     expect(mockNotifyUsers).toHaveBeenLastCalledWith([String(maryCrm)], ORG, 'lead_new_inquiry', 'Title', 'Message', expect.any(Object));
-    expect(await notifyLeadPeople(notice('lead_new_inquiry', { leadId: quietLead, assignedOwnerOnly: true }))).toBe('nobody');
-    expect(mockNotifyUsers).toHaveBeenCalledTimes(1);
+    expect(await notifyLeadPeople(notice('lead_new_inquiry', { leadId: quietLead, assignedOwnerOnly: true }))).toBe('team');
+    expect(mockNotifyUsers).toHaveBeenLastCalledWith([String(fran)], ORG, 'lead_new_inquiry', 'Title', 'Message', expect.any(Object));
+    expect(await notesOf(quietLead)).toHaveLength(0);
     expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
   });
 

@@ -3,6 +3,41 @@ import { extractADFFromBody, isADFContent, parseADF } from './adfParser';
 
 const HTML_TAG = /<\/?(?:br|div|p|b|strong|em|i|u|span|table|tbody|thead|tr|td|th|font|a|html|body|head|style|li|ul|ol|h[1-6]|img|center|hr)\b[^>]*>/gi;
 
+const NAMED_ENTITIES: Record<string, string> = {
+  nbsp: ' ',
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  rsquo: '’',
+  lsquo: '‘',
+  rdquo: '”',
+  ldquo: '“',
+  ndash: '–',
+  mdash: '—',
+  hellip: '…',
+  bull: '•',
+  middot: '·',
+  copy: '©',
+  reg: '®',
+  trade: '™',
+  deg: '°',
+};
+
+const ENTITY = /&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]{2,8});/g;
+
+export function decodeEntities(text: string): string {
+  return text.replace(ENTITY, (match, entity: string) => {
+    if (entity[0] === '#') {
+      const hex = entity[1] === 'x' || entity[1] === 'X';
+      const code = hex ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
+    }
+    return NAMED_ENTITIES[entity.toLowerCase()] ?? match;
+  });
+}
+
 function looksLikeHtml(text: string): boolean {
   return (text.match(HTML_TAG) || []).length >= 2;
 }
@@ -36,7 +71,7 @@ export async function readableEmailText(text: string): Promise<string> {
   if (!value.trim()) return value;
   if (isADFContent(value)) {
     const summary = await adfSummary(value);
-    if (summary) return summary;
+    if (summary) return decodeEntities(summary);
   }
-  return looksLikeHtml(value) ? htmlToText(value) : value;
+  return decodeEntities(looksLikeHtml(value) ? htmlToText(value) : value);
 }
